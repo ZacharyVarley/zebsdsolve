@@ -10,6 +10,7 @@ A failing cell (each tutorial ends with checks against known answers) fails the 
 Needs jupytext, nbconvert, ipykernel, matplotlib and scipy.
 """
 import html
+import os
 import sys
 import time
 from pathlib import Path
@@ -76,6 +77,8 @@ def main():
     for src in sources:
         t = time.perf_counter()
         nb = jupytext.read(src)
+        # the notebooks run in OUTDIR, which need not be inside the repository: say where its data is
+        os.environ.setdefault("ZEBSDSOLVE_TESTDATA", str(ROOT / "testdata"))
         ExecutePreprocessor(timeout=900, kernel_name="python3").preprocess(nb, {"metadata": {"path": str(out)}})
         nbformat.write(nb, out / f"{src.stem}.ipynb")
         page, _ = HTMLExporter().from_notebook_node(nb)

@@ -4,7 +4,7 @@ internal compiler error, some drivers (Metal on GitHub's M1 runners) fail every 
 the same process. Also counts the storage buffers each kernel binds: WebGPU guarantees only 8
 per shader stage. Exit status 1 if any kernel fails either check.
 
-    python tests/check_shaders.py
+    python tests/check_shaders.py        (installed wheel, or a checkout after `zig build`)
 """
 import re
 import subprocess
@@ -12,7 +12,11 @@ import sys
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "python"))
+# the installed package when there is one (CI tests the wheel), else the checkout's
+try:
+    import zebsdsolve  # noqa: F401
+except ImportError:
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "python"))
 
 
 def entries(code):

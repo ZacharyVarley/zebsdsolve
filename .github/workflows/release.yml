@@ -132,7 +132,7 @@ jobs:
       - name: Python API on the GPU
         if: matrix.os == 'macos-14'
         shell: bash
-        run: cp tests/test_api.py "$RUNNER_TEMP/" && cd "$RUNNER_TEMP" && "$PY" test_api.py
+        run: cp tests/test_api.py "$RUNNER_TEMP/" && cd "$RUNNER_TEMP" && ZEBSDSOLVE_TESTDATA="$GITHUB_WORKSPACE/testdata" "$PY" test_api.py
 
       - name: Web app in headless Chrome (WebGPU), recording the pipelines it compiles
         if: matrix.os == 'macos-14'
