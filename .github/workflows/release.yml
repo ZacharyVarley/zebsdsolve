@@ -1,0 +1,247 @@
+name: release
+
+# A version tag (v0.1.0) releases: all six wheels and the static site are built on Linux (Zig
+# cross-compiles every platform), the wheels are installed and tested on Linux, Windows and macOS
+# (M1: every shader, the Python API, the tutorials and the web app on a GPU), then published to
+# PyPI (trusted publishing, no token), attached with the site and the executed tutorials to a
+# GitHub Release, and deployed to GitHub Pages (the app at zacharyvarley.github.io/zebsdsolve/ with the
+# pipelines the M1's browser run compiled as its first-visit warm-up, the tutorials under
+# tutorials/). Run by hand (workflow_dispatch) it builds and tests only.
+#
+# Before the first release: on PyPI, add a trusted publisher for this repository with workflow
+# "release.yml" and environment "pypi"; in the repository settings, create the environment "pypi",
+# set Pages' source to GitHub Actions and let tags v* deploy to the environment "github-pages".
+# The tag must equal __version__ in python/zebsdsolve/__init__.py (and src/engine.zig's version).
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      ZIG: zig
+      PYTHONUNBUFFERED: "1"
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "22"
+
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.16.0
+
+      - name: Cache wgpu-native
+        uses: actions/cache@v6
+        with:
+          path: .deps
+          key: wgpu-all-${{ hashFiles('scripts/wgpu_native.sha256') }}
+
+      - name: Fetch wgpu-native for every platform (checksummed)
+        run: python scripts/fetch_deps.py --no-zig --all
+
+      - name: The tag is the package version
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          v=$(python -c "import sys; sys.path.insert(0, 'scripts'); import build_wheels; print(build_wheels.VERSION)")
+          test "v$v" = "$GITHUB_REF_NAME" || { echo "tag $GITHUB_REF_NAME, package version $v"; exit 1; }
+
+      - name: Wasm and site
+        run: |
+          $ZIG build wasm -Dwgpu=.deps/wgpu-native/manylinux_2_28_x86_64
+          node scripts/build_web.mjs
+
+      - name: Wheels (all six platforms)
+        timeout-minutes: 30
+        run: python scripts/build_wheels.py
+
+      - name: Arrange the artifacts
+        run: |
+          mkdir -p out/wheels
+          mv dist/*.whl out/wheels/
+          v=$(python -c "import sys; sys.path.insert(0, 'scripts'); import build_wheels; print(build_wheels.VERSION)")
+          (cd dist/web && zip -qr "$GITHUB_WORKSPACE/out/zebsdsolve-web-$v.zip" .)
+          cp -r dist/web out/web
+          ls -la out out/wheels
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: release
+          path: out
+          retention-days: 14
+
+  test:
+    needs: build
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-14]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    env:
+      PYTHONUNBUFFERED: "1"
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "22"
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: release
+          path: out
+
+      - name: Install the wheel for this platform
+        shell: bash
+        run: |
+          python -m venv venv
+          if [ -d venv/Scripts ]; then PY=venv/Scripts/python.exe; else PY=venv/bin/python; fi  # Windows | POSIX
+          echo "PY=$PWD/$PY" >> "$GITHUB_ENV"
+          # dependencies from PyPI first, then zebsdsolve from this build only
+          $PY -m pip install --quiet numpy
+          $PY -m pip install --quiet --no-index --find-links out/wheels zebsdsolve
+          cd "$RUNNER_TEMP" && "$GITHUB_WORKSPACE/$PY" -c "import zebsdsolve; zebsdsolve._load(); print('zebsdsolve', zebsdsolve.__version__)"
+
+      - name: App launcher
+        shell: bash
+        run: cp tests/test_app.py "$RUNNER_TEMP/" && cd "$RUNNER_TEMP" && "$PY" test_app.py
+
+      - name: Every shader builds on this GPU
+        if: matrix.os == 'macos-14'
+        shell: bash
+        run: |
+          "$PY" tests/check_shaders.py
+
+      - name: Python API on the GPU
+        if: matrix.os == 'macos-14'
+        shell: bash
+        run: cp tests/test_api.py "$RUNNER_TEMP/" && cd "$RUNNER_TEMP" && "$PY" test_api.py
+
+      - name: Web app in headless Chrome (WebGPU), recording the pipelines it compiles
+        if: matrix.os == 'macos-14'
+        run: |
+          mkdir -p "$RUNNER_TEMP/pipelines"
+          node tests/test_web.mjs --dir out/web --save-pipelines "$RUNNER_TEMP/pipelines/pipelines.json"
+
+      - name: Tutorials (examples/ run as notebooks on the installed wheel)
+        if: matrix.os == 'macos-14'
+        shell: bash
+        run: |
+          "$PY" -m pip install --quiet jupytext nbconvert ipykernel matplotlib scipy
+          "$PY" scripts/run_tutorials.py "$RUNNER_TEMP/tutorials"
+
+      - uses: actions/upload-artifact@v7
+        if: matrix.os == 'macos-14'
+        with:
+          name: tutorials
+          path: ${{ runner.temp }}/tutorials
+
+      - uses: actions/upload-artifact@v7
+        if: matrix.os == 'macos-14'
+        with:
+          name: pipelines
+          path: ${{ runner.temp }}/pipelines
+
+  pypi:
+    needs: test
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          name: release
+          path: out
+
+      - uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: out/wheels
+
+  pages:
+    # the site: the app at zacharyvarley.github.io/zebsdsolve/, the executed tutorials under tutorials/
+    # (one-time: Settings → Pages → Source: GitHub Actions)
+    needs: test
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    concurrency:
+      group: pages
+      cancel-in-progress: false
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          name: release
+          path: out
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: tutorials
+          path: tutorials
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: pipelines
+          path: pipelines
+
+      - name: Assemble the site
+        run: |
+          mkdir -p site/tutorials
+          cp -r out/web/. site/
+          cp tutorials/* site/tutorials/
+          cp pipelines/pipelines.json site/zebsdsolve/  # the first-visit warm-up (web/zebsdsolve.js)
+
+      - uses: actions/upload-pages-artifact@v5
+        with:
+          path: site
+
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v5
+
+  github-release:
+    needs: test
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          name: release
+          path: out
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: tutorials
+          path: tutorials
+
+      - name: Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          (cd tutorials && zip -q "../zebsdsolve-tutorials-$GITHUB_REF_NAME.zip" *.html *.ipynb)
+          gh release create "$GITHUB_REF_NAME" out/wheels/*.whl out/zebsdsolve-web-*.zip tutorials/*.ipynb "zebsdsolve-tutorials-$GITHUB_REF_NAME.zip" --repo "$GITHUB_REPOSITORY" --title "zebsdsolve $GITHUB_REF_NAME" --generate-notes

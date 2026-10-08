@@ -1,0 +1,34 @@
+[project]
+name = "zebsdsolve"
+dynamic = ["version"]  # python/zebsdsolve/__init__.py __version__ (src/engine.zig's version must equal it)
+description = "EBSD pattern-centre fitting and indexing on the GPU (Zig + WGSL over WebGPU), with its web app"
+readme = "README.md"
+requires-python = ">=3.10"
+license = "MIT"
+license-files = ["LICENSE", "scripts/licenses/wgpu-native-LICENSE.MIT"]
+authors = [{ name = "Zachary Varley" }]
+keywords = ["EBSD", "electron backscatter diffraction", "indexing", "pattern center", "spherical harmonics", "webgpu", "gpu", "microscopy"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Operating System :: Microsoft :: Windows",
+    "Operating System :: POSIX :: Linux",
+    "Operating System :: MacOS",
+    "Intended Audience :: Science/Research",
+    "Topic :: Scientific/Engineering :: Physics",
+]
+dependencies = ["numpy"]
+
+[project.urls]
+Source = "https://github.com/ZacharyVarley/zebsdsolve"
+Issues = "https://github.com/ZacharyVarley/zebsdsolve/issues"
+
+[project.scripts]
+zebsdsolve = "zebsdsolve.app:main"
+
+# `pip install .` builds the wheel for this machine: scripts/build_backend.py runs
+# scripts/build_wheels.py (Zig compiles the library and the wasm; release wheels for every
+# platform come from build_wheels.py directly). Both read the metadata above.
+[build-system]
+requires = ["tomli; python_version < '3.11'"]
+build-backend = "build_backend"
+backend-path = ["scripts"]

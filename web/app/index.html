@@ -1,0 +1,271 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>zebsdsolve · EBSD pattern centre and indexing</title>
+  <link rel="stylesheet" href="./css/app.css">
+  <link rel="modulepreload" href="./zebsdsolve/zebsdsolve.js">
+</head>
+<body>
+  <svg width="0" height="0" style="position:absolute" aria-hidden="true">
+    <symbol id="i-logo" viewBox="0 0 20 20"><circle cx="10" cy="10" r="7.2" fill="none" stroke="currentColor" stroke-width="1.5"/><path d="M3.5 13.2 16.5 6.8M5 5.5l10 9M10 2.8v14.4" fill="none" stroke="currentColor" stroke-width="1.1" stroke-linecap="round"/></symbol>
+    <symbol id="i-open" viewBox="0 0 16 16"><path d="M2.5 5.5V12a1 1 0 0 0 1 1h9a1 1 0 0 0 1-1V6.5a1 1 0 0 0-1-1H8L6.5 3.5h-3a1 1 0 0 0-1 1z" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"/></symbol>
+    <symbol id="i-play" viewBox="0 0 12 12"><path d="M3 1.8v8.4c0 .4.4.6.7.4l6.6-4.2c.3-.2.3-.6 0-.8L3.7 1.4c-.3-.2-.7 0-.7.4z" fill="currentColor"/></symbol>
+    <symbol id="i-stop" viewBox="0 0 12 12"><rect x="2.5" y="2.5" width="7" height="7" rx="1" fill="currentColor"/></symbol>
+    <symbol id="i-x" viewBox="0 0 12 12"><path d="M3 3l6 6M9 3l-6 6" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></symbol>
+    <symbol id="i-down" viewBox="0 0 16 16"><path d="M8 2.5v8M4.5 7.5 8 11l3.5-3.5M3 13.5h10" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+  </svg>
+
+  <div class="app" id="app" data-busy="0" data-scan="0">
+    <header class="topbar">
+      <span class="brand"><svg><use href="#i-logo"/></svg>zebsdsolve</span>
+      <span class="scan-meta" id="scan-meta">no scan open</span>
+      <span class="grow"></span>
+      <span class="adapter" id="adapter" title="GPU adapter"></span>
+    </header>
+
+    <aside class="rail" id="rail">
+      <nav class="tabs" id="tabs" role="tablist" aria-label="Steps">
+        <button type="button" role="tab" id="tab-data" data-tab="data" aria-selected="true"><span class="step">1</span>Data</button>
+        <button type="button" role="tab" id="tab-patterns" data-tab="patterns" aria-selected="false"><span class="step">2</span>Patterns</button>
+        <button type="button" role="tab" id="tab-geometry" data-tab="geometry" aria-selected="false"><span class="step">3</span>Geometry</button>
+        <button type="button" role="tab" id="tab-index" data-tab="index" aria-selected="false"><span class="step">4</span>Index</button>
+      </nav>
+
+      <div class="panels" id="panels">
+        <section class="panel" data-tab="data" role="tabpanel" aria-labelledby="tab-data">
+          <div class="row">
+            <button type="button" class="primary" id="btn-open"><svg><use href="#i-open"/></svg>Open scan…</button>
+            <button type="button" id="btn-example" title="A small nickel scan (55 × 75 patterns of 60 × 60, kikuchipy, CC BY 4.0) with its master pattern">Example</button>
+            <input type="file" id="file-scan" multiple hidden>
+          </div>
+          <dl class="facts" id="scan-facts"></dl>
+          <p class="hint">h5ebsd (kikuchipy, Bruker, EDAX, Oxford .h5oina), EDAX .up1 / .up2, Oxford .ebsp, NORDIF Pattern.dat with Setting.txt. Files are read in place, in pieces; nothing is uploaded. Or drop them anywhere, with a project .json saved under Index to bring its settings and geometry back.</p>
+          <h4>phases</h4>
+          <div class="row">
+            <button type="button" class="primary" id="btn-phase"><svg><use href="#i-open"/></svg>Add master pattern…</button>
+            <input type="file" id="file-phase" multiple hidden accept=".npz,.h5,.hdf5">
+          </div>
+          <ul class="phases" id="phases"></ul>
+          <p class="hint">One master pattern per candidate phase: ebsdsim .npz or EMsoft .h5. Select one to see it under <i>master</i>.</p>
+          <details class="sub" id="toy">
+            <summary>make a toy scan</summary>
+            <p class="hint">A scan with a known answer, from the master patterns above: the map is cut into grains, each with an orientation and a phase drawn at random, and every cell's pattern is simulated under the geometry as it stands (Geometry), laid on a background and counted as electrons. That geometry is the scan's true one: set it first, make the scan, then move it and see what the fits bring back; their readouts say how far from the truth they land. A seed is a scan: the same seed and settings make the same one.</p>
+            <div class="fields" data-group="toy"></div>
+            <div class="row">
+              <button type="button" class="primary act" id="btn-toy" disabled title="Needs at least one master pattern">Make toy scan</button>
+            </div>
+          </details>
+          <details class="sub">
+            <summary>shape of a raw stream</summary>
+            <p class="hint">For files that do not record the map or pattern shape. Set these, then open the file again. 0: as the file says.</p>
+            <div class="fields" data-group="scan"></div>
+          </details>
+        </section>
+
+        <section class="panel" data-tab="patterns" role="tabpanel" aria-labelledby="tab-patterns" hidden>
+          <p class="hint">How every pattern is prepared, in this order. The selected pattern redraws as you change anything here.</p>
+          <h4>size</h4>
+          <div class="fields">
+            <label class="field wide" title="The whole factors that divide the pattern: plain binning. Any other factor can be typed below.">
+              <span>pattern size</span>
+              <select id="bin-choices" disabled><option>open a scan</option></select>
+            </label>
+          </div>
+          <div class="fields" data-group="resolution"></div>
+          <p class="readout" id="res-readout"></p>
+          <h4>average with neighbours</h4>
+          <div class="fields" data-group="nlpar"></div>
+          <p class="readout" id="nlpar-readout"></p>
+          <h4>filters</h4>
+          <div class="fields" data-group="filters"></div>
+          <h4>master patterns</h4>
+          <p class="hint">CLAHE and the band pass are applied to the master patterns as well, on the sphere, at the sizes they have there when a detector pixel has this angular width.</p>
+          <div class="fields" data-group="master"></div>
+          <p class="readout" id="angle-readout"></p>
+        </section>
+
+        <section class="panel" data-tab="geometry" role="tabpanel" aria-labelledby="tab-geometry" hidden>
+          <div class="fields" id="geometry-fields"></div>
+          <div class="row tight">
+            <button type="button" class="mini" id="btn-geo-undo" disabled title="Put the pattern centre and the detector rotation back as they were before the last fit (and forward again)">before the last fit</button>
+            <button type="button" class="mini" id="btn-geo-file" disabled title="Put the geometry back as it was when the scan was opened">as opened</button>
+          </div>
+          <h4>fit</h4>
+          <div class="fields" data-group="fit"></div>
+          <div class="row">
+            <button type="button" class="primary act" id="btn-fit-pc" title="Search a grid of pattern centres; the fit patterns vote with their best correlation over all orientations">Fit pattern centre</button>
+            <button type="button" class="primary act" id="btn-fit-pose" title="Refine the detector pose and the fit patterns' orientations together">Fit pose</button>
+          </div>
+          <p class="readout" id="fit-readout"></p>
+          <details class="sub">
+            <summary>fit options</summary>
+            <div class="fields" data-group="fitmore"></div>
+          </details>
+        </section>
+
+        <section class="panel" data-tab="index" role="tabpanel" aria-labelledby="tab-index" hidden>
+          <div class="row">
+            <button type="button" class="primary act" id="btn-index"><svg><use href="#i-play"/></svg>Index</button>
+            <button type="button" class="act" id="btn-tune" title="Before a large scan: index a sample of the region, sized by the bandwidth, a few times over, and keep the batch size and workgroup sizes that run fastest on this machine. About ten short trials.">Tune speed</button>
+          </div>
+          <p class="readout" id="index-readout"></p>
+          <div class="fields" data-group="index"></div>
+          <h4>sweeps</h4>
+          <div class="fields" data-group="sweeps"></div>
+          <p class="readout" id="sweep-readout"></p>
+          <details class="sub">
+            <summary>scores and batches</summary>
+            <div class="fields" data-group="indexmore"></div>
+          </details>
+          <details class="sub">
+            <summary>region of interest</summary>
+            <p class="hint">In map cells. Zero width or height: the whole map. Shift-drag on the map sets it.</p>
+            <div class="fields" data-group="roi"></div>
+          </details>
+          <h4>maps</h4>
+          <div class="fields" data-group="maps"></div>
+          <h4>export</h4>
+          <div class="row">
+            <button type="button" class="needs-results" id="btn-ang"><svg><use href="#i-down"/></svg>.ang</button>
+            <button type="button" class="needs-results" id="btn-ctf"><svg><use href="#i-down"/></svg>.ctf</button>
+            <button type="button" id="btn-json" title="The geometry and every setting, as JSON. Dropped on the window (or opened with a scan), it brings them back."><svg><use href="#i-down"/></svg>project .json</button>
+          </div>
+          <p class="hint">Orientations are Bunge angles in the sample frame of the geometry: x down the tilted surface toward the detector, z along the surface normal. Each is the Bunge triplet of the orientation's quaternion in the phase's fundamental zone.</p>
+        </section>
+      </div>
+    </aside>
+
+    <main class="stage" id="stage">
+      <section class="pane map-pane" id="map-pane">
+        <div class="pane-bar">
+          <span class="ttl" title="Click or drag to select a pattern; the arrow keys step it (with shift: by ten). Scroll zooms about the pointer, a drag moves a zoomed map, shift-drag sets the region of interest.">map</span>
+          <div class="seg" id="map-kind" role="tablist">
+            <button type="button" data-kind="overview" aria-pressed="true" title="Contrast of each stored pattern (its standard deviation): visible before anything is indexed">overview</button>
+            <button type="button" data-kind="ipf_z" aria-pressed="false" title="Inverse pole figure colour of the sample normal">IPF Z</button>
+            <button type="button" data-kind="ipf_x" aria-pressed="false" title="Inverse pole figure colour of the sample's x: down the tilted surface">IPF X</button>
+            <button type="button" data-kind="ipf_y" aria-pressed="false" title="Inverse pole figure colour of the sample's y">IPF Y</button>
+            <button type="button" data-kind="ncc" aria-pressed="false" title="Normalized cross-correlation of each pattern with its simulation">NCC</button>
+            <button type="button" data-kind="nmi" aria-pressed="false" title="Normalized mutual information of each pattern with its simulation">NMI</button>
+            <button type="button" data-kind="z" aria-pressed="false" title="Each match's mutual information on the scan's own scale: how far above what chance gives on this scan, in chance's standard deviations (one calibration for the whole scan)">z</button>
+            <button type="button" data-kind="phase" aria-pressed="false">phase</button>
+            <button type="button" data-kind="sweep" aria-pressed="false" title="The sweep that found an accepted match for each cell (dark: none did)">sweep</button>
+          </div>
+          <button type="button" class="ghost mini" id="btn-zoom" disabled title="Scroll to zoom in on the map, drag to move it, double-click (or this) to show all of it">whole map</button>
+          <span class="grow"></span>
+          <span class="meta" id="map-hover"></span>
+          <label class="check" title="The lattice of patterns the fits use (green once a fit has given them orientations)"><input type="checkbox" id="show-fit" checked> fit patterns</label>
+        </div>
+        <div class="well" id="map-well" tabindex="0">
+          <canvas id="map" width="1" height="1"></canvas>
+          <svg id="map-over" class="over"></svg>
+          <div class="legend" id="map-legend" hidden title="What the map's colours mean. Click to fold it away."></div>
+          <div class="empty" id="map-empty">
+            <p><b>Open a scan</b> to begin, or try the example.</p>
+            <p class="hint">Then add the candidate phases, fit the pattern centre, and index.</p>
+          </div>
+        </div>
+      </section>
+
+      <div class="split split-h" id="split-dock" role="separator" aria-orientation="horizontal" title="Drag to resize; double-click for the default"></div>
+
+      <section class="pane dock-pane">
+        <div class="pane-bar">
+          <div class="seg" id="dock-kind" role="tablist">
+            <button type="button" data-dock="votes" aria-pressed="true" title="The last pattern-centre search: mean best correlation of the fit patterns per candidate">votes</button>
+            <button type="button" data-dock="master" aria-pressed="false" title="The selected phase's master pattern as patterns are compared with it">master</button>
+            <button type="button" data-dock="z" aria-pressed="false" title="How the indexed cells' matches stand above chance, with the acceptance threshold">z</button>
+            <button type="button" data-dock="log" aria-pressed="false">log</button>
+          </div>
+          <span class="meta" id="votes-meta"></span>
+          <span class="grow"></span>
+          <span class="meta" id="dock-meta"></span>
+        </div>
+        <div class="dock">
+          <div class="dock-view" id="dock-votes">
+            <div class="votes" id="votes-body" hidden>
+              <div class="votes-bar">
+                <span class="hint">grid</span>
+                <div class="seg" id="votes-levels" role="tablist" title="Every grid the search scored, in order. Each is centred on the last one's winner and narrower (or as wide and moved, when the winner was on the border)."></div>
+                <div class="seg" id="votes-mode" role="tablist" title="Three slices through the cross-hair, or every slice along one axis side by side">
+                  <button type="button" data-mode="planes" aria-pressed="true" title="Three slices through the cross-hair: x–y, x–z and y–z">3 planes</button>
+                  <button type="button" data-mode="z" aria-pressed="false" title="Every x–y slice, side by side along z">every z</button>
+                  <button type="button" data-mode="y" aria-pressed="false" title="Every x–z slice, side by side along y">every y</button>
+                  <button type="button" data-mode="x" aria-pressed="false" title="Every y–z slice, side by side along x">every x</button>
+                </div>
+                <div class="seg" id="votes-what" role="tablist" title="What the slices show: the density of the patterns' ballots, which chose the winner, or the patterns' mean correlation">
+                  <button type="button" data-what="ballots" aria-pressed="true">ballots</button>
+                  <button type="button" data-what="mean" aria-pressed="false">mean NCC</button>
+                </div>
+                <label class="check" title="A disc on each candidate that some fit pattern scores highest under, larger the more patterns choose it. A vote is trustworthy where the patterns agree."><input type="checkbox" id="votes-pats"> patterns' own best</label>
+                <span class="grow"></span>
+                <button type="button" class="mini" id="votes-follow" title="Cut the slices through the pattern centre as it is now. They do so by themselves whenever the pattern centre changes (a fit, or a value typed in).">go to the centre</button>
+                <button type="button" class="mini" id="votes-take" title="Make the candidate under the cross-hair the pattern centre, to fit again from there">make this the centre</button>
+              </div>
+              <div class="votes-grid" id="votes-grid" data-mode="planes">
+                <figure class="plane"><div class="well" tabindex="0"><canvas id="votes" width="1" height="1"></canvas><svg id="votes-over" class="over"></svg></div><figcaption><span id="votes-cap"></span><input type="range" class="slide" id="votes-slide" min="0" max="0" step="1"></figcaption></figure>
+                <figure class="plane"><div class="well" tabindex="0"><canvas id="votes-xz" width="1" height="1"></canvas><svg id="votes-xz-over" class="over"></svg></div><figcaption><span id="votes-xz-cap"></span><input type="range" class="slide" id="votes-xz-slide" min="0" max="0" step="1"></figcaption></figure>
+                <figure class="plane"><div class="well" tabindex="0"><canvas id="votes-yz" width="1" height="1"></canvas><svg id="votes-yz-over" class="over"></svg></div><figcaption><span id="votes-yz-cap"></span><input type="range" class="slide" id="votes-yz-slide" min="0" max="0" step="1"></figcaption></figure>
+                <figure class="every"><div class="well" tabindex="0"><canvas id="votes-all" width="1" height="1"></canvas><svg id="votes-all-over" class="over"></svg></div><figcaption><span id="votes-all-cap"></span><input type="range" class="slide" id="votes-all-slide" min="0" max="0" step="1"></figcaption></figure>
+                <div class="votes-side">
+                  <div class="profiles" title="The mean vote along each axis through the cross-hair: how sharply the search pins each coordinate down. White line: the cross-hair; gold: the pattern centre now."><canvas id="votes-profiles" width="1" height="1"></canvas></div>
+                  <pre class="readout" id="votes-readout"></pre>
+                  <p class="hint marks" title="Click a slice (or a profile) to move the cross-hair; scroll over a slice, or drag its slider, to move through the slices. The arrow keys and Page Up / Page Down do the same for the slice that has the focus."><span class="k" style="color:#fff">□</span> winner <span class="k" style="color:#fff">┄</span> next grid <span class="k" style="color:#e8c77e">+</span> centre now <span class="k" style="color:#9d9da4">×</span> start <span class="k" style="color:#6a9ec8">×</span> file's</p>
+                </div>
+              </div>
+            </div>
+            <p class="hint" id="votes-hint">Fit the pattern centre to see how the vote went.</p>
+          </div>
+          <div class="dock-view" id="dock-master" hidden>
+            <div class="well"><canvas id="master" width="1" height="1"></canvas></div>
+            <p class="hint">Northern and southern hemispheres, equal-area projection.</p>
+          </div>
+          <div class="dock-view" id="dock-z" hidden>
+            <div class="well"><canvas id="zhist" width="1" height="1"></canvas></div>
+            <p class="hint" id="z-hint">Index to see how the matches stand above chance.</p>
+          </div>
+          <div class="dock-view" id="dock-log" hidden><pre class="log" id="log"></pre></div>
+        </div>
+      </section>
+
+      <div class="split split-v" id="split-pat" role="separator" aria-orientation="vertical" title="Drag to resize; double-click for the default"></div>
+
+      <section class="pane pat-pane" id="pat-pane">
+        <div class="pane-bar">
+          <span class="meta cell" id="pat-cell">pattern</span>
+          <span class="grow"></span>
+          <div class="seg" id="pat-stage" role="tablist" title="How far along its preparation the pattern is shown">
+            <button type="button" data-stage="stored" aria-pressed="false" title="As the file stores it (reduced, when patterns are reduced)">stored</button>
+            <button type="button" data-stage="averaged" aria-pressed="false" title="Averaged with its neighbours (NLPAR), before any filter. On when the averaging is.">averaged</button>
+            <button type="button" data-stage="filtered" aria-pressed="true" title="As it is indexed: averaged with its neighbours when that is on, then filtered">filtered</button>
+          </div>
+        </div>
+        <div class="pats" id="pats">
+          <figure><div class="well"><canvas id="pat-exp" width="1" height="1"></canvas><svg id="pat-over" class="over"></svg><canvas id="pat-shares" class="inset" width="1" height="1" hidden title="How much of each stored pattern around it this average holds: the map cells around the selected one, itself in the middle; brighter, more"></canvas></div><figcaption id="pat-exp-cap">experimental</figcaption></figure>
+          <figure><div class="well"><canvas id="pat-sim" width="1" height="1"></canvas></div><figcaption id="pat-sim-cap">simulated</figcaption></figure>
+          <figure><div class="well"><canvas id="pat-diff" width="1" height="1"></canvas></div><figcaption title="Experimental minus simulated, each zero-mean and unit-norm under the mask: what the NCC compares">difference</figcaption></figure>
+          <div class="facts-cell">
+            <dl class="facts tall" id="pat-facts"></dl>
+            <div class="opts">
+              <label class="check" title="A pattern that nothing has indexed yet is indexed on the spot, as the fits index theirs (spherical correlation at the fit's bandwidth, then refined), so its simulation and scores show for any cell and follow the filters and the geometry as you change them."><input type="checkbox" id="pat-live" checked> index it on the spot</label>
+              <label class="check" id="pat-full-box" title="Show the pattern at its stored size instead of the reduced one" hidden><input type="checkbox" id="pat-full"> stored size</label>
+            </div>
+          </div>
+        </div>
+      </section>
+    </main>
+
+    <footer class="statusbar">
+      <span class="status" id="status">starting…</span>
+      <span class="grow"></span>
+      <span class="progress" id="progress" hidden><span id="progress-bar"></span></span>
+      <button type="button" class="stop mini" id="btn-stop" hidden><svg><use href="#i-stop"/></svg>Stop</button>
+      <span class="compile" id="compile" hidden></span>
+    </footer>
+  </div>
+
+  <div class="dropveil" id="dropveil" hidden><div>Drop a scan (and its side files), master patterns (.npz, EMsoft .h5 named *master*), or a project .json</div></div>
+  <script type="module" src="./js/app.js"></script>
+</body>
+</html>

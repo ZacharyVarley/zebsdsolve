@@ -1,0 +1,156 @@
+name: ci
+
+# Light checks on every push and pull request that touches code. Linux (no GPU): the native
+# library, the wasm and the site build, the app's JS parses, and the Linux wheel installs, loads
+# its libraries and serves the web app. macOS M1 (Metal): the Python API end to end on a GPU, and
+# the built web app end to end in headless Chrome (WebGPU).
+
+on:
+  push:
+    branches: ["**"]  # not tags: release.yml runs the tests for a version tag
+    paths-ignore: ["**.md", "LICENSE"]
+  pull_request:
+    paths-ignore: ["**.md", "LICENSE"]
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      WGPU: .deps/wgpu-native/manylinux_2_28_x86_64
+      ZIG: zig
+      PYTHONUNBUFFERED: "1"
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "22"
+
+      # Zig from the community mirrors (ziglang.org throttles CI downloads), signature-checked and
+      # cached by the action; the same pinned version as scripts/fetch_deps.py.
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.16.0
+
+      - name: Cache wgpu-native
+        uses: actions/cache@v6
+        with:
+          path: .deps
+          key: wgpu-${{ hashFiles('scripts/wgpu_native.sha256') }}
+
+      - name: Fetch wgpu-native (checksummed)
+        run: python scripts/fetch_deps.py --no-zig
+
+      - name: Native library
+        run: $ZIG build -Doptimize=ReleaseFast -Dwgpu=$WGPU
+
+      - name: Wasm
+        run: $ZIG build wasm -Dwgpu=$WGPU
+
+      - name: App JS parses
+        run: |
+          # as modules (node --check on a .js file outside a "type": "module" package parses it as a script)
+          tmp=$(mktemp -d)
+          for f in web/app/js/*.js web/zebsdsolve.js; do
+            cp "$f" "$tmp/$(basename "${f%.js}").mjs"
+            node --check "$tmp/$(basename "${f%.js}").mjs"
+          done
+
+      - name: Site
+        run: node scripts/build_web.mjs
+
+      - name: Wheels (Linux x64; macOS ARM for the GPU job)
+        run: python scripts/build_wheels.py manylinux_2_28_x86_64 macosx_11_0_arm64
+
+      - name: Install the wheel in a clean environment
+        run: |
+          python -m venv /tmp/venv
+          /tmp/venv/bin/pip install --quiet dist/*manylinux*.whl
+          cd /tmp
+          /tmp/venv/bin/python -c "import zebsdsolve; zebsdsolve._load(); print('zebsdsolve', zebsdsolve.__version__, 'libraries load')"
+          /tmp/venv/bin/zebsdsolve --help
+
+      - name: App launcher serves the web app (installed wheel)
+        run: cd /tmp && /tmp/venv/bin/python "$GITHUB_WORKSPACE/tests/test_app.py"
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: build
+          path: |
+            dist/*.whl
+            dist/web
+          retention-days: 7
+
+  # The engine on a real GPU: Apple M1 (Metal), from the cross-built wheel. macOS minutes count
+  # 10× against a private repo's allowance, so this job only runs for code changes (paths-ignore).
+  gpu-macos:
+    needs: build
+    runs-on: macos-14
+    timeout-minutes: 25
+    env:
+      PYTHONUNBUFFERED: "1"
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "22"
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: build
+          path: dist
+
+      - name: Install the macOS wheel
+        run: |
+          python -m venv "$RUNNER_TEMP/venv"
+          "$RUNNER_TEMP/venv/bin/pip" install --quiet dist/*macosx*arm64.whl
+
+      - name: GPU
+        run: |
+          cd "$RUNNER_TEMP"
+          system_profiler SPDisplaysDataType | sed -n '1,12p' || true
+          "$RUNNER_TEMP/venv/bin/python" -c "import zebsdsolve; s = zebsdsolve.Solver(); print('adapter:', s.adapter); s.close()"
+
+      - name: Every shader builds on this GPU (the compiler's message for any that fails)
+        run: |
+          "$RUNNER_TEMP/venv/bin/python" tests/check_shaders.py
+
+      - name: Fits and indexing end to end (synthetic scans with known geometry and orientations; the nickel scan)
+        run: |
+          # a copy outside the checkout, so the test imports the installed wheel
+          cp tests/test_api.py tests/test_app.py "$RUNNER_TEMP/"
+          cd "$RUNNER_TEMP"
+          ZEBSDSOLVE_TESTDATA="$GITHUB_WORKSPACE/testdata" "$RUNNER_TEMP/venv/bin/python" test_api.py
+
+      - name: App launcher
+        run: cd "$RUNNER_TEMP" && "$RUNNER_TEMP/venv/bin/python" test_app.py
+
+      - name: Tutorials (examples/ run as notebooks on the installed wheel)
+        run: |
+          "$RUNNER_TEMP/venv/bin/pip" install --quiet jupytext nbconvert ipykernel matplotlib scipy
+          "$RUNNER_TEMP/venv/bin/python" scripts/run_tutorials.py "$RUNNER_TEMP/tutorials"
+
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: tutorials
+          path: ${{ runner.temp }}/tutorials
+          retention-days: 30
+
+      - name: Web app in headless Chrome (WebGPU)
+        run: node tests/test_web.mjs --dir dist/web

@@ -1,0 +1,22 @@
+# fetched toolchains and libraries (scripts/fetch_deps.py)
+.deps/
+# build outputs
+.zig-cache/
+zig-out/
+dist/
+__pycache__/
+*.pyc
+# coding-agent and editor state
+.claude/
+CLAUDE.md
+CLAUDE.local.md
+.cursor/
+.cursorrules
+.aider*
+.codex/
+AGENTS.md
+.github/copilot-instructions.md
+.continue/
+.windsurf/
+.vscode/
+.idea/
