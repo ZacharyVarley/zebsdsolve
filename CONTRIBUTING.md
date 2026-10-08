@@ -57,6 +57,7 @@ web/app/            the app (js/app.js, js/fields.js: one control per setting, j
                     pattern-centre search laid open, js/draw.js)
 tests/              probe.zig, check_shaders.py, test_api.py, test_app.py, test_web.mjs
 examples/           the tutorials (jupytext percent scripts)
+docs/               how-it-works.md: the methods and the measurements behind the defaults
 scripts/            fetch_deps.py, build_wheels.py, build_backend.py, build_web.mjs, serve.mjs,
                     run_tutorials.py, check_formats.py
 testdata/           the nickel scan and master patterns the tests and the app's example use
@@ -99,7 +100,7 @@ python scripts/check_formats.py FILE …        # a scan reader against kikuchip
 - **`test_web`** runs the example in the app from a wrong pattern centre: fit, fit, index, and the same comparison with kikuchipy; then again in two sweeps and on binned patterns, and the page's own moving parts: the tabs, the pattern indexed on the spot, the search's volume (its slices, and that they follow the pattern centre a fit moves), a toy scan made from the master and indexed against its own answer, the averaging's preview following its settings, the map's key (and that it follows the colours chosen) and zoom, a project file dropped on the window.
 - **The tutorials** end with checks against the same truths, so they fail like tests.
 
-Changes to a fit, to the indexing or to a default should keep these passing, and should come with numbers: before and after, on the nickel scan and on a synthetic one. Report accuracy against ground truth, not only against a previous run. Several defaults here were chosen that way (the README lists them), and some plausible ones lost.
+Changes to a fit, to the indexing or to a default should keep these passing, and should come with numbers: before and after, on the nickel scan and on a synthetic one. Report accuracy against ground truth, not only against a previous run. Several defaults here were chosen that way ([docs/how-it-works.md](docs/how-it-works.md) lists them), and some plausible ones lost.
 
 **CI** (`.github/workflows/ci.yml`) runs on every push: on Linux (no GPU) the library, the wasm, the site and wheels, and the launcher; on an Apple M1 runner (a real GPU through Metal) `check_shaders`, `test_api` and the tutorials on the installed wheel, and `test_web` on the built site.
 
