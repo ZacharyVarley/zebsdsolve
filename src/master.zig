@@ -22,6 +22,8 @@ const Allocator = std.mem.Allocator;
 pub const Master = struct {
     gpa: Allocator,
     name: []u8,
+    /// a,b,c in Angstrom; alpha,beta,gamma in degrees.
+    lattice: ?[6]f64 = null,
     /// sheet edge in pixels
     side: u32,
     /// [north | south], side · side each, as loaded (normalized)
@@ -170,6 +172,74 @@ fn metaNumber(json: []const u8, key: []const u8) ?f64 {
     return std.fmt.parseFloat(f64, json[p..e]) catch null;
 }
 
+/// Older ebsdsim versions wrote Python JSON's bare Infinity/NaN diagnostic values.
+/// Normalize only complete tokens outside strings; phase fields still require finite numbers.
+fn compatibleJson(gpa: Allocator, source: []const u8) ![]u8 {
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(gpa);
+    var quoted = false;
+    var escaped = false;
+    var i: usize = 0;
+    while (i < source.len) {
+        const c = source[i];
+        if (!quoted) {
+            var replaced = false;
+            for ([_][]const u8{ "-Infinity", "Infinity", "NaN" }) |token| {
+                if (std.mem.startsWith(u8, source[i..], token)) {
+                    const end = i + token.len;
+                    if ((i == 0 or std.mem.indexOfScalar(u8, " \t\r\n[:,", source[i - 1]) != null) and
+                        (end == source.len or std.mem.indexOfScalar(u8, " \t\r\n,]}", source[end]) != null))
+                    {
+                        try out.appendSlice(gpa, "null");
+                        i = end;
+                        replaced = true;
+                        break;
+                    }
+                }
+            }
+            if (replaced) continue;
+        }
+        try out.append(gpa, c);
+        if (quoted) {
+            if (escaped) escaped = false else if (c == '\\') escaped = true else if (c == '"') quoted = false;
+        } else if (c == '"') quoted = true;
+        i += 1;
+    }
+    return out.toOwnedSlice(gpa);
+}
+
+/// A finite, nondegenerate metric. A missing or invalid cell does not prevent indexing.
+pub fn validLattice(cell: [6]f64) bool {
+    for (cell, 0..) |v, i| {
+        if (!std.math.isFinite(v) or v <= 0 or (i >= 3 and v >= 180)) return false;
+    }
+    const ca = @cos(std.math.degreesToRadians(cell[3]));
+    const cb = @cos(std.math.degreesToRadians(cell[4]));
+    const cg = @cos(std.math.degreesToRadians(cell[5]));
+    return 1 + 2 * ca * cb * cg - ca * ca - cb * cb - cg * cg > 1e-12;
+}
+
+fn ebsdsimLattice(gpa: Allocator, meta: []const u8) !?[6]f64 {
+    const compatible = try compatibleJson(gpa, meta);
+    defer gpa.free(compatible);
+    const parsed = std.json.parseFromSlice(std.json.Value, gpa, compatible, .{}) catch return null;
+    defer parsed.deinit();
+    if (parsed.value != .object) return null;
+    const cell = parsed.value.object.get("cell") orelse return null;
+    if (cell != .object) return null;
+    var lattice: [6]f64 = undefined;
+    const keys = [_][]const u8{ "a_angstrom", "b_angstrom", "c_angstrom", "alpha_deg", "beta_deg", "gamma_deg" };
+    for (keys, 0..) |key, i| {
+        const value = cell.object.get(key) orelse return null;
+        lattice[i] = switch (value) {
+            .integer => @floatFromInt(value.integer),
+            .float => value.float,
+            else => return null,
+        };
+    }
+    return if (validLattice(lattice)) lattice else null;
+}
+
 fn loadEbsdsim(gpa: Allocator, f: *File) !Master {
     var z = try Npz.open(gpa, f);
     defer z.deinit();
@@ -276,6 +346,7 @@ fn loadEbsdsim(gpa: Allocator, f: *File) !Master {
         .source = "ebsdsim",
     };
     errdefer gpa.free(m.name);
+    m.lattice = try ebsdsimLattice(gpa, meta);
     if (metaNumber(meta, "pg_num")) |v| m.point_group = @intFromFloat(v);
     if (metaNumber(meta, "space_group")) |v| m.space_group = @intFromFloat(v);
     if (metaNumber(meta, "voltage_kv")) |v| m.voltage_kv = v;
@@ -439,6 +510,14 @@ fn loadEmsoft(gpa: Allocator, f: *File) !Master {
         .source = "emsoft",
     };
     errdefer gpa.free(m.name);
+    if (try h.find("CrystalData/LatticeParameters")) |a| {
+        var values: [7]f64 = undefined;
+        if ((h.numbers(a, &values) catch 0) == 6) {
+            var cell = values[0..6].*;
+            for (cell[0..3]) |*v| v.* *= 10; // EMsoft lengths are nm; ANG/CTF use Angstrom.
+            if (validLattice(cell)) m.lattice = cell;
+        }
+    }
     if (try h.find("CrystalData/SpaceGroupNumber")) |a| m.space_group = @intFromFloat(h.number(a) catch 0);
     if (try h.find("NMLparameters/MCCLNameList/EkeV")) |a| m.voltage_kv = h.number(a) catch 0;
     m.point_group = sym.pointGroupOfSpaceGroup(m.space_group) orelse 0;

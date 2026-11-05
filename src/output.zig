@@ -139,6 +139,7 @@ fn tslSymmetry(laue: sym.Laue) u32 {
 /// z the surface normal), those of the stored quaternions (each in its phase's fundamental
 /// zone); cells not indexed carry the formats' own markers.
 pub fn exportText(e: *Engine, kind: u32) ![]u8 {
+    for (e.phases.items) |p| if (p.master.lattice == null) return error.MissingPhaseLattice;
     const i = try e.info();
     const gpa = e.gpa;
     var out: std.Io.Writer.Allocating = .init(gpa);
@@ -152,7 +153,7 @@ pub fn exportText(e: *Engine, kind: u32) ![]u8 {
             // EDAX measures the pattern centre's y from the bottom and y, z in fractions of the width
             try w.print("# TEM_PIX_PER_UM          1.000000\n# x-star                 {d:.6}\n# y-star                 {d:.6}\n# z-star                 {d:.6}\n# WorkingDistance        0.000000\n#\n", .{ g.pc[0], (1 - g.pc[1]) / ratio, g.pc[2] / ratio });
             for (e.phases.items, 0..) |*p, pi| {
-                try w.print("# Phase {d}\n# MaterialName  \t{s}\n# Formula     \t\n# Info \t\t\n# Symmetry              {d}\n# LatticeConstants      1.000 1.000 1.000  90.000  90.000  90.000\n# NumberFamilies        0\n#\n", .{ pi + 1, p.master.name, tslSymmetry(p.master.laue) });
+                try w.print("# Phase {d}\n# MaterialName  \t{s}\n# Formula     \t\n# Info \t\t\n# Symmetry              {d}\n# LatticeConstants      {d:.8} {d:.8} {d:.8}  {d:.8}  {d:.8}  {d:.8}\n# NumberFamilies        0\n#\n", .{ pi + 1, p.master.name, tslSymmetry(p.master.laue), p.master.lattice.?[0], p.master.lattice.?[1], p.master.lattice.?[2], p.master.lattice.?[3], p.master.lattice.?[4], p.master.lattice.?[5] });
             }
             try w.print("# GRID: SqrGrid\n# XSTEP: {d:.6}\n# YSTEP: {d:.6}\n# NCOLS_ODD: {d}\n# NCOLS_EVEN: {d}\n# NROWS: {d}\n#\n# SOFTWARE: zebsdsolve {s}\n# COLUMNS: phi1 PHI phi2 x y IQ(NMI) CI(NCC) Phase SEM Fit\n", .{ g.step_x_um, g.step_y_um, i.cols, i.cols, i.rows, engine.version });
             for (0..i.rows) |r| for (0..i.cols) |c| {
@@ -176,7 +177,7 @@ pub fn exportText(e: *Engine, kind: u32) ![]u8 {
             try w.print("Euler angles refer to Sample Coordinate system (CS0)!\tMag\t0\tCoverage\t100\tDevice\t0\tKV\t{d:.1}\tTiltAngle\t{d:.2}\tTiltAxis\t0\n", .{ if (std.math.isNan(i.voltage_kv)) 0 else i.voltage_kv, g.sample_tilt_deg });
             try w.print("Phases\t{d}\n", .{n_ph});
             for (e.phases.items) |*p| {
-                try w.print("1.000;1.000;1.000\t90.000;90.000;90.000\t{s}\t{d}\t{d}\t\t\t\n", .{ p.master.name, @intFromEnum(p.master.laue), p.master.space_group });
+                try w.print("{d:.8};{d:.8};{d:.8}\t{d:.8};{d:.8};{d:.8}\t{s}\t{d}\t{d}\t\t\t\n", .{ p.master.lattice.?[0], p.master.lattice.?[1], p.master.lattice.?[2], p.master.lattice.?[3], p.master.lattice.?[4], p.master.lattice.?[5], p.master.name, @intFromEnum(p.master.laue), p.master.space_group });
             }
             try w.writeAll("Phase\tX\tY\tBands\tError\tEuler1\tEuler2\tEuler3\tMAD\tBC\tBS\n");
             const deg = 180.0 / std.math.pi;
