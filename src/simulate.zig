@@ -122,6 +122,8 @@ pub const Simulation = struct {
     point_group: u32,
     symbol: []const u8,
     voltage_kv: f64,
+    /// a, b, c (Å) and α, β, γ (degrees)
+    lattice: [6]f64,
     /// the crystal and settings as JSON, for the file's metadata
     meta: []u8,
 
@@ -170,7 +172,7 @@ pub const Simulation = struct {
         const normals = try gpa.alloc(rot.Vec3, self.normals.len);
         defer gpa.free(normals);
         for (self.normals, 0..) |v, i| normals[i] = v;
-        var m = try master_mod.fromSector(gpa, vals, self.grid.kij, self.grid.halfw, self.pg_ops, normals, .{ .point_group = self.point_group, .space_group = self.space_group, .voltage_kv = self.voltage_kv });
+        var m = try master_mod.fromSector(gpa, vals, self.grid.kij, self.grid.halfw, self.pg_ops, normals, .{ .point_group = self.point_group, .space_group = self.space_group, .voltage_kv = self.voltage_kv, .lattice = self.lattice });
         errdefer m.deinit();
         gpa.free(m.name);
         m.name = &.{};
@@ -489,6 +491,7 @@ pub fn run(e: *Engine, cell: *const crystal.Cell) !Simulation {
         .point_group = cell.point_group,
         .symbol = cell.symbol,
         .voltage_kv = s.sim_voltage_kv,
+        .lattice = .{ 10 * cell.a, 10 * cell.b, 10 * cell.c, std.math.radiansToDegrees(cell.alpha), std.math.radiansToDegrees(cell.beta), std.math.radiansToDegrees(cell.gamma) },
         .meta = meta,
     };
 }
