@@ -1,6 +1,6 @@
 //! Pattern-centre fit by voting.
 //!
-//! A few patterns on a coarse lattice over the map (settings.fit_grid², e.g. 5 × 5) are indexed
+//! A few patterns on a coarse lattice over the map (settings.fit_grid², 10 × 10) are indexed
 //! by spherical correlation under every candidate pattern centre of a grid around the current
 //! one: a wrong pattern centre distorts the pattern on the sphere so that no rotation of the
 //! master fits it, so each pattern's best normalized correlation over all orientations (and,
@@ -60,7 +60,7 @@ pub const Result = extern struct {
 
 /// The fit patterns: a lattice of grid × grid cells over the region of interest, each at the
 /// centre of its share (the whole region when it is smaller than the lattice). The vote's
-/// lattice is settings.fit_grid, the pose fit's settings.pose_grid.
+/// lattice is settings.fit_grid; the plane fit's is fitCellsEvery.
 pub fn fitCells(e: *Engine, grid: u32) ![]u64 {
     const gpa = e.gpa;
     const region = try e.regionCells();
@@ -80,6 +80,32 @@ pub fn fitCells(e: *Engine, grid: u32) ![]u64 {
         const row = y0 + (2 * r + 1) * h / (2 * gy);
         const col = x0 + (2 * c + 1) * w / (2 * gx);
         cells[r * @as(usize, @intCast(gx)) + c] = row * i.cols + col;
+    };
+    return cells;
+}
+
+/// Every `stride`-th cell of the region of interest along its rows and its columns, the
+/// lattice centred in the region.
+pub fn fitCellsEvery(e: *Engine, stride: u64) ![]u64 {
+    const gpa = e.gpa;
+    const region = try e.regionCells();
+    defer gpa.free(region);
+    const i = try e.info();
+    const c_first = region[0];
+    const c_last = region[region.len - 1];
+    const x0: u64 = c_first % i.cols;
+    const y0: u64 = c_first / i.cols;
+    const w: u64 = c_last % i.cols - x0 + 1;
+    const h: u64 = c_last / i.cols - y0 + 1;
+    const st = @max(stride, 1);
+    const gy = (h + st - 1) / st;
+    const gx = (w + st - 1) / st;
+    // what is left over is shared between the two edges
+    const oy = (h - 1 - (gy - 1) * st) / 2;
+    const ox = (w - 1 - (gx - 1) * st) / 2;
+    const cells = try gpa.alloc(u64, @intCast(gy * gx));
+    for (0..@intCast(gy)) |r| for (0..@intCast(gx)) |c| {
+        cells[r * @as(usize, @intCast(gx)) + c] = (y0 + oy + r * st) * i.cols + x0 + ox + c * st;
     };
     return cells;
 }
@@ -272,6 +298,9 @@ pub fn run(e: *Engine) !Result {
     const g = &e.g;
     const s = &e.set;
     e.cancel = false;
+    // (the vote moves one pattern centre, the scan's steps saying how the beam went from it:
+    // a plane fitted before goes)
+    e.geo.plane_kind = 0;
     const lv = e.levelOf(.search);
     const k_lv = @intFromEnum(lv);
     const bd = try e.band(s.fit_bandwidth, lv);

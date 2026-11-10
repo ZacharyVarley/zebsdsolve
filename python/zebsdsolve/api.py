@@ -3,7 +3,7 @@
     import zebsdsolve as ze
 
     res = ze.index("scan.h5", ["Ni.npz"])                 # index with the file's geometry
-    res = ze.index("scan.h5", ["Ni.npz"], fit="pose")     # fit the pattern centre and pose first
+    res = ze.index("scan.h5", ["Ni.npz"], fit="geometry") # fit the pattern centre and the plane first
     fit = ze.fit_pattern_center("scan.h5", ["Ni.npz"], pc=(0.5, 0.3, 0.5), pc_span=0.2)
 
 `scan` is a path (or a sequence of paths, the pattern file first), or an array of patterns
@@ -44,7 +44,7 @@ class Result:
     phases: list
     settings: dict
     fit: dict = field(default_factory=dict)
-    """what the fits reported, by name ("pc", "pose"), when they ran"""
+    """what the fits reported, by name ("pc", "geometry"), when they ran"""
 
 
 def _open(solver, scan, phases, kwargs):
@@ -89,38 +89,40 @@ def fit_pattern_center(scan, phases, **kwargs):
         return r
 
 
-def fit_pose(scan, phases, **kwargs):
-    """Fit the detector's whole pose (and, with `pose_scale`, its pixel size) together with the
-    orientations of a lattice of patterns, from the current geometry. Returns the fit's report
-    (a dict) with the final "geometry" and the lattice's cells, phases, orientations and scores."""
+def fit_plane(scan, phases, **kwargs):
+    """Fit the plane of source points from the pattern centre as given (the keywords' `pc`, or
+    the file's): each pattern of a lattice fitted by itself, its source point and orientation,
+    and the affine or projective transformation of the scan's indices through those points
+    (Solver.fit_plane). Returns the fit's report (a dict) with the final "geometry" and the
+    measured "points" (Solver.plane_points)."""
     from . import Solver
 
     with Solver() as s:
         _open(s, scan, phases, kwargs)
-        r = s.fit_pose()
-        cells, ph, quats, ncc = s.fit_patterns()
-        r.update(geometry=s.geometry, cells=cells, phases=ph, quaternions=quats, pattern_ncc=ncc)
+        r = s.fit_plane()
+        r.update(geometry=s.geometry, points=s.plane_points())
         return r
 
 
 def index(scan, phases, fit=None, progress=None, **kwargs):
     """Index a scan against candidate phases.
 
-    fit: None indexes with the geometry as given (the file's, or the keywords'); "pc" first fits
-    the pattern centre by voting; "pose" fits the pattern centre, then the detector pose.
+    fit: None indexes with the geometry as given (the file's, or the keywords'); "geometry" first
+    fits it by itself (Solver.fit_geometry: the vote for the pattern centre, then the plane of
+    source points from there); "pc" fits the pattern centre by voting alone.
     progress(status) is called after each batch with where indexing stands (Solver.index_status:
     sweep, sweeps, done, total, region, accepted); returning False stops early.
     """
     from . import Solver
 
-    if fit not in (None, "pc", "pose"):
-        raise ValueError('fit is None, "pc" or "pose"')
+    if fit not in (None, "geometry", "pc"):
+        raise ValueError('fit is None, "geometry" or "pc"')
     with Solver() as s:
         _open(s, scan, phases, kwargs)
         report = {}
-        if fit in ("pc", "pose"):
+        if fit == "pc":
             report["pc"] = s.fit_pc()
-        if fit == "pose":
-            report["pose"] = s.fit_pose()
+        if fit == "geometry":
+            report["geometry"] = s.fit_geometry()
         r = s.index(progress)
         return Result(geometry=s.geometry, phases=s.phases, settings=s.settings, fit=report, **r)

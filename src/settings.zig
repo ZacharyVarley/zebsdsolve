@@ -13,6 +13,14 @@ pub const SweepMethod = enum { same, spherical, dictionary, pca };
 pub const PhaseBy = enum { nmi, ncc };
 /// How the fit patterns' scores under the candidate pattern centres become one choice.
 pub const PcVote = enum { ballots, mean };
+/// The transformation a plane of source points is fitted as (plane.zig).
+pub const PlaneKind = enum { affine, projective };
+/// Which sample frame the orientations are in once a plane is fitted.
+pub const PlaneFrame = enum { nominal, follow };
+/// How the measured source points are weighed in the plane's fit.
+pub const PlaneWeights = enum { equal, information };
+/// How the plane fit samples the master pattern.
+pub const Interp = enum { bilinear, bicubic, keys6 };
 /// How inverse pole figure colours are assigned (sym.Colors).
 pub const IpfColors = @import("sym.zig").Colors;
 /// Which stages work on patterns at their stored size rather than the reduced one.
@@ -75,6 +83,13 @@ pub const Settings = struct {
     /// counted again and again.
     toy_counts: f64 = 20,
     toy_noise_seed: u32 = 0,
+
+    // ── the detector ──
+    /// Width of the detector, millimetres: what a scan gets a pixel size from when its file
+    /// records none and none is set by hand (geometry.px_um), the width over the pattern's
+    /// stored pixels across. 24 mm is 480 pixels of 50 µm, the commonest detector; a 60-pixel
+    /// pattern is then taken as binned eight times, 400 µm a pixel.
+    detector_width_mm: f64 = 24,
 
     // ── resolution ──
     /// Patterns are reduced by this factor as they are read, on the CPU: each pixel of the
@@ -158,7 +173,7 @@ pub const Settings = struct {
     bandwidth: u32 = 64,
 
     // ── pattern-centre fit ──
-    /// Bandwidth of the correlation in the pattern-centre vote (and for the pose fit's starting
+    /// Bandwidth of the correlation in the pattern-centre vote (and for the plane fit's starting
     /// orientations). The patterns' surfaces sharpen with it: on the nickel scan the vote lands
     /// within 0.003 of the pattern centre at 64, within 0.002 at 96 at seven times the cost,
     /// and 0.02 to 0.04 off at 32.
@@ -199,33 +214,93 @@ pub const Settings = struct {
     pc_levels: u32 = 3,
     pc_shrink: f64 = 0.35,
 
-    // ── pose fit (detector pose and the fit patterns' orientations together) ──
-    /// Patterns on a pose_grid × pose_grid lattice over the region of interest: more than the
-    /// vote's, because a pattern costs the pose fit little, and what tells the detector's
-    /// rotation from a common turn of the crystals is weak in any one pattern. On a simulated
-    /// map whose beam travels 4 % of the detector, under noise as strong as the patterns, the
-    /// fitted rotation (and with it every orientation) is off by 1.3° from 25 patterns and by
-    /// 0.25° from 225.
-    pose_grid: u32 = 15,
-    pose_iters: u32 = 30,
-    /// Which of the detector's six degrees of freedom the pose fit moves, each named in the
-    /// detector's own axes; one that is off keeps its value. The position is the
-    /// pattern centre's three coordinates:
-    pose_x: bool = true,
-    pose_y: bool = true,
-    pose_z: bool = true,
-    /// The attitude is three turns about the source point, which leave the pattern centre
-    /// where it is (geometry.rot): tilt about the detector's column direction (the detector
-    /// tilt's sense), swing about its row direction, twist about its normal. What tells them
-    /// from a common turn of the crystals is the beam's travel across the map; with no pixel
-    /// size there is none to go by and they are left as set.
-    pose_tilt: bool = true,
-    pose_swing: bool = true,
-    pose_twist: bool = true,
-    /// A seventh: the scale between the beam's travel over the sample and the detector, which
-    /// makes the pose a similarity (Sim(3)). It is the detector's pixel size (geometry.px_um),
-    /// which the fit then changes; it needs a pixel size to start from.
-    pose_scale: bool = false,
+    // ── the plane of source points (planefit.zig, plane.zig) ──
+    /// The transformation of the scan's indices that the fit patterns' source points are
+    /// fitted as: `affine` (nine numbers: the scan a parallelogram on a plane) or
+    /// `projective` (eleven: the beam deflected from a pivot onto the tilted sample, so that
+    /// the scan's parallels need not stay parallel). Winkelmann et al. 2020; kikuchipy's
+    /// fit_pc.
+    plane_kind: PlaneKind = .affine,
+    /// The sample frame orientations are in once a plane is fitted: `nominal` leaves it
+    /// where the tilts and the detector's turn have it; `follow` takes it from the plane
+    /// (its normal the plane's, its x along the scan's rows), as kikuchipy sets its sample
+    /// tilt from the plane.
+    plane_frame: PlaneFrame = .nominal,
+    /// How the measured points are weighed: `equal`, each alike (as kikuchipy fits a few
+    /// good patterns); `information`, each by how sharply its own pattern tells it (the
+    /// curvature of its score over its source's place, its orientation following), which is
+    /// what makes many small patterns worth a few large ones: a small pattern tells its
+    /// source's distance far better than where it stands across the detector.
+    plane_weights: PlaneWeights = .information,
+    /// The plane's patterns: every plane_stride-th cell each way, no more than
+    /// plane_patterns_max (the stride is widened until they are; 0: no such limit).
+    plane_stride: u32 = 2,
+    plane_patterns_max: u32 = 4096,
+    /// A pattern's source may be moved this far from where it starts, in pattern heights; one
+    /// that ends at that edge is left out of the plane (kikuchipy's trust region).
+    plane_trust: f64 = 0.05,
+    /// A measured point further from the fitted plane than this many robust standard
+    /// deviations of them all is left out and the plane fitted again. 0: none is.
+    plane_outlier: f64 = 4,
+    /// Most steps of the patterns' own refinement.
+    plane_iters: u32 = 60,
+    /// How the plane fit samples the master pattern (indexing and refinement are bilinear):
+    ///   bilinear  four texels, with a gradient that is a finite difference a master pixel wide
+    ///   bicubic   Catmull–Rom over sixteen texels, with that surface's own derivative: a score
+    ///             that is smooth across the master's pixels and a gradient that is exactly
+    ///             its slope
+    ///   keys6     Keys' six-point kernel over thirty-six texels, an order more accurate
+    plane_interp: Interp = .bicubic,
+    /// The plane fit's own copy of the master is resampled so that one of its pixels is this
+    /// many detector pixels wide at the pattern centre, each new pixel a tent-weighted average
+    /// of the master's about it (the sheets are equal-area, so that is an average over the
+    /// sphere): the master then holds no detail finer than the patterns can show.
+    /// 0: the master as it is. Used when plane_master_auto is off.
+    plane_master_px: f64 = 0,
+    /// The fit chooses that width itself when it starts: of 0, 0.5, 1, 1.5 and 2 detector
+    /// pixels, the one under which its patterns' mean NCC is highest (each with its
+    /// orientations settled there). How sharp the patterns are at the scale of a pixel differs
+    /// from scan to scan, and so does the width that suits them; the log says which was taken.
+    plane_master_auto: bool = true,
+
+    // ── master patterns simulated from a crystal (simulate.zig; ebsdsim's method) ──
+    /// The beam's energy (kV) and the sample's tilt (degrees): what the energy model takes,
+    /// with the crystal's density and composition, to spread the backscattered electrons over
+    /// energy loss and depth.
+    sim_voltage_kv: f64 = 20,
+    sim_tilt_deg: f64 = 70,
+    /// The energy-loss bins' width, keV: each bin is solved at its own voltage and weighted
+    /// by the share of electrons the energy model puts in it.
+    sim_bin_kev: f64 = 1,
+    /// Reflections down to this spacing, nm.
+    sim_dmin_nm: f64 = 0.05,
+    /// The master's Lambert sheets are 2 · sim_halfw + 1 pixels a side; the directions solved
+    /// are those of the point group's fundamental sector.
+    sim_halfw: u32 = 500,
+    /// The beams of a direction: the reflections whose excitation error, over their coupling
+    /// to the others, is least, as many as the direction with the most under sim_c_strong
+    /// has (Bethe's criterion); a reflection over sim_c_cutoff is never one, nor one reached
+    /// only by double diffraction whose |s| is over sim_dbdiff_cutoff (nm⁻¹).
+    sim_c_strong: f64 = 20,
+    /// Bethe's weak beams: the reflections after the strong ones whose |s|/coupling is within
+    /// this are not solved for but followed by perturbation (their amplitudes from the strong
+    /// beams', folded into the strong beams' equations and counted in the intensity). At or
+    /// below sim_c_strong: none (but a direction's strong beams past what a direction can solve,
+    /// 512, are always followed so).
+    sim_c_weak: f64 = 40,
+    sim_c_cutoff: f64 = 200,
+    sim_dbdiff_cutoff: f64 = 1,
+    /// The rank of the depth integral's Krylov subspace (1–16): its columns are the Cayley
+    /// steps of one repeated pole, and the integral is solved exactly on them. With
+    /// sim_correct, 2–4 already does better than 8 without it.
+    sim_rank: u32 = 3,
+    /// Correct the subspace's estimate of each intensity by its dual-weighted residual (the
+    /// dual taken diagonal off the 30 beams where the residual is largest, exact on them):
+    /// the error left is second order, at about the cost of one more intensity pass.
+    sim_correct: bool = true,
+    /// Energy bins are taken from the least loss up, until one changes the pattern (each
+    /// normalized to its range) by less than this, relatively; 0: every bin.
+    sim_stop: f64 = 0.01,
 
     // ── orientation refinement on the detector ──
     refine: bool = true,
@@ -339,7 +414,10 @@ pub const Settings = struct {
         if (!(self.binning >= 1 and self.binning <= 64)) return error.BadSetting;
         if (self.bandwidth < 8 or self.bandwidth > 256 or self.fit_bandwidth < 8 or self.fit_bandwidth > 256) return error.BadSetting;
         if (self.clahe_grid < 1 or self.clahe_grid > 16 or self.clahe_bins < 2 or self.clahe_bins > 256 or !(self.clahe_clip > 0)) return error.BadSetting;
-        if (self.fit_grid < 1 or self.fit_grid > 31 or self.pose_grid < 1 or self.pose_grid > 63) return error.BadSetting;
+        if (self.fit_grid < 1 or self.fit_grid > 31) return error.BadSetting;
+        if (!(self.detector_width_mm > 0)) return error.BadSetting;
+        if (self.plane_stride < 1 or self.plane_iters < 1 or !(self.plane_trust > 0) or !(self.plane_outlier >= 0)) return error.BadSetting;
+        if (!(self.plane_master_px >= 0)) return error.BadSetting;
         if (self.pc_steps < 1 or self.pc_steps > 65 or self.pc_steps_z < 1 or self.pc_steps_z > 65) return error.BadSetting;
         if (self.pc_levels < 1 or self.pc_levels > 8) return error.BadSetting;
         if (!(self.ipf_lightness >= 0 and self.ipf_lightness <= 1) or !(self.ipf_gray >= 0 and self.ipf_gray <= 1)) return error.BadSetting;
@@ -364,6 +442,9 @@ pub const Settings = struct {
         if (@abs(self.scan_x_sign) != 1 or @abs(self.scan_y_sign) != 1) return error.BadSetting;
         if (!(self.mask_radius > 0) or !(self.dynamic_sigma > 0) or !(self.bp_fine >= 0) or !(self.bp_coarse > self.bp_fine)) return error.BadSetting;
         if (!(self.pixel_angle_deg >= 0) or !(self.master_smooth >= 0) or !(self.accept_step_deg > 0) or !(self.accept_nmi >= 0 and self.accept_nmi <= 1)) return error.BadSetting;
+        if (!(self.sim_voltage_kv > 0) or !(self.sim_bin_kev > 0) or !(self.sim_dmin_nm > 0) or !(self.sim_tilt_deg >= 0 and self.sim_tilt_deg <= 90)) return error.BadSetting;
+        if (self.sim_halfw < 8 or self.sim_halfw > 2000 or self.sim_rank < 1 or self.sim_rank > 16) return error.BadSetting;
+        if (!(self.sim_c_strong > 0) or !(self.sim_c_weak >= 0) or !(self.sim_c_cutoff >= self.sim_c_strong) or !(self.sim_dbdiff_cutoff >= 0) or !(self.sim_stop >= 0)) return error.BadSetting;
     }
 
     /// Bandwidth and dictionary grid of sweep `i` of `sweeps`: the first sweep's values, the

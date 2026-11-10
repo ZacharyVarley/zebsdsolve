@@ -1,5 +1,5 @@
 //! The detector side on the GPU: the schedule over shaders/detector.wgsl. Simulated patterns,
-//! the sums behind the pose fit, orientation refinement run wholly on the device, mutual
+//! the sums behind the plane fit, orientation refinement run wholly on the device, mutual
 //! information, and dictionary scoring. As elsewhere, calls record work; the caller reads.
 const std = @import("std");
 const gpu_mod = @import("gpu/gpu.zig");
@@ -72,6 +72,9 @@ pub const Detector = struct {
     chunk_px: u32 = 64,
     /// invocations per workgroup of the sums (settings.wg_refine)
     wg: u32 = shaders.wg_default,
+    /// how the plane fit's sums take the master (settings.plane_interp), as detector.wgsl's
+    /// flags: 0 bilinear, 4 bicubic, 8 Keys' six-point kernel
+    interp: u32 = 0,
     poses: Buf = .{},
     sims: Buf = .{},
     part: Buf = .{},
@@ -140,7 +143,7 @@ pub const Detector = struct {
     /// does not use them).
     pub fn sumsOf(self: *Detector, m: MasterGpu, fr: Frame, pats: Buf, n: u32, rotation_only: bool) void {
         var p = self.params(m, fr, n);
-        if (rotation_only) p.flags = 2;
+        if (rotation_only) p.flags = 2 else p.flags = self.interp;
         self.g.ensure(&self.part, @as(u64, n) * p.n_chunks * NS * 4);
         self.g.ensure(&self.sums, @as(u64, n) * NS * 4);
         // (the master's values lie beside its gradient: one table)

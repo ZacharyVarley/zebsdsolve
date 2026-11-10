@@ -32,6 +32,14 @@ pub const detector = sums_line ++ detector_body;
 pub const pca = common ++ "\n" ++ @embedFile("pca.wgsl");
 /// Patterns averaged with the neighbours in the map that resemble them (NLPAR).
 pub const nlpar = common ++ "\n" ++ @embedFile("nlpar.wgsl");
+/// Master patterns simulated: beam selection and the depth-integrated Bloch-wave solve. The
+/// beams a direction takes (MAX_N, from the device's workgroup memory) and the solve's rows a
+/// thread (BPT) are set by lines before the text (simulate.zig); `simulate` carries WebGPU's
+/// defaults (16 KiB: 512 beams).
+pub const simulate_body = @embedFile("simulate.wgsl");
+pub const simulate = "const MAX_N: u32 = 512u;\nconst BPT: u32 = 2u;\n" ++ simulate_body;
+/// The crystal's unit cell in a picture, for the app.
+pub const cellview = @embedFile("cellview.wgsl");
 
 /// Every module by name (tests/check_shaders.py builds each entry point of each).
 pub const modules = .{
@@ -43,4 +51,6 @@ pub const modules = .{
     .{ "mastersph", mastersph },
     .{ "pca", pca },
     .{ "nlpar", nlpar },
+    .{ "simulate", simulate },
+    .{ "cellview", cellview },
 };

@@ -8,7 +8,7 @@ runs from elsewhere, as CI does against an installed wheel).
 
 Synthetic: patterns simulated from the nickel master at known orientations under a known
 geometry, with noise. Indexing must recover the orientations, at the stored size and reduced;
-the pattern-centre vote and the pose fit must recover the geometry from a wrong start; two
+the pattern-centre vote and the plane fit must recover the geometry from a wrong start; two
 candidate phases must be told apart; patterns of pure noise must not be accepted, in one pass
 or in sweeps; averaging with neighbours (NLPAR) must be the method as written out in NumPy
 here, quiet a noisy map, and leave a grain one cell wide its own patterns.
@@ -296,7 +296,8 @@ def main():
     s.configure(sweeps=1, sweep_method="same")
     s.set_patterns(pats)
 
-    # the fits, from a wrong start
+    # the fits, from a wrong start (the vote on 5 × 5 patterns: the map is 8 × 12)
+    s.configure(fit_grid=5)
     s.set_geometry(pc=(0.50, 0.32, 0.58))
     f = s.fit_pc()
     e = np.abs(np.array(f["pc"]) - pc_true)
@@ -325,29 +326,29 @@ def main():
     check("the mean vote is still there", lm["density"] is None and lm["winner"] == tuple(int(v) for v in np.unravel_index(int(np.argmax(lm["scores"])), lm["scores"].shape)[::-1])
           and np.abs(np.array(fm["pc"]) - pc_true).max() < 0.02, f"error {np.round(np.abs(np.array(fm['pc']) - pc_true), 4)}")
     s.configure(pc_vote="ballots")
+    # from the vote, every pattern of this 8 × 12 map refined by itself, its source with it, and
+    # the plane through their source points: the beam hardly travels here (20 µm steps, 560 µm
+    # pixels), so the plane's slopes are not told, but its source at the map's middle is
     s.set_geometry(pc=f["pc"])
-    p = s.fit_pose()
+    s.configure(plane_stride=1)
+    p = s.fit_plane()
     e = np.abs(np.array(p["pc"]) - pc_true)
-    check("the pose fit refines the centre", e.max() < 0.002 and p["ncc"] >= p["start_ncc"],
-          f"pc {np.round(p['pc'], 5)}, error {np.round(e, 5)}, mean NCC {p['start_ncc']:.4f} → {p['ncc']:.4f}, {p['iterations']} iterations")
+    check("the plane fit refines the centre", e.max() < 0.002 and p["ncc"] >= p["start_ncc"] and p["start_pc"] == f["pc"],
+          f"pc {np.round(p['pc'], 5)}, error {np.round(e, 5)}, mean NCC {p['start_ncc']:.4f} → {p['ncc']:.4f}, {p['iterations']} rounds")
     cells, phs, quats, ncc = s.fit_patterns()
-    d = np.degrees(s.disorientation(quats, q_true[cells.astype(int)]))
-    # (the pose fit's own lattice, pose_grid a side: every cell of this 8 × 12 map)
-    check("the fit patterns' orientations are the true ones", len(cells) == 96 and np.median(d) < 0.15, f"median {np.median(d):.3f}° over {len(cells)} patterns")
-    # each of the pose's degrees of freedom can be held: here the detector distance, from a
-    # start off in all three coordinates
-    kept = s.geometry
-    s.set_geometry(pc=(pc_true[0] + 0.01, pc_true[1] - 0.01, pc_true[2] + 0.01))
-    s.configure(pose_z=False)
-    h = s.fit_pose()
-    s.configure(pose_z=True)
-    check("a held degree of freedom stays put", abs(h["pc"][2] - pc_true[2] - 0.01) < 1e-9 and abs(h["pc"][0] - pc_true[0]) < 0.008,
-          f"z held at {h['pc'][2]:.5f}; x, y moved to {h['pc'][0]:.5f}, {h['pc'][1]:.5f}")
-    s.set_geometry(pc=kept["pc"], rot=kept["rot"])
+    d_own = np.degrees(s.disorientation(quats, q_true[cells.astype(int)]))
+    rp = s.index()
+    d = np.degrees(s.disorientation(rp["quaternions"].reshape(-1, 4), q_true))
+    check("indexed where the plane puts the sources, the orientations are the true ones", len(cells) == 96 and np.median(d) < 0.15,
+          f"median {np.median(d):.3f}° (the fit patterns' own, each with its own source: {np.median(d_own):.3f}°)")
+    s.configure(plane_stride=2)
+    s.set_geometry(pc=p["pc"], rot=(0, 0, 0))
 
-    # the whole pose: a detector turned in a way the fit is not told, on a map wide enough for the
-    # beam's travel to show it (a tenth of the pattern), found from zero; and with the scale
-    # freed as well (Sim(3)), from a pixel size 30 % off
+    # the plane of source points (Winkelmann et al. 2020; kikuchipy's fit_pc): every fit pattern's
+    # own source point, and the transformation of the scan's indices through them. Nothing is
+    # asked of the steps, the pixel size or the tilt: the plane says them. Here the detector is
+    # turned (also about its normal) on a map wide enough for the beam's travel to show it (a
+    # tenth of the pattern), and the fit is told nothing of it.
     rng_pose = np.random.default_rng(11)
     rot_true = np.radians((1.0, -2.0, 1.5))
     s.set_patterns(np.zeros((20, 20, 60, 60), np.float32))
@@ -356,20 +357,72 @@ def main():
     qs /= np.linalg.norm(qs, axis=1, keepdims=True)
     sims = s.simulate(qs, cells=np.arange(400))
     s.set_patterns((sims + 0.5 * sims.std() * rng_pose.normal(size=sims.shape)).reshape(20, 20, 60, 60).astype(np.float32))
-    s.configure(fit_grid=9)
-    s.set_geometry(pc=(0.45, 0.23, 0.54), rot=(0, 0, 0))
-    w = s.fit_pose()
-    e_rot = np.abs(np.degrees(w["rot"]) - np.degrees(rot_true)).max()
-    check("the pose fit finds the detector's rotation", e_rot < 0.3 and np.abs(np.array(w["pc"]) - pc_true).max() < 0.001,
-          f"swing, tilt, twist {np.round(np.degrees(w['rot']), 3)} for {np.round(np.degrees(rot_true), 1)}; pc within {np.abs(np.array(w['pc']) - pc_true).max():.5f}")
-    s.configure(pose_scale=True)
-    s.set_geometry(pc=(0.45, 0.23, 0.54), rot=(0, 0, 0), px_um=400)
-    w = s.fit_pose()
-    e_rot = np.abs(np.degrees(w["rot"]) - np.degrees(rot_true)).max()
-    check("and the pixel size with it", abs(w["px_um"] - 560) < 6 and w["start_px_um"] == 400 and abs(s.geometry["px_um"] - w["px_um"]) < 1e-9 and e_rot < 0.3,
-          f"pixel {w['px_um']:.1f} µm for 560 from 400; rotation within {e_rot:.3f}°")
-    s.configure(pose_scale=False, fit_grid=5)
+    s.configure(fit_grid=9, plane_stride=1, plane_patterns_max=0)
+    s.set_geometry(pc=(0.45, 0.23, 0.54), rot=(0, 0, 0), px_um=560)
+    pl = s.fit_plane()
+    gp = s.geometry
+    pts = s.plane_points()
+    b = np.column_stack([pts["cells"] % 20, pts["cells"] // 20, np.ones(len(pts["cells"]))]).astype(float)
+    on_plane = np.abs((b @ pl["plane"].T)[:, :3] - pts["fit"]).max()
+    ws = pl["said"]
+    e_said = np.abs(np.degrees(ws["rot"]) - np.degrees(rot_true)).max()
+    rx = s.index()
+    d_nom = np.degrees(s.disorientation(rx["quaternions"].reshape(-1, 4), qs))
+    check("a plane is fitted through the fit patterns' own source points", pl["kind"] == "affine" and gp["plane_kind"] == "affine" and np.allclose(gp["plane"], pl["plane"]) and gp["rot"] == [0, 0, 0] and pl["frame"] == "nominal"
+          and e_said < 0.3 and np.abs(np.array(pl["pc"]) - pc_true).max() < 0.001 and gp["pc"] == pl["pc"] and np.abs(np.array(ws["step"]) - 1).max() < 0.02 and abs(np.degrees(ws["skew"])) < 0.5
+          and all(v > 0 for v in ws["rot_se"]) and abs(ws["sample_tilt_deg"] - 72) < 0.3 and len(pts["cells"]) == 400 and pts["used"].sum() == pl["n_used"] >= 380 and on_plane < 1e-9 and pl["ncc"] > pl["start_ncc"]
+          and 2 < np.median(d_nom) < 3.5,
+          f"swing, tilt, scan turn {np.round(np.degrees(ws['rot']), 2)} ± {np.round(np.degrees(ws['rot_se']), 2)}° for {np.round(np.degrees(rot_true), 1)}; steps {np.round(ws['step'], 3)}; source {np.round(pl['pc'], 5)}; {pl['n_used']} of {pl['n_patterns']} patterns, scatter {np.round(pl['rmsd'], 5)}; "
+          f"with the sample frame as the tilts say, orientations a median {np.median(d_nom):.2f}° from the true ones (the detector's turn)")
+    # the sample frame can follow the plane: orientations are then in the frame the plane has
+    s.configure(plane_frame="follow", plane_kind="projective")
+    s.set_geometry(pc=(0.45, 0.23, 0.54), rot=(0, 0, 0), px_um=560)
+    pf2 = s.fit_plane()
+    rx = s.index()
+    d_fol = np.degrees(s.disorientation(rx["quaternions"].reshape(-1, 4), qs))
+    check("the sample frame can follow the plane, and the plane can be projective", pf2["kind"] == "projective" and pf2["frame"] == "follow" and np.abs(np.degrees(s.geometry["rot"]) - np.degrees(rot_true)).max() < 0.3
+          and np.allclose(s.geometry["rot"], pf2["said"]["rot"]) and np.median(d_fol) < 0.3 and np.abs(pf2["plane"][3, :2]).max() < 1e-3 and abs(pf2["plane"][3, 2] - 1) < 1e-12,
+          f"the geometry's turn {np.round(np.degrees(s.geometry['rot']), 2)}°; orientations a median {np.median(d_fol):.3f}° from the true ones; the plane's projective row {np.round(1e5 * pf2['plane'][3, :2], 2)} e-5")
+    s.configure(plane_frame="nominal", plane_kind="affine")
+    # a pattern centre set by hand and the vote go back to one pattern centre and the scan's steps
+    s.set_geometry(pc=(0.45, 0.23, 0.54))
+    off_by_hand = s.geometry["plane_kind"]
+    s.fit_plane()
     s.set_geometry(rot=(0, 0, 0))
+    still = s.geometry["plane_kind"]
+    s.fit_pc()
+    check("the plane goes when the pattern centre is set or voted for", off_by_hand == "none" and still == "affine" and s.geometry["plane_kind"] == "none")
+    # the automatic fit, told a pattern centre well off: the vote, then the plane from there
+    s.set_geometry(pc=(0.47, 0.21, 0.56), rot=(0, 0, 0))
+    a = s.fit_geometry()
+    e_rot = np.abs(np.degrees(a["said"]["rot"]) - np.degrees(rot_true)).max()
+    e_pc = np.abs(np.array(a["pc"]) - pc_true).max()
+    e_vote = np.abs(np.array(a["start_pc"]) - pc_true).max()
+    check("the automatic fit is the vote, then the plane", e_rot < 0.3 and e_pc < 0.001 and e_vote < 0.01 and a["start_pc"] != [0.47, 0.21, 0.56] and s.geometry["plane_kind"] == "affine" and len(s.pc_levels()) >= 3,
+          f"the vote's pattern centre within {e_vote:.4f}, the plane's within {e_pc:.5f}; swing, tilt, scan turn within {e_rot:.3f}°")
+    again = s.fit_geometry()
+    check("run again, the automatic fit gives the same fit", again["pc"] == a["pc"] and np.array_equal(again["plane"], a["plane"]), f"source {np.round(again['pc'], 5)} both times")
+    # the master taken by a higher-order kernel, resampled: the same place
+    s.configure(plane_interp="keys6", plane_master_auto=False, plane_master_px=1.0)
+    s.set_geometry(pc=(0.45, 0.23, 0.54), rot=(0, 0, 0), px_um=560)
+    bc = s.fit_plane()
+    s.configure(plane_interp="bicubic", plane_master_auto=True, plane_master_px=0)
+    e_rot = np.abs(np.degrees(bc["said"]["rot"]) - np.degrees(rot_true)).max()
+    e_pc = np.abs(np.array(bc["pc"]) - pc_true).max()
+    check("the plane fit can take a resampled master by a higher-order kernel", e_rot < 0.3 and e_pc < 0.001 and bc["ncc"] > bc["start_ncc"], f"turns within {e_rot:.3f}°, pc within {e_pc:.5f}, mean NCC {bc['ncc']:.4f}")
+    # the pixel size is not the plane's business: given wrong, the plane is where it was, and
+    # it says the beam went 400 / 560 of what the steps and that pixel size say
+    s.set_geometry(pc=(0.45, 0.23, 0.54), rot=(0, 0, 0), px_um=400)
+    small = s.fit_plane()
+    e_rot = np.abs(np.degrees(small["said"]["rot"]) - np.degrees(rot_true)).max()
+    check("a wrong pixel size leaves the plane where it was", e_rot < 0.3 and np.abs(np.array(small["pc"]) - pc_true).max() < 0.001 and np.abs(np.array(small["said"]["step"]) - 400 / 560).max() < 0.02 and s.geometry["px_um"] == 400,
+          f"400 µm for 560: turns within {e_rot:.3f}°, steps {np.round(small['said']['step'], 3)} of what they say (400/560 = {400 / 560:.3f})")
+    # none given: the scan's own (these patterns came from memory and have none), else the
+    # detector's width over the pattern's pixels
+    s.set_geometry(px_um=0)
+    check("no pixel size is the detector's width over the pattern's", abs(s.geometry["px_um"] - 1000 * s.settings["detector_width_mm"] / 60) < 1e-9 and not s.scan["has_px"], f"{s.geometry['px_um']:.0f} µm")
+    s.configure(fit_grid=5, plane_stride=2, plane_patterns_max=4096)
+    s.set_geometry(rot=(0, 0, 0), step_x_um=200, step_y_um=200)
 
     # ── averaging with neighbours (NLPAR) ──
     # two grains, and a third one cell wide running through each of them, under noise six times
@@ -493,7 +546,7 @@ def main():
     # the same as an experiment on fitting: a detector turned and a wide map (the true geometry),
     # an orientation per cell, a tenth of the cells blank, patterns that are mostly background,
     # not square, counted twice over with different noise; then the geometry moved off, for the
-    # pose fit to bring back
+    # plane fit to bring back (the sample frame following the plane, which then has the turn)
     true_rot = np.radians((0.5, -1.0, 1.0))
     s.set_geometry(pc=(0.45, 0.25, 0.52), rot=tuple(true_rot), px_um=560, step_x_um=150, step_y_um=150)
     exp = dict(toy_seed=11, toy_rows=18, toy_cols=24, toy_height=60, toy_width=72, toy_grains=18 * 24, toy_blank=0.1, toy_contrast=0.3, toy_background_sigma=0.4, toy_counts=200)
@@ -503,7 +556,10 @@ def main():
     recount = np.array_equal(t5["quaternions"], t6["quaternions"]) and np.array_equal(t5["phase"], t6["phase"]) and not np.array_equal(s.pattern(3, processed=False), p5)
     blank = t6["phase"].ravel() < 0
     s.set_geometry(pc=(0.46, 0.24, 0.53), rot=(0, 0, 0))
-    pf = s.fit_pose()
+    # (every cell: on a map this small, every second one leaves the turns twice as uncertain)
+    s.configure(plane_frame="follow", plane_stride=1)
+    pf = s.fit_plane()
+    s.configure(plane_frame="nominal", plane_stride=2)
     e_pc = np.abs(np.array(pf["pc"]) - t6["geometry"]["pc"]).max()
     e_rot = np.degrees(np.abs(np.array(pf["rot"]) - t6["geometry"]["rot"]).max())
     rx = s.index()
@@ -515,7 +571,7 @@ def main():
         dx[mk] = np.degrees(s.disorientation(rx["quaternions"].reshape(-1, 4)[mk], t6["quaternions"].reshape(-1, 4)[mk], phase=k))
     check("a toy scan can be an experiment on fitting", s.scan["pattern_shape"] == (60, 72) and 0.05 < blank.mean() < 0.16 and recount and len(np.unique(t6["grain"])) > 300
           and np.allclose(t6["geometry"]["rot"], true_rot) and e_pc < 0.002 and e_rot < 0.5 and not acc[blank].any() and acc[~blank].mean() > 0.9 and np.nanmedian(dx) < 0.5,
-          f"{100 * blank.mean():.0f} % blank cells, none accepted ({100 * acc[~blank].mean():.0f} % of the crystals are); the pose fit from 0.01 off and no rotation: pattern centre within {e_pc:.5f}, rotation within {e_rot:.3f}°; orientations a median {np.nanmedian(dx):.3f}° from the answer")
+          f"{100 * blank.mean():.0f} % blank cells, none accepted ({100 * acc[~blank].mean():.0f} % of the crystals are); the plane fit from 0.01 off and no rotation: pattern centre within {e_pc:.5f}, rotation within {e_rot:.3f}°; orientations a median {np.nanmedian(dx):.3f}° from the answer")
     s.configure(toy_blank=0, toy_contrast=1, toy_background_sigma=0, toy_noise_seed=0, toy_counts=20, toy_height=60, toy_width=60, toy_grains=24)
     check("the masters' symmetries shape the search", ni["n_fold"] == 4 and ni["inversion"] and gan["n_fold"] in (2, 6) and not gan["inversion"], f"nickel: order {ni['n_fold']} about z, inversion; GaN: order {gan['n_fold']} at least, none")
     s.close()
@@ -536,7 +592,14 @@ def main():
     avg = np.mean([s.pattern(int(c), processed=False) for c in cells], axis=0)
     s.configure(static_background="average", dynamic_background="none", mask=False)
     check("the static background is the average pattern", len(cells) > 900 and np.abs(s.pattern(7) - unit(s.pattern(7, processed=False) - avg)).max() < 1e-4, f"over {len(cells)} patterns of a lattice")
+    bg = s.pattern(0, "background")
     s.configure(static_background="none", dynamic_background="subtract")
+    try:
+        s.pattern(0, "background")
+        refused = False
+    except Exception:
+        refused = True
+    check("the background subtracted can be looked at (and is refused when there is none)", np.abs(bg - avg).max() < 1e-3 * float(np.abs(avg).max()) and refused)
     # the dynamic background is a Gaussian blur of the pattern: a narrow one tap by tap out to
     # three sigma, a wide one from sums over boxes of pixels (prep.wgsl)
     stored = s.pattern(7, processed=False).astype(np.float64)
@@ -561,13 +624,15 @@ def main():
     check("pattern statistics give an overview", mean.shape == (55, 75) and abs(float(mean[0, 0]) - raw.mean()) < 1e-2 and (std > 0).all())
     s.add_phase(NI)
     # the vote on the real scan, from a wrong start: the ballots land where the scan's own
-    # centre is, the mean of the scores a ridge away from it
+    # centre is, the mean of the scores a ridge away from it (on 5 × 5 patterns: with 10 × 10,
+    # the default, the mean is off by 0.006 to 0.007 and the ballots by 0.004 to 0.006)
     off = {}
+    s.configure(fit_grid=5)
     for rule in ("ballots", "mean"):
         s.configure(pc_vote=rule)
         s.set_geometry(pc=(0.36, 0.16, 0.46))
         off[rule] = float(np.abs(np.array(s.fit_pc()["pc"]) - pc_file).max())
-    s.configure(pc_vote="ballots")
+    s.configure(pc_vote="ballots", fit_grid=10)
     s.set_geometry(pc=pc_file)
     check("ballots find the nickel scan's centre where the mean vote does not", off["ballots"] < 0.006 and off["mean"] > 2 * off["ballots"], f"off by {off['ballots']:.4f} against {off['mean']:.4f}")
     q_ref = np.fromfile(DATA / "nickel" / "reference_quaternions.f32", "<f4").reshape(-1, 4)
@@ -711,13 +776,94 @@ def main():
     check("a region of interest indexes only itself", int((s.results()["phase"] >= 0).sum()) == 4125)  # earlier results stay
     s.configure(roi_x=0, roi_y=0, roi_w=0, roi_h=0)
     s.set_geometry(pc=(0.50, 0.30, 0.55))
-    f = s.fit_pc()
-    p = s.fit_pose()
+    p = s.fit_geometry()
     e = np.abs(np.array(p["pc"]) - pc_file)
     check("the fits recover the nickel scan's pattern centre", e.max() < 0.004,
-          f"vote {np.round(f['pc'], 4)}, pose {np.round(p['pc'], 5)}, {np.round(e, 5)} from kikuchipy's, mean NCC {p['ncc']:.4f}")
+          f"vote {np.round(p['start_pc'], 4)}, plane {np.round(p['pc'], 5)}, {np.round(e, 5)} from kikuchipy's, mean NCC {p['ncc']:.4f}")
     ev = s.events()
-    check("events are queued for the caller", any(x["kind"] == "pc" for x in ev) and any(x["kind"] == "pose" for x in ev) and any(x["kind"] == "progress" for x in ev))
+    check("events are queued for the caller", any(x["kind"] == "pc" for x in ev) and any(x["kind"] == "progress" and x["stage"] == "plane" for x in ev))
+    s.close()
+
+    # ── a master pattern simulated from a crystal ──
+    s = ze.Solver()
+    # the CIF reader: operators listed in a non-standard setting (C2 written with unique axis c,
+    # on the basis (c, a, b)), the group from the sites of a P1 file, and a file that contradicts
+    # itself. (From operators listed on a sheared basis the reader, as ebsdsim's does, makes the
+    # operators standard but leaves the cell unreduced: a valid C2 cell, not the conventional one.)
+    c2 = [((1, 0, 0, 0, 1, 0, 0, 0, 1), (0, 0, 0)), ((-1, 0, 0, 0, 1, 0, 0, 0, -1), (0, 0, 0)),
+          ((1, 0, 0, 0, 1, 0, 0, 0, 1), (0.5, 0.5, 0)), ((-1, 0, 0, 0, 1, 0, 0, 0, -1), (0.5, 0.5, 0))]
+    P = np.array([[0, 1, 0], [0, 0, 1], [1, 0, 0]])
+    Pi = np.linalg.inv(P)
+    xyz = lambda W, w: ",".join("".join(f"{'+-'[int(c < 0)]}{'xyz'[j]}" for j, c in enumerate(row) if c).lstrip("+") + (f"+{t % 1:.4g}" if t % 1 else "") for row, t in zip(W, w))
+    cell_std = (5.1, 3.2, 6.3, 90.0, 104.0, 90.0)
+    G = (lambda a, b, c, al, be, ga: np.array([[a * a, a * b * np.cos(np.radians(ga)), a * c * np.cos(np.radians(be))], [a * b * np.cos(np.radians(ga)), b * b, b * c * np.cos(np.radians(al))], [a * c * np.cos(np.radians(be)), b * c * np.cos(np.radians(al)), c * c]]))(*cell_std)
+    G2 = P.T @ G @ P
+    ln = np.sqrt(np.diag(G2))
+    ang = lambda i, j: np.degrees(np.arccos(G2[i, j] / (ln[i] * ln[j])))
+    sites = [("Al", (0.0, 0.0, 0.0)), ("O", (0.31, 0.0, 0.27)), ("O", (0.12, 0.41, 0.66))]
+    cif = "data_c2_nonstandard\n" + "".join(f"_cell_length_{k} {v:.6f}\n" for k, v in zip("abc", ln)) + f"_cell_angle_alpha {ang(1, 2):.6f}\n_cell_angle_beta {ang(0, 2):.6f}\n_cell_angle_gamma {ang(0, 1):.6f}\n"
+    cif += "loop_\n_space_group_symop_operation_xyz\n" + "".join(f"'{xyz(np.rint(Pi @ np.array(W).reshape(3, 3) @ P).astype(int), Pi @ np.array(w))}'\n" for W, w in c2)
+    cif += "loop_\n_atom_site_label\n_atom_site_fract_x\n_atom_site_fract_y\n_atom_site_fract_z\n" + "".join(f"{e}{i} {x:.6f} {y:.6f} {z:.6f}\n" for i, (e, p0) in enumerate(sites) for x, y, z in [(Pi @ np.array(p0)) % 1])
+    c = s.set_crystal(cif.encode())
+    vol = lambda cl: np.prod(cl[:3]) * np.sqrt(1 - sum(np.cos(np.radians(cl[3:])) ** 2) + 2 * np.prod(np.cos(np.radians(cl[3:]))))
+    check("a CIF in a non-standard setting reads into the standard one", c["space_group"] == 5 and c["reading"]["setting"] != "standard" and abs(vol(c["cell"]) - vol(cell_std)) < 1e-6
+          and [q["multiplicity"] for q in c["sites"]] == [2, 4, 4] and sorted(np.round(c["cell"][:3], 6)) == sorted(np.round(cell_std[:3], 6)),
+          f"{c['reading']['symmetry_provenance']}; {c['reading']['setting']}; cell {np.round(c['cell'], 4).tolist()}")
+    p1 = ("data_ni_p1\n_cell_length_a 3.524\n_cell_length_b 3.524\n_cell_length_c 3.524\n_cell_angle_alpha 90\n_cell_angle_beta 90\n_cell_angle_gamma 90\n"
+          "_symmetry_space_group_name_H-M 'P 1'\nloop_\n_atom_site_label\n_atom_site_fract_x\n_atom_site_fract_y\n_atom_site_fract_z\n"
+          "Ni1 0 0 0\nNi2 0.5 0.5 0\nNi3 0.5 0 0.5\nNi4 0 0.5 0.5\n")
+    c = s.set_crystal(p1.encode())
+    check("a P1 CIF's group comes from its sites", c["space_group"] == 225 and len(c["sites"]) == 1 and c["sites"][0]["multiplicity"] == 4, c["reading"]["symmetry_provenance"])
+    try:
+        s.set_crystal(cif.replace("data_c2_nonstandard\n", "data_c2_nonstandard\n_space_group_IT_number 2\n").encode())
+        check("a CIF that contradicts itself is refused, saying why", False)
+    except ze.Error as e:
+        check("a CIF that contradicts itself is refused, saying why", "space group 5 but it declares IT number 2" in str(e), str(e))
+    # a crystal changed in place: a cubic cell's a carries b and c with it; a site's B
+    s.set_crystal({"space_group": 225, "cell": [3.5] * 3 + [90, 90, 90], "sites": [{"symbol": "Ni", "xyz": [0, 0, 0], "b_iso": 0.5}]})
+    e1 = s.edit_crystal(cell=(3.524, 3.0, 3.1, 80, 90, 90), sites=[{"b_iso": 0.35}])
+    try:
+        s.edit_crystal(sites=[{"b_iso": -1}])
+        refused = False
+    except ze.Error:
+        refused = True
+    check("a crystal's free lattice parameters and a site's B can be changed", e1["cell"] == [3.524, 3.524, 3.524, 90, 90, 90] and abs(e1["sites"][0]["b_iso"] - 0.35) < 1e-12 and e1["free"] == [True, False, False, False, False, False] and refused,
+          f"cell {e1['cell']}, B {e1['sites'][0]['b_iso']}")
+    # the bundled nickel master is ebsdsim's (its rank 20, no correction): the same crystal,
+    # simulated here under its settings, at the default rank (3) with the correction
+    s.set_crystal({"space_group": 225, "cell": [3.47514587] * 3 + [90, 90, 90], "sites": [{"symbol": "Ni", "xyz": [0, 0, 0], "b_iso": 0.5}]})
+    # (ebsdsim has no weak beams in its intensity: c2 off to compare like with like; the default, 40, sits at 0.9977 from it)
+    s.configure(sim_voltage_kv=20, sim_tilt_deg=70, sim_halfw=250, sim_dmin_nm=0.05, sim_c_weak=0)
+    t0 = time.perf_counter()
+    sm = s.simulate_master()
+    dt = time.perf_counter() - t0
+    mine = s.simulated_master()
+    s.add_phase(NI)
+    theirs = s.master(0)
+    r = float(np.corrcoef(mine.ravel(), theirs.ravel())[0, 1])
+    check("a simulated master is ebsdsim's", sm["n_k"] == 11017 and sm["failed"] == 0 and mine.shape == (2, 501, 501) and r > 0.999,
+          f"correlation {r:.5f} over both hemispheres, {sm['n_k']} directions, {sm['n_bins_run']} of {sm['n_bins']} bins (ebsdsim: 7), at most {sm['max_beams']} beams, {dt:.2f} s")
+    with tempfile.TemporaryDirectory() as tmp:
+        npz = Path(tmp) / "sim.npz"
+        s.save_simulation(npz)
+        s.clear_phases()
+        k = s.add_simulated_phase("Ni simulated")
+        s.add_phase(npz)
+        same = np.array_equal(s.master(k), s.master(k + 1))
+    check("a simulation saved as .npz reads back as it was", same and s.phases[k]["side"] == 501 and s.phases[k + 1]["voltage_kv"] == 20)
+    s.close()
+    # the real scan indexed with the simulated master, CLAHE on
+    s = ze.Solver()
+    s.open(SCAN)
+    s.configure(clahe=True)
+    s.set_crystal({"space_group": 225, "cell": [3.47514587] * 3 + [90, 90, 90], "sites": [{"symbol": "Ni", "xyz": [0, 0, 0], "b_iso": 0.5}]})
+    s.configure(sim_halfw=250)
+    s.simulate_master()
+    s.add_simulated_phase("Ni")
+    r = s.index()
+    dis = np.degrees(s.disorientation(r["quaternions"].reshape(-1, 4), q_ref))
+    check("the nickel scan indexes with a simulated master", np.median(dis) < 0.6 and (dis < 3).mean() > 0.97,
+          f"median {np.median(dis):.3f}° from kikuchipy's, within 3°: {100 * (dis < 3).mean():.1f} %, mean NCC {r['ncc'].mean():.3f}, accepted {100 * (r['sweep'] >= 0).mean():.1f} %")
     s.close()
 
     # ── the plain functions ──

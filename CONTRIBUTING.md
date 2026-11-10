@@ -24,16 +24,23 @@ shaders/            WGSL, the single copy (compiled into the library and the was
   so3.wgsl            normalized cross-correlation over SO(3), its peak
   detector.wgsl       master on the detector: simulation, fit sums, refinement, NMI and what chance
                       gives it, dictionary
-  mastersph.wgsl      master filters on the sphere: smoothing, symmetrization; its gradient field
+  mastersph.wgsl      master filters on the sphere: smoothing, symmetrization; its gradient field;
+                      the app's picture of a master (sphere_view: globe, Lambert, stereographic,
+                      joint Lambert)
   pca.wgsl            a dictionary's leading components (Oja's rule) and matching in them
   nlpar.wgsl          patterns averaged with the neighbours in the map that resemble them
+  simulate.wgsl       a master pattern's directions: beam selection (strong and Bethe's weak), the
+                      depth integral's Lyapunov solve (rational Krylov by preconditioned BiCGSTAB,
+                      squared Smith), its dual-weighted correction, the intensity
+  cellview.wgsl       the app's picture of a crystal's unit cell: atoms and edges, ray-cast
 src/gpu/            GPU layer: gpu.zig (policy), native.zig (webgpu.h), web.zig (browser imports)
 src/io/             file.zig (ranged and vectored reads, both backends, block cache), hdf5.zig (the
-                    HDF5 reader), npz.zig (ZIP + NPY), codec.zig (inflate, LZF, shuffle)
+                    HDF5 reader), npz.zig (ZIP + NPY), npz_write.zig, codec.zig (inflate, LZF,
+                    shuffle)
 src/scan.zig        every scan format behind `read(first, n)` and `readCells(cells)`
 src/reduce.zig      patterns reduced on the host as they are read (binning, area resampling)
 src/master.zig      master patterns (ebsdsim, EMsoft), their measured symmetry, their harmonics
-src/rot.zig         quaternions, Bunge angles, so(3) / se(3), cubochoric grid
+src/rot.zig         quaternions, Bunge angles, so(3), cubochoric grid
 src/sym.zig         Laue groups, fundamental zones, disorientation, inverse pole figure colour keys
 src/sh.zig          Gauss–Legendre grids, Legendre functions, Wigner d(π/2), host transforms
 src/lambert.zig     the equal-area square ↔ hemisphere map
@@ -44,22 +51,38 @@ src/detector.zig    schedule of the detector kernels
 src/pca.zig         schedule of the dictionary's components: learning, coefficients, matching
 src/nlpar.zig       schedule of the averaging with neighbours (NLPAR): its passes over a window
 src/pcfit.zig       the pattern-centre vote
-src/posefit.zig     the pose fit: SE(3) or Sim(3) with the fit patterns' orientations, in the
-                    tangent space (Levenberg–Marquardt, Schur complement)
+src/planefit.zig    the plane fit: each fit pattern's own source point and orientation
+                    (Levenberg–Marquardt, a pattern at a time, all on the device together)
+src/plane.zig       the plane of source points: its fit to the measured points, what it says
 src/engine.zig      the engine both front ends call: scan, phases, the two pattern resolutions,
                     batches, sweeps, results
 src/output.zig      maps as images, .ang and .ctf
+src/sim/            master patterns from a crystal, host side: group.zig (space-group operators,
+                    Hall symbols), cif.zig (the CIF reader: symmetry, settings, the standard setting),
+                    crystal.zig (orbits, metrics, point group, fundamental sector), scatter.zig
+                    (Weickenmeier–Kohl factors), potential.zig (the potential's tables), energy.zig
+                    (the energy model; its weights surrogate.bin), kgrid.zig (the directions),
+                    tables.zig (elements, coefficients, Hall symbols and names), cellframe.zig
+                    (the unit cell as the app draws it: its atoms, colours and frame)
+src/simulate.zig    schedule of a master pattern's simulation: bins, tiles, the result and its .npz
+src/sphereview.zig  a master in a picture for the app: its sheets kept on the device, a view rendered
+src/cellview.zig    the crystal's unit cell in a picture for the app: its atoms kept on the device
 src/settings.zig    every option with the app's defaults (JSON in, JSON out)
 src/exports.zig     the C ABI; native_api.zig and web_api.zig are its two roots
 python/zebsdsolve/  __init__.py (Solver), api.py (the plain functions), _native.py (ctypes), app.py (the `zebsdsolve` command)
 web/zebsdsolve.js   the browser adapter: WebGPU and files for the wasm module
 web/app/            the app (js/app.js, js/fields.js: one control per setting, js/votes.js: the
-                    pattern-centre search laid open, js/draw.js)
+                    pattern-centre search laid open, js/planeview.js: the plane fit's points,
+                    js/masterview.js: a master in four projections, turned by the mouse (the
+                    engine renders it), js/cellview.js: the crystal's cell, likewise, js/turn.js:
+                    the rotations and the dragging they share, js/energy.js: the energy model's
+                    charts, js/draw.js; cif/: the Simulate step's preset crystals)
 tests/              probe.zig, check_shaders.py, test_api.py, test_app.py, test_web.mjs
 examples/           the tutorials (jupytext percent scripts)
 docs/               how-it-works.md: the methods and the measurements behind the defaults
 scripts/            fetch_deps.py, build_wheels.py, build_backend.py, build_web.mjs, serve.mjs,
-                    run_tutorials.py, check_formats.py
+                    run_tutorials.py, check_formats.py, pack_surrogate.py (the energy model's
+                    weights into src/sim/surrogate.bin)
 testdata/           the nickel scan and master patterns the tests and the app's example use
 ```
 
@@ -96,7 +119,7 @@ python scripts/check_formats.py FILE …        # a scan reader against kikuchip
 ```
 
 - **`zig build test`** pins the conventions by brute force: harmonics rotate by the Wigner D-matrix, the correlation's Fourier formula equals the integral it stands for, the HDF5 and NPZ readers reproduce what h5py and NumPy read from the test files, and every inverse pole figure key gives symmetry-equivalent directions one colour, without a jump, for all eleven Laue classes.
-- **`test_api`** simulates scans with known geometry, orientations and phases and checks that indexing (at the stored size, reduced, in sweeps), the vote and the pose fit recover them (a detector turned in a way the fit is not told, and a pixel size given 30 % off, included), and that cells of pure noise are not accepted; then indexes the nickel scan against the orientations and the pattern centre kikuchipy refined for it, and checks the filters against their definitions (CLAHE against the same algorithm written out in NumPy).
+- **`test_api`** simulates scans with known geometry, orientations and phases and checks that indexing (at the stored size, reduced, in sweeps), the vote and the plane fit recover them (a detector turned in a way the fit is not told, and a pixel size given 30 % off, included), and that cells of pure noise are not accepted; then indexes the nickel scan against the orientations and the pattern centre kikuchipy refined for it, and checks the filters against their definitions (CLAHE against the same algorithm written out in NumPy).
 - **`test_web`** runs the example in the app from a wrong pattern centre: fit, fit, index, and the same comparison with kikuchipy; then again in two sweeps and on binned patterns, and the page's own moving parts: the tabs, the pattern indexed on the spot, the search's volume (its slices, and that they follow the pattern centre a fit moves), a toy scan made from the master and indexed against its own answer, the averaging's preview following its settings, the map's key (and that it follows the colours chosen) and zoom, a project file dropped on the window.
 - **The tutorials** end with checks against the same truths, so they fail like tests.
 
@@ -118,7 +141,7 @@ Changes to a fit, to the indexing or to a default should keep these passing, and
 - **Result structs** cross the C ABI in three places: the Zig `extern struct`, the byte offsets in `web/zebsdsolve.js`, and the `ctypes.Structure` in `python/zebsdsolve/_native.py`. Append fields at the end and update all three together.
 - **GPU work:**
   - Buffers are allocated once and grown; patterns and masters stay on the GPU between calls.
-  - Dispatches are batched into few submits; readbacks are few and batched (each costs about 3 ms in a browser). Indexing reads back once per batch (the records and chance's scores together); the pose fit once per iteration; orientation refinement runs wholly on the device.
+  - Dispatches are batched into few submits; readbacks are few and batched (each costs about 3 ms in a browser). Indexing reads back once per batch (the records and chance's scores together); the plane fit once per step; orientation refinement runs wholly on the device.
   - The spherical work buffers are one set for every bandwidth (`Engine.sp`); a bandwidth keeps only its tables and each phase's weights (`Band`), so sweeps and fits can alternate between bandwidths.
   - Every distinct shader text is a compile on the user's machine. The FFT is one text for every length (lengths are powers of two); nothing is generated per size.
   - Lay a table out for the invocations that read it together: the index neighbouring invocations differ in goes innermost, so that one step of a workgroup reads neighbouring words (the correlation's weight tables with k innermost, the Legendre table with the pair innermost, a kernel's partial sums with the chunk innermost). Scattered reads cost several times the arithmetic they feed; this layout is what a new kernel should start from.
@@ -134,6 +157,7 @@ Changes to a fit, to the indexing or to a default should keep these passing, and
 
 ## Releasing
 
-1. **Version.** Set the version in both `python/zebsdsolve/__init__.py` (`__version__`) and `src/engine.zig` (`version`). The wheel build refuses a mismatch.
-2. **Tag.** Push a tag `vX.Y.Z`. `.github/workflows/release.yml` then builds the six wheels and the site; tests the wheels on Linux, Windows and macOS (on the M1, on its GPU, in headless Chrome, and by running the tutorials); publishes to PyPI by trusted publishing; attaches the wheels, the site and the executed tutorials to a GitHub Release; and deploys the site to GitHub Pages with `zebsdsolve/pipelines.json`, the pipelines the M1's browser test compiled (`test_web.mjs --save-pipelines`), which a first visit starts compiling as the page loads. Run by hand (Actions → release → Run workflow), it only builds and tests.
+1. **Changelog.** In `CHANGELOG.md`, rename **Unreleased** to the version and date (`## X.Y.Z — YYYY-MM-DD`) and start a new, empty **Unreleased** above it. That section becomes the GitHub Release's notes; the release stops if it is missing.
+2. **Version.** Set the version in both `python/zebsdsolve/__init__.py` (`__version__`) and `src/engine.zig` (`version`). The wheel build refuses a mismatch.
+3. **Tag.** Push a tag `vX.Y.Z`. `.github/workflows/release.yml` then builds the six wheels and the site; tests the wheels on Linux, Windows and macOS (on the M1, on its GPU, in headless Chrome, and by running the tutorials); publishes to PyPI by trusted publishing; attaches the wheels, the site and the executed tutorials to a GitHub Release; and deploys the site to GitHub Pages with `zebsdsolve/pipelines.json`, the pipelines the M1's browser test compiled (`test_web.mjs --save-pipelines`), which a first visit starts compiling as the page loads. Run by hand (Actions → release → Run workflow), it only builds and tests.
 3. **One-time setup.** On PyPI, add a trusted publisher for this repository: workflow `release.yml`, environment `pypi`. In the repository settings, create the environment `pypi`, set Pages' source to **GitHub Actions**, and under Environments → `github-pages` → Deployment branches and tags add a tag rule `v*`.

@@ -229,6 +229,8 @@ jobs:
     permissions:
       contents: write
     steps:
+      - uses: actions/checkout@v7
+
       - uses: actions/download-artifact@v8
         with:
           name: release
@@ -243,5 +245,8 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          # the notes: CHANGELOG.md's section for this version, from its heading (## X.Y.Z …) to the next
+          awk -v v="${GITHUB_REF_NAME#v}" '/^## / { on = ($2 == v); next } on' CHANGELOG.md > notes.md
+          test -s notes.md || { echo "CHANGELOG.md has no section for ${GITHUB_REF_NAME#v}"; exit 1; }
           (cd tutorials && zip -q "../zebsdsolve-tutorials-$GITHUB_REF_NAME.zip" *.html *.ipynb)
-          gh release create "$GITHUB_REF_NAME" out/wheels/*.whl out/zebsdsolve-web-*.zip tutorials/*.ipynb "zebsdsolve-tutorials-$GITHUB_REF_NAME.zip" --repo "$GITHUB_REPOSITORY" --title "zebsdsolve $GITHUB_REF_NAME" --generate-notes
+          gh release create "$GITHUB_REF_NAME" out/wheels/*.whl out/zebsdsolve-web-*.zip tutorials/*.ipynb "zebsdsolve-tutorials-$GITHUB_REF_NAME.zip" --repo "$GITHUB_REPOSITORY" --title "zebsdsolve $GITHUB_REF_NAME" --notes-file notes.md

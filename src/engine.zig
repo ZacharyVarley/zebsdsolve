@@ -34,6 +34,8 @@ const spherical = @import("spherical.zig");
 const detector = @import("detector.zig");
 const pca_mod = @import("pca.zig");
 const nlpar_mod = @import("nlpar.zig");
+const crystal_mod = @import("sim/crystal.zig");
+const simulate_mod = @import("simulate.zig");
 
 const Gpu = gpu_mod.Gpu;
 const Buf = gpu_mod.Buf;
@@ -41,7 +43,7 @@ const Allocator = std.mem.Allocator;
 pub const Settings = settings_mod.Settings;
 pub const Geometry = geometry_mod.Geometry;
 
-pub const version = "0.1.0";
+pub const version = "0.2.0";
 
 /// A pattern resolution: reduced by settings.binning, or as stored.
 pub const Level = enum(u1) { reduced = 0, full = 1 };
@@ -62,6 +64,9 @@ pub const ScanInfo = extern struct {
     format: u32 = 0,
     voltage_kv: f64 = 0,
     bytes: f64 = 0,
+    /// 1 when the file gave a pixel size
+    has_px: u32 = 0,
+    _pad: u32 = 0,
 };
 
 pub const PhaseInfo = extern struct {
@@ -365,8 +370,14 @@ const PatternCache = struct {
     /// the cell each slot holds; slots fill in order and then turn over from `next`
     cells: std.ArrayList(u64) = .empty,
     data: std.ArrayList(u8) = .empty,
-    slot_of: std.AutoHashMapUnmanaged(u64, u32) = .empty,
+    /// The slot each map cell is in (NO_SLOT: none), by cell: a table, not a hash map. A hash
+    /// map that drops an entry for every one it takes fills with tombstones, and once none of
+    /// its places is free a cell it does not hold costs a walk over all of them: on a scan
+    /// larger than the cache that halved the speed of indexing in the browser.
+    slot_of: std.ArrayList(u32) = .empty,
     next: u32 = 0,
+
+    const NO_SLOT: u32 = 0xffffffff;
 
     fn deinit(self: *PatternCache, gpa: Allocator) void {
         self.cells.deinit(gpa);
@@ -386,17 +397,25 @@ const PatternCache = struct {
     }
 
     fn get(self: *const PatternCache, cell: u64) ?[]const u8 {
-        const slot = self.slot_of.get(cell) orelse return null;
+        if (cell >= self.slot_of.items.len) return null;
+        const slot = self.slot_of.items[@intCast(cell)];
+        if (slot == NO_SLOT) return null;
         return self.data.items[@as(usize, slot) * self.pb ..][0..self.pb];
     }
 
     /// Keep a pattern (a failed allocation only means it is not kept).
     fn put(self: *PatternCache, gpa: Allocator, cell: u64, bytes: []const u8) void {
         const max = self.slots();
-        if (max == 0 or self.slot_of.contains(cell)) return;
+        if (max == 0 or self.get(cell) != null) return;
+        if (cell >= self.slot_of.items.len) {
+            // (the table grows to the cell asked for and half as much again: a scan's cells come in order)
+            const old = self.slot_of.items.len;
+            const want: usize = @intCast(cell + cell / 2 + 1024);
+            self.slot_of.resize(gpa, want) catch return;
+            @memset(self.slot_of.items[old..], NO_SLOT);
+        }
         var slot: u32 = undefined;
         if (self.cells.items.len < max) {
-            self.slot_of.ensureUnusedCapacity(gpa, 1) catch return;
             self.cells.append(gpa, cell) catch return;
             self.data.appendSlice(gpa, bytes) catch {
                 self.cells.items.len -= 1;
@@ -406,11 +425,11 @@ const PatternCache = struct {
         } else {
             slot = self.next;
             self.next = @intCast((@as(usize, slot) + 1) % max);
-            _ = self.slot_of.remove(self.cells.items[slot]);
+            self.slot_of.items[@intCast(self.cells.items[slot])] = NO_SLOT;
             self.cells.items[slot] = cell;
             @memcpy(self.data.items[@as(usize, slot) * self.pb ..][0..self.pb], bytes);
         }
-        self.slot_of.putAssumeCapacity(cell, slot);
+        self.slot_of.items[@intCast(cell)] = slot;
     }
 };
 
@@ -496,6 +515,21 @@ pub const Engine = struct {
     g: Gpu,
     set: Settings = .{},
     geo: Geometry = .{},
+    /// The geometry as it was given: by the scan when it was opened, and by the caller since
+    /// (exports.ze_set_geometry). The fits change `geo` and never this, and start from this, so
+    /// that a fit is a function of the scan, the settings and what was given, not of the fits
+    /// run before it.
+    geo_given: Geometry = .{},
+    /// the source points the last plane fit measured, a fit pattern each (planefit.plane)
+    plane_points: std.ArrayList(@import("planefit.zig").PlanePoint) = .empty,
+    /// the crystal a master pattern is simulated for, and the last simulation (simulate.zig)
+    crystal: ?crystal_mod.Cell = null,
+    sim: ?simulate_mod.Simulation = null,
+    /// the masters the app shows on a globe, kept on the device (sphereview.zig): a phase's,
+    /// the simulation's
+    view: [2]@import("sphereview.zig").Cache = .{ .{}, .{} },
+    /// the crystal's cell the app shows, kept on the device (cellview.zig)
+    cell_view: @import("cellview.zig").Cache = .{},
     events: events_mod.Sink,
     source: Source = .none,
     phases: std.ArrayList(Phase) = .empty,
@@ -641,6 +675,11 @@ pub const Engine = struct {
         for (self.pc_axes) |a| gpa.free(a);
         @import("pcfit.zig").clearHistory(self);
         self.pc_history.deinit(gpa);
+        self.plane_points.deinit(gpa);
+        if (self.crystal) |*c| c.deinit();
+        if (self.sim) |*x| x.deinit();
+        for (&self.view) |*v| v.deinit(&self.g);
+        self.cell_view.deinit(&self.g);
         self.events.deinit();
         self.g.deinit();
         gpa.destroy(self);
@@ -748,6 +787,8 @@ pub const Engine = struct {
         self.closeScan();
         self.source = .{ .memory = .{ .data = copy, .info = .{ .rows = rows, .cols = cols, .pat_h = h, .pat_w = w, .pixel = pixel } } };
         try self.res.resize(self.gpa, @as(usize, rows) * cols);
+        // (patterns from memory come with no geometry: a pixel size set by hand stays)
+        if (!(self.geo.px_um > 0)) self.geo.px_um = self.defaultPx();
     }
 
     fn adoptInfo(self: *Engine, si: scan_mod.Info) !void {
@@ -759,9 +800,18 @@ pub const Engine = struct {
         }
         if (!std.math.isNan(si.sample_tilt_deg)) g.sample_tilt_deg = si.sample_tilt_deg;
         if (!std.math.isNan(si.detector_tilt_deg)) g.detector_tilt_deg = si.detector_tilt_deg;
-        if (!std.math.isNan(si.px_um)) g.px_um = si.px_um;
+        g.px_um = self.defaultPx();
         if (!std.math.isNan(si.step_x_um)) g.step_x_um = si.step_x_um;
         if (!std.math.isNan(si.step_y_um)) g.step_y_um = si.step_y_um;
+    }
+
+    /// The detector's pixel size when none is set by hand: the file's, or for a scan that
+    /// records none the detector's width (settings.detector_width_mm) over the pattern's
+    /// stored pixels across. 0 with no scan open.
+    pub fn defaultPx(self: *const Engine) f64 {
+        const i = self.info() catch return 0;
+        if (!std.math.isNan(i.px_um) and i.px_um > 0) return i.px_um;
+        return 1000.0 * self.set.detector_width_mm / @as(f64, @floatFromInt(@max(i.pat_w, 1)));
     }
 
     pub fn info(self: *const Engine) !scan_mod.Info {
@@ -776,6 +826,7 @@ pub const Engine = struct {
         const i = self.info() catch return .{};
         var out: ScanInfo = .{ .rows = i.rows, .cols = i.cols, .pat_h = i.pat_h, .pat_w = i.pat_w, .pixel = @intFromEnum(i.pixel) };
         out.has_pc = @intFromBool(!std.math.isNan(i.pc[0]));
+        out.has_px = @intFromBool(!std.math.isNan(i.px_um));
         if (!std.math.isNan(i.voltage_kv)) out.voltage_kv = i.voltage_kv;
         switch (self.source) {
             .file => |s| {
@@ -1319,14 +1370,20 @@ pub const Engine = struct {
         }
         const max_win: usize = @intCast(@max(1, nlpar_bytes / (px_max * 4)));
         var t0: u32 = 0;
+        // How many cells to try at once: all of them first, and from then on twice what the
+        // last part held. (Trying all that remain every time builds their whole window again
+        // for every part: for cells far apart, each with a window of its own, that was most
+        // of the time an upload took, on the host.)
+        var guess: u32 = n;
         while (t0 < n) {
             // as many of the cells at once as their window allows
-            var m: u32 = n - t0;
+            var m: u32 = @min(n - t0, guess);
             var win = try self.nlparWindow(cells[t0..][0..m]);
             while (m > 1 and self.nl_cells.items.len > max_win) {
                 m = (m + 1) / 2;
                 win = try self.nlparWindow(cells[t0..][0..m]);
             }
+            guess = m *| 2;
             const bytes = try self.readCells(self.nl_cells.items, true);
             var reported = false;
             for (0..2) |k| {
@@ -1382,17 +1439,30 @@ pub const Engine = struct {
         return geo.translation(sz[0], sz[1]);
     }
 
-    /// Beam offset of a cell from the map's reference (its centre), in a level's pixels.
+    /// Beam offset of a cell from the map's reference (its centre), in a level's pixels: by
+    /// the scan's steps, or (with a plane of source points) what the plane says.
     pub fn offsetOf(self: *const Engine, geo: *const Geometry, cell: u64, lv: Level) rot.Vec3 {
+        if (geo.plane_kind != 0) {
+            const t0 = self.translationOf(geo, lv) catch return .{ 0, 0, 0 };
+            return rot.sub(t0, self.placeOf(geo, cell, lv) catch return .{ 0, 0, 0 });
+        }
         const i = self.info() catch return .{ 0, 0, 0 };
         const row: f64 = @floatFromInt(cell / i.cols);
         const col: f64 = @floatFromInt(cell % i.cols);
         return geo.scanOffset(row, col, 0.5 * @as(f64, @floatFromInt(i.rows - 1)), 0.5 * @as(f64, @floatFromInt(i.cols - 1)), self.set.scan_x_sign, self.set.scan_y_sign, self.binOf(lv));
     }
 
-    /// The detector position for a cell under `geo`, in a level's pixels.
+    /// The detector's position for a cell under `geo`, in a level's pixels.
+    pub fn placeOf(self: *const Engine, geo: *const Geometry, cell: u64, lv: Level) !rot.Vec3 {
+        const i = try self.info();
+        const sz = try self.sizeOf(lv);
+        const row: f64 = @floatFromInt(cell / i.cols);
+        const col: f64 = @floatFromInt(cell % i.cols);
+        return geo.positionFor(row, col, 0.5 * @as(f64, @floatFromInt(i.rows - 1)), 0.5 * @as(f64, @floatFromInt(i.cols - 1)), self.set.scan_x_sign, self.set.scan_y_sign, self.binOf(lv), sz[0], sz[1]);
+    }
+
     pub fn positionOf(self: *const Engine, geo: *const Geometry, cell: u64, lv: Level) ![3]f32 {
-        const t = rot.sub(try self.translationOf(geo, lv), self.offsetOf(geo, cell, lv));
+        const t = try self.placeOf(geo, cell, lv);
         return .{ @floatCast(t[0]), @floatCast(t[1]), @floatCast(t[2]) };
     }
 
@@ -1401,6 +1471,11 @@ pub const Engine = struct {
     pub fn addPhase(self: *Engine, path: []const u8) !u32 {
         var m = try master_mod.load(self.gpa, path);
         errdefer m.deinit();
+        return self.addMaster(m);
+    }
+
+    /// Add a candidate phase whose master is already loaded (the engine owns it from here).
+    pub fn addMaster(self: *Engine, m: master_mod.Master) !u32 {
         try self.peaks.ensureUnusedCapacity(self.gpa, 1);
         for (self.bands.items) |b| try b.ph.ensureUnusedCapacity(self.gpa, 1);
         try self.phases.append(self.gpa, .{ .master = m });
@@ -1879,15 +1954,27 @@ pub const Engine = struct {
         if (n_ph == 0) return error.NoPhases;
         // the key: the settings with those that do not touch a score put aside
         var k = s.*;
-        inline for (.{ "batch", "tile_mb", "refine_pixels", "wg_fft", "wg_refine", "sweeps", "sweep_bandwidth", "sweep_dict_grid", "bandwidth", "dict_grid", "fit_bandwidth", "fit_grid", "pose_grid", "refine_iters", "pc_steps", "pc_steps_z", "pc_levels", "pc_top_k", "pca_components", "pca_epochs", "pose_iters", "pc_nms", "toy_seed", "toy_rows", "toy_cols", "toy_height", "toy_width", "toy_grains", "toy_noise_seed" }) |f| @field(k, f) = 0;
+        inline for (.{ "batch", "tile_mb", "refine_pixels", "wg_fft", "wg_refine", "sweeps", "sweep_bandwidth", "sweep_dict_grid", "bandwidth", "dict_grid", "fit_bandwidth", "fit_grid", "refine_iters", "sim_halfw", "sim_rank", "pc_steps", "pc_steps_z", "pc_levels", "pc_top_k", "pca_components", "pca_epochs", "pc_nms", "toy_seed", "toy_rows", "toy_cols", "toy_height", "toy_width", "toy_grains", "toy_noise_seed" }) |f| @field(k, f) = 0;
         inline for (.{ "toy_counts", "toy_spread_deg", "toy_blank", "toy_background_sigma" }) |f| @field(k, f) = 0;
         k.toy_contrast = 1;
         inline for (.{ "accept_z", "accept_nmi", "accept_step_deg", "refine_step", "pc_span", "pc_span_z", "pc_shrink", "pc_gate", "pc_kde_sigma", "pc_inlier_radius", "pc_z_min" }) |f| @field(k, f) = 0;
         k.method = .spherical;
         k.sweep_method = .same;
         k.pc_vote = .ballots;
+        inline for (.{ "sim_voltage_kv", "sim_tilt_deg", "sim_bin_kev", "sim_dmin_nm", "sim_c_strong", "sim_c_cutoff", "sim_dbdiff_cutoff", "sim_stop" }) |f| @field(k, f) = 0;
+        k.sim_correct = false;
+        k.plane_interp = .bilinear;
+        k.plane_master_px = 0;
+        k.plane_master_auto = false;
+        k.plane_kind = .affine;
+        k.plane_frame = .nominal;
+        k.plane_weights = .equal;
+        k.plane_stride = 0;
+        k.plane_patterns_max = 0;
+        k.plane_trust = 0;
+        k.plane_outlier = 0;
+        k.plane_iters = 0;
         k.refine = false;
-        inline for (.{ "pose_x", "pose_y", "pose_z", "pose_tilt", "pose_swing", "pose_twist", "pose_scale" }) |f| @field(k, f) = false;
         k.ipf_colors = .classic;
         k.ipf_lightness = 0;
         k.ipf_gray = 0;
@@ -2314,6 +2401,8 @@ pub const Engine = struct {
         filtered = 1,
         /// averaged with its neighbours (when that is on), before any filter
         averaged = 2,
+        /// not a pattern: the static background, as it is subtracted at this size
+        background = 3,
     };
 
     /// One pattern as f32 at a level, at a stage of the pipeline. When it was averaged with
@@ -2322,8 +2411,14 @@ pub const Engine = struct {
         const hw = try self.patternShape(lv);
         if (out.len != @as(usize, hw[0]) * hw[1]) return error.BadLength;
         const g = &self.g;
-        const averaged = self.set.nlpar and view != .stored;
+        const averaged = self.set.nlpar and (view == .filtered or view == .averaged);
         self.nl_view_side = 0;
+        if (view == .background) {
+            const bg = try self.staticBackground(lv) orelse return error.NoBackground;
+            g.read(bg, 0, std.mem.sliceAsBytes(out));
+            try g.wait();
+            return;
+        }
         if (view == .stored) {
             const bytes = try self.readCells(&.{cell}, false);
             try self.uploadLevel(lv, &.{cell}, bytes, null);

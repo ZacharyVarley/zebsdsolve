@@ -18,7 +18,7 @@ class ScanInfo(ctypes.Structure):
     _fields_ = [
         ("rows", U32), ("cols", U32), ("pat_h", U32), ("pat_w", U32),
         ("pixel", U32), ("has_background", U32), ("has_pc", U32), ("format", U32),
-        ("voltage_kv", F64), ("bytes", F64),
+        ("voltage_kv", F64), ("bytes", F64), ("has_px", U32), ("_pad", U32),
     ]
 
 
@@ -34,6 +34,7 @@ class Geometry(ctypes.Structure):
     _fields_ = [
         ("pc", F64 * 3), ("sample_tilt_deg", F64), ("detector_tilt_deg", F64), ("rot", F64 * 3),
         ("px_um", F64), ("step_x_um", F64), ("step_y_um", F64),
+        ("plane_kind", U32), ("_pad", U32), ("plane", F64 * 12),
     ]
 
 
@@ -44,12 +45,23 @@ class PcResult(ctypes.Structure):
     ]
 
 
-class PoseResult(ctypes.Structure):
+class PlaneResult(ctypes.Structure):
     _fields_ = [
-        ("pc", F64 * 3), ("rot", F64 * 3), ("start_pc", F64 * 3), ("start_rot", F64 * 3),
-        ("ncc", F64), ("start_ncc", F64), ("mean_turn", F64),
-        ("iterations", U32), ("accepted", U32), ("n_patterns", U32), ("converged", U32),
-        ("px_um", F64), ("start_px_um", F64),
+        ("plane", F64 * 12), ("pc", F64 * 3), ("start_pc", F64 * 3), ("rot", F64 * 3),
+        ("said_rot", F64 * 3), ("said_rot_se", F64 * 3), ("step", F64 * 2), ("step_se", F64 * 2), ("skew", F64), ("skew_se", F64),
+        ("pc_se", F64 * 3), ("rmsd", F64 * 3), ("ncc", F64), ("start_ncc", F64),
+        ("kind", U32), ("frame", U32), ("n_patterns", U32), ("n_used", U32), ("iterations", U32), ("blocks", U32),
+    ]
+
+
+class PlanePoint(ctypes.Structure):
+    _fields_ = [("cell", U64), ("pc", F64 * 3), ("fit", F64 * 3), ("ncc", F64), ("used", U32), ("_pad", U32)]
+
+
+class SimSummary(ctypes.Structure):
+    _fields_ = [
+        ("n_k", U32), ("n_sites", U32), ("n_g", U32), ("n_bins", U32), ("n_bins_run", U32), ("max_beams", U32),
+        ("failed", U32), ("stopped", U32), ("halfw", U32), ("rank", U32), ("max_weak", U32), ("overflow", U32), ("last_change", F64),
     ]
 
 
@@ -117,7 +129,17 @@ _SIGS = {
     "ze_pc_level": ([P, U32, u32p, u32p, f64p, SZ, f32p, SZ, u32p, f32p, SZ], I32),
     "ze_pc_level_scores": ([P, U32, f32p, SZ], I32),
     "ze_pc_level_ballots": ([P, U32, f32p, SZ, f64p], I32),
-    "ze_fit_pose": ([P, ctypes.POINTER(PoseResult)], I32),
+    "ze_fit_auto": ([P, ctypes.POINTER(PlaneResult)], I32),
+    "ze_sim_read_cif": ([P, ctypes.c_char_p, SZ], I32),
+    "ze_sim_set_crystal": ([P, ctypes.c_char_p, SZ], I32),
+    "ze_sim_edit_crystal": ([P, ctypes.c_char_p, SZ], I32),
+    "ze_sim_crystal": ([P, ctypes.c_void_p, SZ], ctypes.c_int64),
+    "ze_sim_run": ([P, ctypes.POINTER(SimSummary)], I32),
+    "ze_sim_sheets": ([P, f32p, SZ], I32),
+    "ze_sim_add_phase": ([P, ctypes.c_char_p, SZ], I32),
+    "ze_sim_npz": ([P, ctypes.c_void_p, SZ], ctypes.c_int64),
+    "ze_fit_plane": ([P, ctypes.POINTER(PlaneResult)], I32),
+    "ze_plane_points": ([P, ctypes.POINTER(PlanePoint), SZ], SZ),
     "ze_fit_patterns": ([P, u64p, i32p, f32p, f32p, SZ], I32),
     "ze_tune_begin": ([P], I32),
     "ze_tune_trial": ([P], I32),

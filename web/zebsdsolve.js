@@ -9,7 +9,7 @@
  *   const ze = await Zebsdsolve.create({ wasm: "zebsdsolve.wasm" });
  *   await ze.openScan([scanFile]);               // a File of any size: it is read in ranges
  *   await ze.addPhase(masterFile);
- *   await ze.fitPc(); await ze.fitPose();
+ *   await ze.fitGeometry();                     // the pattern-centre vote, then the plane of source points
  *   await ze.index(({ done, total }) => …);
  *   const { quaternions, ncc, phase } = ze.results();
  *
@@ -30,6 +30,8 @@ const utf8enc = new TextEncoder();
 // fingerprint), so a new build starts a new list. `warm: false` in Zebsdsolve.create turns this off.
 // A first visit starts from a list shipped with the site (`pipelines.json` beside the wasm,
 // recorded by tests/test_web.mjs --save-pipelines) when it belongs to the same build.
+// sphereView's projections, in the engine's order (sphereview.zig Projection)
+const PROJECTIONS = ["globe", "lambert", "stereographic", "joint"];
 const WARM_KEY = "zebsdsolve.pipelines.v1";
 const WARM_MAX = 400;
 
@@ -389,25 +391,33 @@ const SYNC_EXPORTS = new Set(["ze_alloc", "ze_free", "ze_version", "ze_create", 
   "ze_get_geometry", "ze_set_geometry", "ze_clear_phases", "ze_phase_count", "ze_phase_info", "ze_pattern_shape", "ze_nlpar_view",
   "ze_pc_scores", "ze_fit_patterns", "ze_results", "ze_map", "ze_ipf_key", "ze_export", "ze_reduce", "ze_disorientation", "ze_shader",
   "ze_index_status", "ze_tune_begin", "ze_tune_report", "ze_pixel_angle", "ze_lattice", "ze_sweep", "ze_pc_level_count", "ze_pc_level", "ze_pc_level_ballots",
-  "ze_gpu_counts", "ze_profile", "ze_profile_report", "ze_compile_wgsl"]);
+  "ze_gpu_counts", "ze_profile", "ze_profile_report", "ze_compile_wgsl", "ze_plane_points",
+  "ze_sim_read_cif", "ze_sim_set_crystal", "ze_sim_edit_crystal", "ze_sim_crystal", "ze_sim_sheets", "ze_sim_add_phase", "ze_sim_npz",
+  "ze_cell_info", "ze_sim_energy"]);
 
-// Struct layouts (src/engine.zig, geometry.zig, pcfit.zig, posefit.zig): [name, type, byte offset].
+// Struct layouts (src/engine.zig, geometry.zig, pcfit.zig, planefit.zig): [name, type, byte offset].
 const SCAN = [["rows", "u32", 0], ["cols", "u32", 4], ["patH", "u32", 8], ["patW", "u32", 12], ["pixel", "u32", 16],
-  ["hasBackground", "bool", 20], ["hasPc", "bool", 24], ["formatId", "u32", 28], ["voltageKv", "f64", 32], ["bytes", "f64", 40]];
-const SCAN_SIZE = 48;
+  ["hasBackground", "bool", 20], ["hasPc", "bool", 24], ["formatId", "u32", 28], ["voltageKv", "f64", 32], ["bytes", "f64", 40], ["hasPx", "bool", 48]];
+const SCAN_SIZE = 56;
 const PHASE = [["side", "u32", 0], ["pointGroup", "u32", 4], ["spaceGroup", "u32", 8], ["laueId", "u32", 12],
   ["nFold", "u32", 16], ["mirror", "bool", 20], ["inversion", "bool", 24], ["voltageKv", "f64", 32]];
 const PHASE_SIZE = 104;
 const GEOMETRY = [["pc", "f64x3", 0], ["sampleTiltDeg", "f64", 24], ["detectorTiltDeg", "f64", 32], ["rot", "f64x3", 40],
-  ["pxUm", "f64", 64], ["stepXUm", "f64", 72], ["stepYUm", "f64", 80]];
-const GEOMETRY_SIZE = 88;
+  ["pxUm", "f64", 64], ["stepXUm", "f64", 72], ["stepYUm", "f64", 80], ["planeKind", "u32", 88], ["plane", "f64x12", 96]];
+const GEOMETRY_SIZE = 192;
+/** What a geometry's plane of source points is (its `planeKind`), and a plane fit's `kind`. */
+export const PLANE_KINDS = ["none", "affine", "projective"];
+const PLANE_RESULT = [["plane", "f64x12", 0], ["pc", "f64x3", 96], ["startPc", "f64x3", 120], ["rot", "f64x3", 144], ["saidRot", "f64x3", 168], ["saidRotSe", "f64x3", 192],
+  ["step", "f64x2", 216], ["stepSe", "f64x2", 232], ["skew", "f64", 248], ["skewSe", "f64", 256], ["pcSe", "f64x3", 264], ["rmsd", "f64x3", 288], ["ncc", "f64", 312], ["startNcc", "f64", 320],
+  ["kind", "u32", 328], ["frame", "u32", 332], ["nPatterns", "u32", 336], ["nUsed", "u32", 340], ["iterations", "u32", 344], ["blocks", "u32", 348]];
+const PLANE_RESULT_SIZE = 352;
+const PLANE_POINT_SIZE = 72;
 const PC_RESULT = [["pc", "f64x3", 0], ["start", "f64x3", 24], ["score", "f64", 48], ["startScore", "f64", 56],
   ["nPatterns", "u32", 64], ["nCandidates", "u32", 68], ["levels", "u32", 72], ["atBorder", "bool", 76]];
 const PC_RESULT_SIZE = 80;
-const POSE_RESULT = [["pc", "f64x3", 0], ["rot", "f64x3", 24], ["startPc", "f64x3", 48], ["startRot", "f64x3", 72],
-  ["ncc", "f64", 96], ["startNcc", "f64", 104], ["meanTurn", "f64", 112],
-  ["iterations", "u32", 120], ["accepted", "u32", 124], ["nPatterns", "u32", 128], ["converged", "bool", 132], ["pxUm", "f64", 136], ["startPxUm", "f64", 144]];
-const POSE_RESULT_SIZE = 152;
+const SIM_SUMMARY = [["nK", "u32", 0], ["nSites", "u32", 4], ["nG", "u32", 8], ["nBins", "u32", 12], ["nBinsRun", "u32", 16], ["maxBeams", "u32", 20],
+  ["failed", "u32", 24], ["stopped", "bool", 28], ["halfw", "u32", 32], ["rank", "u32", 36], ["maxWeak", "u32", 40], ["overflow", "u32", 44], ["lastChange", "f64", 48]];
+const SIM_SUMMARY_SIZE = 56;
 const INDEX_STATUS = [["sweep", "u32", 0], ["sweeps", "u32", 4], ["bandwidth", "u32", 8], ["dictGrid", "u32", 12],
   ["done", "u64", 16], ["total", "u64", 24], ["region", "u64", 32], ["accepted", "u64", 40], ["methodId", "u32", 48]];
 const INDEX_STATUS_SIZE = 56;
@@ -503,7 +513,7 @@ export class Zebsdsolve {
     return s;
   }
 
-  /** Listen to progress events ({kind: "log" | "progress" | "pc" | "pose", …}); returns an unsubscribe. */
+  /** Listen to progress events ({kind: "log" | "progress" | "pc", …}); returns an unsubscribe. */
   onEvent(fn) {
     this.state.listeners.push(fn);
     return () => { this.state.listeners = this.state.listeners.filter((f) => f !== fn); };
@@ -533,8 +543,13 @@ export class Zebsdsolve {
     const o = {};
     for (const [k, t, off] of layout) {
       const a = p + off;
-      o[k] = t === "u32" ? v.getUint32(a, true) : t === "bool" ? !!v.getUint32(a, true) : t === "u64" ? Number(v.getBigUint64(a, true))
-        : t === "f64x3" ? [v.getFloat64(a, true), v.getFloat64(a + 8, true), v.getFloat64(a + 16, true)] : v.getFloat64(a, true);
+      const many = /^(u32|i32|f64)x(\d+)$/.exec(t);
+      if (many) {
+        const size = many[1] === "f64" ? 8 : 4;
+        o[k] = Array.from({ length: +many[2] }, (_, i) => (many[1] === "f64" ? v.getFloat64(a + size * i, true) : many[1] === "i32" ? v.getInt32(a + size * i, true) : v.getUint32(a + size * i, true)));
+        continue;
+      }
+      o[k] = t === "u32" ? v.getUint32(a, true) : t === "bool" ? !!v.getUint32(a, true) : t === "u64" ? Number(v.getBigUint64(a, true)) : v.getFloat64(a, true);
     }
     return o;
   }
@@ -590,7 +605,10 @@ export class Zebsdsolve {
     });
   }
 
-  /** The detector geometry: { pc[3], sampleTiltDeg, detectorTiltDeg, rot[3], pxUm, stepXUm, stepYUm }. */
+  /** The detector geometry: { pc[3], sampleTiltDeg, detectorTiltDeg, rot[3], pxUm, stepXUm, stepYUm }.
+   *  pxUm is the size of a stored pattern pixel on the detector: the scan's, or one set here, or
+   *  (when neither says) the detector's width, the setting detector_width_mm, over the pattern's
+   *  pixels across. No fit changes it. */
   get geometry() {
     return this._frame((f) => {
       const p = f.alloc(GEOMETRY_SIZE);
@@ -599,7 +617,8 @@ export class Zebsdsolve {
     });
   }
 
-  /** Set any of the geometry's fields. */
+  /** Set any of the geometry's fields. pxUm: 0 puts the pixel size back to the scan's own, or the
+   *  one its detector's width gives. */
   setGeometry(fields) {
     this._frame((f) => {
       const p = f.alloc(GEOMETRY_SIZE);
@@ -607,7 +626,9 @@ export class Zebsdsolve {
       const v = new DataView(this.mem);
       for (const [k, t, off] of GEOMETRY) {
         if (!(k in fields)) continue;
-        if (t === "f64x3") for (let i = 0; i < 3; i++) v.setFloat64(p + off + 8 * i, +fields[k][i], true);
+        const many = /^f64x(\d+)$/.exec(t);
+        if (many) for (let i = 0; i < +many[1]; i++) v.setFloat64(p + off + 8 * i, +fields[k][i], true);
+        else if (t === "u32") v.setUint32(p + off, +fields[k], true);
         else v.setFloat64(p + off, +fields[k], true);
       }
       this.x.ze_set_geometry(this.e, p);
@@ -686,12 +707,14 @@ export class Zebsdsolve {
   /** One pattern (map cell, row-major) as Float32Array(h·w), at the reduced size or (full) the
    *  stored one. `stage`: "filtered" (or true), as it is indexed: averaged with its neighbours
    *  when the nlpar setting is on, then filtered; "stored" (or false), as it is stored;
-   *  "averaged", averaged with its neighbours and not filtered. */
+   *  "averaged", averaged with its neighbours and not filtered; "background", not the cell's
+   *  pattern but the static background subtracted from every pattern (an error when the
+   *  static_background setting subtracts none). */
   pattern(cell, stage = true, full = false) {
     return this._serial(() => this._frame(async (f) => {
       const [h, w] = this.shape(full);
       const p = f.alloc(h * w * 4);
-      const k = stage === "averaged" ? 2 : stage === "stored" || !stage ? 0 : 1;
+      const k = stage === "background" ? 3 : stage === "averaged" ? 2 : stage === "stored" || !stage ? 0 : 1;
       this._check(await this.x.ze_pattern(this.e, BigInt(cell), k, full ? 1 : 0, p, h * w), "pattern");
       const out = new Float32Array(this.mem, p, h * w).slice();
       // what the averaging did to it, kept with it (another pattern() replaces the engine's)
@@ -754,6 +777,132 @@ export class Zebsdsolve {
 
   clearPhases() { this.x.ze_clear_phases(this.e); }
 
+  // ── master patterns simulated (src/simulate.zig) ──
+
+  /** Set the crystal to simulate from a CIF's text, which the engine reads into its International Tables standard
+   *  setting (throwing, with the reason, on a file that disagrees with itself). Returns crystal(). */
+  readCif(text) {
+    return this._frame((f) => {
+      const [p, n] = f.str(text);
+      this._check(this.x.ze_sim_read_cif(this.e, p, n), "sim_read_cif");
+      return this.crystal();
+    });
+  }
+
+  /** Set the crystal to simulate, already in its standard setting: { space_group, cell: [a, b, c, α, β, γ] (Å,
+   *  degrees), sites: [{ z or symbol, xyz, occupancy, b_iso (Å²) }] }. Returns crystal(). */
+  setCrystal(crystal) {
+    return this._frame((f) => {
+      const [p, n] = f.str(JSON.stringify(crystal));
+      this._check(this.x.ze_sim_set_crystal(this.e, p, n), "sim_set_crystal");
+      return this.crystal();
+    });
+  }
+
+  /** Change the crystal set: `cell` [a, b, c, α, β, γ] (Å, degrees; what its family ties follows the free
+   *  parameters), `sites` one { occupancy, b_iso (Å²) } a site in order (either left out to keep it). How it was
+   *  read is kept. Returns crystal(). */
+  editCrystal({ cell, sites } = {}) {
+    return this._frame((f) => {
+      const [p, n] = f.str(JSON.stringify({ ...(cell ? { cell } : {}), ...(sites ? { sites } : {}) }));
+      this._check(this.x.ze_sim_edit_crystal(this.e, p, n), "sim_edit_crystal");
+      return this.crystal();
+    });
+  }
+
+  /** The crystal set: { space_group, name (short H-M), point_group (as the master is folded by), centring,
+   *  centrosymmetric, cell (Å, degrees), free (which of its six parameters are free), volume_nm3, density (g/cm³), average_z, average_a, sites: [{ symbol, z, xyz,
+   *  occupancy, b_iso (Å²), multiplicity }], reading (from a CIF: symmetry_provenance, setting, setting_note,
+   *  declared, cell_as_read, sites_as_read, sites_given_default_b, …; else null) }. */
+  crystal() {
+    return this._frame((f) => {
+      const n = Number(this.x.ze_sim_crystal(this.e, 0, 0));
+      this._check(n < 0 ? -1 : 0, "sim_crystal");
+      const p = f.alloc(n);
+      this.x.ze_sim_crystal(this.e, p, n);
+      return JSON.parse(utf8.decode(new Uint8Array(this.mem, p, n)));
+    });
+  }
+
+  /** A JSON export's text, parsed: `fn(e, out, cap)` returns the length (and copies when cap suffices) or −1. */
+  _json(fn, name) {
+    return this._frame((f) => {
+      const n = Number(fn(this.e, 0, 0));
+      this._check(n < 0 ? -1 : 0, name);
+      const p = f.alloc(n);
+      fn(this.e, p, n);
+      return JSON.parse(utf8.decode(new Uint8Array(this.mem, p, n)));
+    });
+  }
+
+  /** The crystal's cell as the app draws it: { basis (the lattice vectors a, b, c as rows, Å, Cartesian, a along
+   *  x), centre (the middle of the cell, Å), radius (Å: the picture's shorter side is twice this at zoom 1), atoms
+   *  (how many are drawn), sites: [{ symbol, z, colour, ball (radius, Å) }] }. */
+  cellInfo(cells = 1) { return this._json((e, p, n) => this.x.ze_cell_info(e, cells, p, n), "cell_info"); }
+
+  /** The crystal's cell in a picture, rendered by the engine: `rot` the view's rotation into the crystal's
+   *  Cartesian frame (9 numbers, row-major: x right, y up, z toward the viewer), `zoom` 1 fitting the cell to the
+   *  shorter side, `highlight` what to pick out ("a", "b", "c", "alpha", "beta", "gamma", a site's index, or
+   *  nothing). Returns the `width` × `height` RGBA pixels as a Uint8ClampedArray. */
+  cellView({ rot, zoom = 1, highlight = null, cells = 1, width, height = width }) {
+    const hl = typeof highlight === "number" ? 16 + highlight : Math.max(0, ["a", "b", "c", "alpha", "beta", "gamma"].indexOf(highlight) + 1);
+    return this._serial(() => this._frame(async (f) => {
+      const n = width * height;
+      const p = f.alloc(n * 4);
+      this._check(await this.x.ze_cell_view(this.e, f.f32(rot), zoom, hl, cells, width, height, p, n), "cell_view");
+      return new Uint8ClampedArray(this.mem, p, n * 4).slice();
+    }));
+  }
+
+  /** How the energy model spreads the backscattered electrons over energy and depth, for the crystal under the
+   *  settings sim_voltage_kv, sim_tilt_deg and sim_bin_kev: { beam_kv, bin_kev, tilt_deg, bins: [{ kv, weight,
+   *  beta (nm⁻¹), amplitude }] (least loss first), mean_loss_kev, mean_depth_nm, depth90_nm, depth_nm (the depths
+   *  sampled), depth (all bins' profile there, largest 1), depth_by_bin (each bin's, on that scale) }. */
+  energyModel() { return this._json(this.x.ze_sim_energy, "sim_energy"); }
+
+  /** Simulate the crystal's master pattern under the settings sim_* (progress events stage "simulate"). The engine
+   *  keeps it for simulatedSheets, addSimulatedPhase and simulationNpz. Resolves to { nK (directions), nSites, nG
+   *  (reflections), nBins and nBinsRun (energy bins given and solved), maxBeams, failed, stopped, halfw, rank,
+   *  lastChange }. */
+  simulateMaster() {
+    return this._serial(() => this._frame(async (f) => {
+      const o = f.alloc(SIM_SUMMARY_SIZE);
+      this._check(await this.x.ze_sim_run(this.e, o), "sim_run");
+      return this._read(SIM_SUMMARY, o);
+    }));
+  }
+
+  /** The last simulation's master: { side, sheets: Float32Array(2 · side²) } (north, then south), normalized. */
+  simulatedSheets() {
+    return this._frame((f) => {
+      const side = this.x.ze_sim_sheets(this.e, 0, 0);
+      this._check(side < 0 ? -1 : 0, "sim_sheets");
+      const n = 2 * side * side;
+      const p = f.alloc(n * 4);
+      this.x.ze_sim_sheets(this.e, p, n);
+      return { side, sheets: new Float32Array(this.mem, p, n).slice() };
+    });
+  }
+
+  /** Add the last simulation as a candidate phase named `name`; returns its index. */
+  addSimulatedPhase(name) {
+    return this._frame((f) => {
+      const [p, n] = f.str(name);
+      return this._check(this.x.ze_sim_add_phase(this.e, p, n), "sim_add_phase");
+    });
+  }
+
+  /** The last simulation as an .npz file in ebsdsim's layout (Uint8Array). */
+  simulationNpz() {
+    return this._frame((f) => {
+      const n = Number(this.x.ze_sim_npz(this.e, 0, 0));
+      this._check(n < 0 ? -1 : 0, "sim_npz");
+      const p = f.alloc(n);
+      this.x.ze_sim_npz(this.e, p, n);
+      return new Uint8Array(this.mem, p, n).slice();
+    });
+  }
+
   /** The candidate phases: [{ name, side, pointGroup, spaceGroup, laue, nFold, mirror, inversion, voltageKv }]. */
   get phases() {
     return this._frame((f) => {
@@ -783,6 +932,28 @@ export class Zebsdsolve {
       const p = f.alloc(n * 4);
       this._check(await this.x.ze_master_image(this.e, phase, p, n), "master_image");
       return { side, data: new Float32Array(this.mem, p, n).slice() };
+    }));
+  }
+
+  /** A master in a picture, rendered by the engine: `source` a phase index, or −1 for the
+   *  last simulation; `stored`, a phase's master as loaded (else as patterns are compared with
+   *  it); `bin` and `site`, the simulation's one energy bin and one site alone (null: all);
+   *  `projection` "globe", "lambert" (the two squares), "stereographic" (the two discs) or
+   *  "joint" (the whole sphere in one square); `rot` the view's rotation into the crystal's
+   *  frame (9 numbers, row-major: x right, y up, z toward the viewer); `zoom` 1 fits the
+   *  projection to the picture and scales the layout about its middle; `pan` moves it (across and
+   *  down, in shorter sides of the picture); `shown`, for the Lambert and stereographic views,
+   *  which hemispheres: 0 both, 1 the upper, 2 the lower; `difference`, the signed difference of
+   *  the upper hemisphere and the lower one's inversion, I(d) − I(−d), in any projection. Returns the `width` × `height` RGBA pixels as a
+   *  Uint8ClampedArray (ImageData's layout). */
+  sphereView({ source, stored = false, bin = null, site = null, projection = "globe", rot, pan = [0, 0], shown = 0, difference = false, zoom = 1, width, height = width }) {
+    const kind = PROJECTIONS.indexOf(projection);
+    if (kind < 0) throw new Error(`sphereView: unknown projection ${projection}`);
+    return this._serial(() => this._frame(async (f) => {
+      const n = width * height;
+      const p = f.alloc(n * 4);
+      this._check(await this.x.ze_sphere_view(this.e, source, stored ? 1 : 0, bin ?? -1, site ?? -1, kind, f.f32([...rot, pan[0], pan[1], shown, difference ? 1 : 0]), zoom, width, height, p, n), "sphere_view");
+      return new Uint8ClampedArray(this.mem, p, n * 4).slice();
     }));
   }
 
@@ -856,13 +1027,54 @@ export class Zebsdsolve {
     });
   }
 
-  /** Fit the detector pose and the fit patterns' orientations together; the geometry takes the result. */
-  fitPose() {
+  /**
+   * Fit the plane of source points: where the beam stood for every map cell, as the detector sees it (Winkelmann
+   * et al. 2020; kikuchipy's fit_pc). Each fit pattern (settings plane_stride, plane_patterns_max) is fitted by
+   * itself, its orientation and its own source point; then the affine or projective transformation of the scan's
+   * indices through those points (plane_kind) by weighted least squares (plane_weights, plane_outlier). The geometry
+   * takes the plane (its `planeKind`, `plane`: 4 × 3 row-major, plane · (column, row, 1) = w · (PCx, PCy, PCz, 1)), and
+   * the scan's steps and the pixel size then say nothing of where the beam stood. Resolves to { plane, kind
+   * (PLANE_KINDS), frame (0 nominal, 1 following the plane), pc, pcSe, rot, saidRot and saidRotSe (the sample's frame
+   * by the plane against the nominal one: swing, tilt, the scan's turn in its plane; radians), step and stepSe (the
+   * beam's travel for a row and a column against what the steps and pixel size say), skew, skewSe, rmsd (PCx, PCy,
+   * PCz), ncc, startNcc, nPatterns, nUsed, iterations, blocks }.
+   */
+  fitPlane() {
     return this._serial(() => this._frame(async (f) => {
-      const p = f.alloc(POSE_RESULT_SIZE);
-      this._check(await this.x.ze_fit_pose(this.e, p), "fit_pose");
-      return this._read(POSE_RESULT, p);
+      const p = f.alloc(PLANE_RESULT_SIZE);
+      this._check(await this.x.ze_fit_plane(this.e, p), "fit_plane");
+      return this._read(PLANE_RESULT, p);
     }));
+  }
+
+  /** The automatic fit, from the geometry as it was given: the vote for the pattern centre (fitPc), then the plane of
+   *  source points from there (fitPlane). Resolves to what fitPlane does; its startPc is the vote's pattern centre. */
+  fitGeometry() {
+    return this._serial(() => this._frame(async (f) => {
+      const p = f.alloc(PLANE_RESULT_SIZE);
+      this._check(await this.x.ze_fit_auto(this.e, p), "fit_geometry");
+      return this._read(PLANE_RESULT, p);
+    }));
+  }
+
+  /** The source points the last plane fit measured, a fit pattern each: { cells (Float64Array), pc and fit
+   *  (Float64Array, 3 a point: the pattern's own, and the plane's), ncc, used (Uint8Array) }. */
+  planePoints() {
+    return this._frame((f) => {
+      const n = this.x.ze_plane_points(this.e, 0, 0);
+      const p = f.alloc(Math.max(n, 1) * PLANE_POINT_SIZE);
+      this.x.ze_plane_points(this.e, p, n);
+      const v = new DataView(this.mem);
+      const out = { cells: new Float64Array(n), pc: new Float64Array(3 * n), fit: new Float64Array(3 * n), ncc: new Float64Array(n), used: new Uint8Array(n) };
+      for (let b = 0; b < n; b++) {
+        const a = p + b * PLANE_POINT_SIZE;
+        out.cells[b] = Number(v.getBigUint64(a, true));
+        for (let k = 0; k < 3; k++) { out.pc[3 * b + k] = v.getFloat64(a + 8 + 8 * k, true); out.fit[3 * b + k] = v.getFloat64(a + 32 + 8 * k, true); }
+        out.ncc[b] = v.getFloat64(a + 56, true);
+        out.used[b] = v.getUint32(a + 64, true);
+      }
+      return out;
+    });
   }
 
   /** The patterns of the last fit: { cells, phases, quats (4 per pattern), ncc }. */

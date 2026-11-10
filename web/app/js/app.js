@@ -4,12 +4,16 @@ import { Zebsdsolve } from "../zebsdsolve/zebsdsolve.js";
 import { GEOMETRY, buildFields, groupOf } from "./fields.js";
 import { drawGray, drawSigned, drawHeat, fit, svg, download, quantiles } from "./draw.js";
 import { createVotes } from "./votes.js";
+import { createPlaneView } from "./planeview.js";
+import { MasterView, PROJECTIONS } from "./masterview.js";
+import { CellView } from "./cellview.js";
+import { drawEnergy } from "./energy.js";
 
 const $ = (id) => document.getElementById(id);
 const app = $("app");
 const PHASE_COLORS = ["#3b82f6", "#f59e0b", "#10b981", "#ef4444", "#8b5cf6", "#14b8a6", "#ec4899", "#84cc16"];
 const RESULT_KINDS = ["ipf_z", "ipf_x", "ipf_y", "ncc", "nmi", "z", "phase", "sweep"];
-const TABS = ["data", "patterns", "geometry", "index"];
+const TABS = ["simulate", "data", "patterns", "geometry", "index"];
 // settings outside the pattern's own groups that change what the pattern view shows of a
 // pattern indexed on the spot
 const LIVE_KEYS = new Set(["fit_bandwidth", "refine", "refine_iters", "refine_step", "nmi_bins", "phase_by", "scan_x_sign", "scan_y_sign"]);
@@ -26,15 +30,27 @@ const st = {
   overview: null,      // Float32Array(rows · cols): pattern contrast, NaN where not read yet
   overviewRun: 0,
   results: null,       // engine results after indexing
+  resultsGeo: "",      // the geometry they were indexed under
   fit: null,           // fit patterns { cells, phases, quats, ncc }
   votes: null,         // every grid of the last pattern-centre search
+  cmp: { mode: "diff", at: 0.5, exp: null, sim: null, w: 0, h: 0 },  // the third image: difference, or split by a bar
   pcStart: null,       // where that search started, and the pattern centre the file gave
   pcFile: null,
   geoOpened: null,     // the geometry as the scan was opened
   geoBefore: null,     // pattern centre and rotation before the last fit (or after it, once put back)
   geoIsBefore: false,
-  phase: 0,            // selected phase (master view)
-  phaseFiles: [],      // the master pattern files, as added: to add the others again when one is removed
+  phase: 0,            // selected phase (in the list under Data)
+  phaseFiles: [],      // the master pattern files, as added ({ file, on, info }): the engine holds those that are on, and is given them again when one is removed or switched
+  masterSrc: 0,        // the master the dock shows: a phase, or −1 the last simulation
+  masterStage: "stored", // a phase's master as it was loaded, or filtered as patterns are matched with it
+  simBin: null,        // the simulation's master shown of one energy bin alone, and of one site alone
+  simSite: null,
+  crystal: null,       // the crystal to simulate (the engine's account of it), its file's name,
+  crystalName: "",
+  cellInfo: null,      // its cell as drawn
+  half: null,          // the hemispheres of a master shown (null: by its symmetry)
+  sim: null,           // and the last simulation: its summary, its crystal's name, the settings it ran under
+  roiTool: false,      // the next drag on the map draws the region of interest
   stage: "filtered",   // how far along its preparation the pattern is shown
   live: new Map(),     // cell → what indexing it on the spot found, under the settings as they are
   keys: new Map(),     // Laue class → its inverse pole figure key
@@ -56,6 +72,7 @@ const st = {
 function status(text, err = false) {
   const el = $("status");
   el.textContent = text;
+  el.title = text;
   el.classList.toggle("err", err);
 }
 
@@ -64,10 +81,32 @@ function log(text, err = false) {
   const t = new Date().toLocaleTimeString([], { hour12: false });
   const line = document.createElement("div");
   if (err) line.className = "err";
-  line.innerHTML = `<span class="t">${t}</span>  `;
-  line.append(text);
+  line.innerHTML = `<span class="t">${t} </span>`;
+  const msg = document.createElement("span");
+  msg.append(text);
+  line.append(msg);
   el.append(line);
   el.scrollTop = el.scrollHeight;
+  // an error while the log is folded: counted on the banner until it is opened
+  if (err && $("console").dataset.open !== "1") {
+    st.unseen = (st.unseen || 0) + 1;
+    $("log-badge").textContent = String(st.unseen);
+    $("log-badge").hidden = false;
+    $("console").dataset.err = "1";
+  }
+}
+
+/** Open or fold the log above the status banner. */
+function openLog(open = $("console").dataset.open !== "1") {
+  $("console").dataset.open = open ? "1" : "0";
+  $("console-bar").setAttribute("aria-expanded", String(open));
+  $("console-bar").title = open ? "Fold the log away" : "The log: click to open it";
+  if (open) {
+    st.unseen = 0;
+    $("log-badge").hidden = true;
+    $("console").dataset.err = "0";
+    requestAnimationFrame(() => { $("log").scrollTop = $("log").scrollHeight; });
+  }
 }
 
 function progress(frac) {
@@ -114,6 +153,16 @@ function selectTab(name) {
   }
   for (const p of $("panels").children) p.hidden = p.dataset.tab !== name;
   $("panels").scrollTop = 0;
+  // the Geometry step is a console for the fits: the dock takes most of the stage there, and
+  // shows a fit (the pattern-centre search, unless it is already on the plane)
+  app.dataset.tab = name;
+  if (name === "geometry" && votes && !["votes", "plane"].includes($("dock-kind").querySelector('[aria-pressed="true"]')?.dataset.dock)) selectDock(st.plane && !st.votes ? "plane" : "votes");
+  // the Simulate step: the crystal beside the master, the simulation's when there is one
+  if (name === "simulate" && votes) {
+    if (st.sim) st.masterSrc = -1;
+    selectDock("master");
+    showEnergy();
+  }
 }
 
 const done = (name, on = true) => { $(`tab-${name}`).dataset.done = on ? "1" : "0"; };
@@ -122,6 +171,7 @@ const done = (name, on = true) => { $(`tab-${name}`).dataset.done = on ? "1" : "
 
 let fields = null;
 let votes = null;
+let planeView = null;
 const METHOD_NAMES = { spherical: "spherical", dictionary: "dictionary", pca: "dictionary components" };
 const sweepLabel = (p) => (p.method === "spherical" ? `spherical ${p.bandwidth}` : `${METHOD_NAMES[p.method]} ${p.dictGrid}`);
 
@@ -142,13 +192,14 @@ function afterSettings(keys) {
   showSweeps();
   showStage();
   const groups = new Set(keys.map(groupOf));
-  if (["nlpar", "filters", "master", "resolution"].some((g) => groups.has(g)) || keys.some((k) => LIVE_KEYS.has(k))) {
+  if (["nlpar", "bgstatic", "bgdynamic", "clahe", "bandpass", "mask", "master", "resolution"].some((g) => groups.has(g)) || keys.some((k) => LIVE_KEYS.has(k))) {
     st.live.clear();
     showAngle();
     showCell();
     showMaster();
   }
-  if (groups.has("roi") || keys.includes("fit_grid")) { st.fit = null; drawMapOverlay(); }
+  if (groups.has("roi") || keys.includes("fit_grid")) { st.fit = null; drawMapOverlay(); showRoi(); }
+  if (keys.some((k) => ["sim_voltage_kv", "sim_tilt_deg", "sim_bin_kev"].includes(k))) showEnergy();
   if (keys.includes("accept_z") || keys.includes("accept_nmi")) drawZ();
   if (keys.some((k) => k.startsWith("ipf_"))) { st.keys.clear(); drawMap(); }
   drawLegend();
@@ -156,10 +207,10 @@ function afterSettings(keys) {
 
 function buildGeometry() {
   const box = $("geometry-fields");
-  for (const [key, label, hint, step, per] of GEOMETRY) {
+  for (const [key, label, hint, step, per, width] of GEOMETRY) {
     const triple = key === "pc" || key === "rot";
     const el = document.createElement("label");
-    el.className = "field" + (triple ? " wide" : "");
+    el.className = "field" + (triple ? " wide" : "") + (width ? ` ${width}` : "");
     if (hint) el.title = hint;
     const span = document.createElement("span");
     span.textContent = label;
@@ -172,8 +223,9 @@ function buildGeometry() {
       if (i !== null) input.dataset.i = String(i);
       input.addEventListener("change", () => {
         const g = st.ze.geometry;
+        // (a pixel size cleared, or 0, goes back to the scan's own: the engine puts it there)
         const v = +input.value / per;
-        if (!Number.isFinite(v)) return;
+        if (!Number.isFinite(v) || (key === "pxUm" && v < 0)) return;
         if (i === null) g[key] = v; else g[key][i] = v;
         st.ze.setGeometry({ [key]: g[key] });
         geometryChanged();
@@ -200,6 +252,9 @@ function showGeometry() {
   $("btn-geo-undo").disabled = !st.geoBefore;
   $("btn-geo-undo").textContent = st.geoIsBefore ? "after the last fit" : "before the last fit";
   $("btn-geo-file").disabled = !st.geoOpened;
+  // (with a plane, it says where the beam stood for each map cell: the steps and the pixel size do not)
+  $("geo-readout").textContent = st.scan ? (g.planeKind ? `beam positions: the fitted ${g.planeKind === 2 ? "projective" : "affine"} plane\n(the pattern centre is the plane's at the map's middle;\n the steps and the pixel size are not used)` : `pixel ${pixelText()}`) : "";
+  $("btn-geo-plane").disabled = !g.planeKind;
   showAngle();
   drawPc();
 }
@@ -218,8 +273,19 @@ function geometryChanged(byFit = false) {
 /** Remember the pattern centre and rotation a fit is about to change. */
 function beforeFit() {
   const g = st.ze.geometry;
-  st.geoBefore = { pc: g.pc, rot: g.rot };
+  st.geoBefore = { pc: g.pc, rot: g.rot, pxUm: g.pxUm, plane: g.plane, planeKind: g.planeKind };
   st.geoIsBefore = false;
+}
+
+/** The detector's pixel size and where it is from: typed in, the scan's file, or the detector's
+ *  width over the pattern's pixels across (an estimate). */
+function pixelText() {
+  const px = st.ze.geometry.pxUm;
+  if (!(px > 0)) return "not known";
+  const own = st.geoOpened ? st.geoOpened.pxUm : px;
+  if (Math.abs(px - own) > 1e-9 * own) return `${px.toFixed(1)} µm, typed in`;
+  if (st.scan && !st.scan.hasPx) return `${px.toFixed(1)} µm: an estimate, ${st.settings.detector_width_mm} mm across ${st.scan.patW} px`;
+  return `${px.toFixed(1)} µm, the file's`;
 }
 
 /** The sizes patterns can be reduced to, and what the current reduction gives. */
@@ -269,14 +335,19 @@ function acceptText() {
   return s.accept_nmi > 0 ? `NMI ≥ ${s.accept_nmi}` : `z ≥ ${s.accept_z}`;
 }
 
-/** The stages a pattern can be shown at: the averaged one only while patterns are averaged. */
+/** The stages a pattern can be shown at: the averaged one only while patterns are averaged, the
+ *  background only while one is subtracted. */
 function showStage() {
-  if (st.stage === "averaged" && !st.settings.nlpar) st.stage = "filtered";
-  for (const b of $("pat-stage").children) {
-    b.setAttribute("aria-pressed", String(b.dataset.stage === st.stage));
-    if (b.dataset.stage === "averaged") b.disabled = !st.settings.nlpar;
-  }
-  if (!st.settings.nlpar) $("nlpar-readout").textContent = "";
+  const s = st.settings;
+  const sel = $("pat-stage");
+  const bg = sel.querySelector('[value="background"]'), avg = sel.querySelector('[value="averaged"]');
+  bg.disabled = s.static_background === "none";
+  bg.textContent = s.static_background === "none" ? "background (none)" : "background";
+  avg.disabled = !s.nlpar;
+  avg.textContent = s.nlpar ? "averaged" : "averaged (off)";
+  if ((st.stage === "averaged" && !s.nlpar) || (st.stage === "background" && s.static_background === "none")) st.stage = "filtered";
+  sel.value = st.stage;
+  if (!s.nlpar) $("nlpar-readout").textContent = "";
 }
 
 // ── scan ──
@@ -304,6 +375,8 @@ function afterOpen() {
   st.results = null;
   st.fit = null;
   st.votes = null;
+  st.plane = null;
+  if (planeView) planeView.show(null, null, null);
   st.pcStart = null;
   st.pcFile = s.hasPc ? st.ze.geometry.pc : null;
   st.geoOpened = st.ze.geometry;
@@ -314,14 +387,17 @@ function afterOpen() {
   st.overview = new Float32Array(s.rows * s.cols).fill(NaN);
   st.view = { k: 1, cx: s.cols / 2, cy: s.rows / 2, s: 1 };
   app.dataset.scan = "1";
+  $("scan-hint").hidden = true;
   done("geometry", false);
   done("index", false);
   const gb = s.bytes / 2 ** 30;
   $("scan-meta").textContent = `${st.scanName} · ${s.format} · ${s.rows} × ${s.cols} patterns of ${s.patH} × ${s.patW} ${s.dtype}`;
+  $("scan-meta").title = $("scan-meta").textContent;
   const facts = [
     ["format", s.format], ["map", `${s.rows} × ${s.cols} (${(s.rows * s.cols).toLocaleString()} patterns)`],
     ["pattern", `${s.patH} × ${s.patW} ${s.dtype}`], ["size", gb >= 1 ? `${gb.toFixed(2)} GiB` : `${(s.bytes / 2 ** 20).toFixed(1)} MiB`],
     ["static background", s.hasBackground ? "one in the file" : "none in the file"], ["pattern centre", s.hasPc ? "from the file" : "not in the file"],
+    ["detector pixel", s.hasPx ? `${st.ze.geometry.pxUm.toFixed(1)} µm, from the file` : "not in the file"],
   ];
   if (s.voltageKv) facts.push(["voltage", `${s.voltageKv} kV`]);
   $("scan-facts").replaceChildren(...factRows(facts));
@@ -331,6 +407,7 @@ function afterOpen() {
   showStage();
   showGeometry();
   setMapKind("overview");
+  showRoi();
   drawVotes();
   drawZ();
   selectCell(Math.floor(s.rows / 2) * s.cols + Math.floor(s.cols / 2));
@@ -399,55 +476,381 @@ function phasesChanged() {
 
 async function addPhases(files) {
   await busy("reading master pattern…", async () => {
-    for (const f of files) { await st.ze.addPhase(f); st.phaseFiles.push(f); }
+    for (const f of files) { await st.ze.addPhase(f); st.phaseFiles.push({ file: f, on: true, info: null }); }
+    // the one just added is looked at (with no scan open, in the master view that takes the window)
+    st.phase = st.masterSrc = st.ze.phases.length - 1;
+    st.half = null;
     phasesChanged();
+    if (!st.scan) selectTab("simulate");
+    selectDock("master");
   });
 }
 
 /** Remove one phase: the engine drops them all and takes the others again. */
 async function removePhase(i) {
   await busy("removing the phase…", async () => {
-    const keep = st.phaseFiles.filter((_, k) => k !== i);
-    st.ze.clearPhases();
-    st.phaseFiles = [];
-    for (const f of keep) { await st.ze.addPhase(f); st.phaseFiles.push(f); }
+    st.phaseFiles = st.phaseFiles.filter((_, k) => k !== i);
+    await rebuildPhases();
     phasesChanged();
+  });
+}
+
+/** The engine's phases are the master patterns that are on, in order: give it them again. */
+async function rebuildPhases() {
+  st.ze.clearPhases();
+  for (const p of st.phaseFiles) if (p.on) await st.ze.addPhase(p.file);
+}
+
+/** Switch a master pattern on or off for the fits and the indexing, without removing it. */
+async function togglePhase(i) {
+  await busy("switching the phase…", async () => {
+    st.phaseFiles[i].on = !st.phaseFiles[i].on;
+    await rebuildPhases();
+    st.masterSrc = Math.max(0, Math.min(st.masterSrc, st.ze.phases.length - 1));
+    st.phase = Math.min(st.phase, Math.max(0, st.ze.phases.length - 1));
+    phasesChanged();
+    log(`phase ${st.phaseFiles[i].info?.name ?? ""}: ${st.phaseFiles[i].on ? "on" : "off"}`);
   });
 }
 
 function showPhases() {
   const list = st.ze.phases;
   if (st.phase >= list.length) st.phase = 0;
+  // what the engine says of each master that is on (a master that is off keeps what it said)
+  let e = 0;
+  for (const p of st.phaseFiles) if (p.on && list[e]) p.info = list[e++];
   done("data", !!st.scan && list.length > 0);
   $("btn-toy").disabled = list.length === 0;
   $("btn-toy").title = list.length ? "Make the scan from the master patterns above, in place of any scan open" : "Needs at least one master pattern";
-  $("phases").replaceChildren(...list.map((p, i) => {
+  $("phases-hint").hidden = st.phaseFiles.length > 0;
+  e = 0;
+  $("phases").replaceChildren(...st.phaseFiles.map((entry, k) => {
+    const idx = entry.on ? e++ : -1;
+    const p = entry.info || { name: entry.file.name.replace(/\.[^.]+$/, ""), pointGroupName: "" };
     const li = document.createElement("li");
-    li.setAttribute("aria-selected", String(i === st.phase));
-    li.title = `${p.name}: point group ${p.pointGroupName}, Laue class ${p.laue}, ${p.side} × ${p.side} per hemisphere${p.voltageKv ? `, ${p.voltageKv} kV` : ""}`;
-    li.innerHTML = `<span class="dot" style="background:${PHASE_COLORS[i % PHASE_COLORS.length]}"></span><span class="nm"></span><span class="pg"></span><button type="button" class="ghost" title="Remove this phase"><svg><use href="#i-x"/></svg></button>`;
+    li.setAttribute("aria-selected", String(idx >= 0 && idx === st.phase));
+    li.dataset.on = entry.on ? "1" : "0";
+    li.title = entry.info ? `${p.name}: point group ${p.pointGroupName}, Laue class ${p.laue}, ${p.side} × ${p.side} per hemisphere${p.voltageKv ? `, ${p.voltageKv} kV` : ""}${entry.on ? "" : ". Off: not fitted or indexed with, nor shown; switch it on with the box"}` : p.name;
+    li.innerHTML = `<input type="checkbox" class="on" title="On: a candidate phase for the fits and the indexing. Off: kept here, set aside"><span class="dot"></span><span class="nm"></span><span class="pg"></span><button type="button" class="ghost" title="Remove this phase"><svg><use href="#i-x"/></svg></button>`;
+    li.querySelector(".on").checked = entry.on;
+    li.querySelector(".dot").style.background = entry.on ? PHASE_COLORS[idx % PHASE_COLORS.length] : "#3a3a41";
     li.querySelector(".nm").textContent = p.name;
     li.querySelector(".pg").textContent = p.pointGroupName;
-    li.addEventListener("click", () => { st.phase = i; showPhases(); showMaster(); });
-    li.querySelector("button").addEventListener("click", (e) => { e.stopPropagation(); removePhase(i); });
+    li.querySelector(".on").addEventListener("click", (ev) => { ev.stopPropagation(); });
+    li.querySelector(".on").addEventListener("change", () => togglePhase(k));
+    li.addEventListener("click", () => { if (idx < 0) return; st.phase = idx; st.masterSrc = idx; showPhases(); if ($("dock-master").hidden) selectDock("master"); else showMaster(); });
+    li.querySelector("button").addEventListener("click", (ev) => { ev.stopPropagation(); removePhase(k); });
     return li;
   }));
   updateEnabled();
 }
 
-async function showMaster() {
-  if (!st.ze.phases.length || $("dock-master").hidden) return;
+/** The master the dock shows: a phase (its index), −1 the last simulation, or null for none.
+ *  The one asked for, else the simulation, else the first phase. */
+function masterSource() {
+  const n = st.ze ? st.ze.phases.length : 0;
+  if (st.masterSrc === -1 && st.sim) return -1;
+  if (st.masterSrc >= 0 && st.masterSrc < n) return st.masterSrc;
+  return st.sim ? -1 : n ? 0 : null;
+}
+
+/** The master view: which masters there are to choose from, and the chosen one drawn. A
+ *  phase's as stored or filtered; the simulation's every energy bin and site together, or one
+ *  bin's and one site's alone. */
+function showMaster() {
+  if (!st.ze) return;
+  const phases = st.ze.phases;
+  const src = masterSource();
+  const sel = $("master-src");
+  const opts = phases.map((p, i) => new Option(`${p.name}${phases.length > 1 ? `  (phase ${i + 1})` : ""}`, String(i)));
+  if (st.sim) opts.push(new Option(`${st.sim.name}, simulated${st.sim.added ? " (added)" : ""}`, "-1"));
+  if (!opts.length) opts.push(new Option("no master pattern yet", ""));
+  // (and a way to open another: a master to look at needs no scan, nor a simulation)
+  opts.push(new Option("Open a master pattern…", "open"));
+  sel.replaceChildren(...opts);
+  sel.value = src === null ? "" : String(src);
+  $("master-stage").disabled = src === null || src < 0;
+  $("master-stage").value = st.masterStage;
+  // the simulation's parts: its energy bins (the chart's bars; the arrow keys) and its sites
+  const sim = st.sim;
+  const bins = sim ? sim.binKv : [];
+  const sites = sim ? sim.sites : [];
+  const siteSeg = $("master-site");
+  siteSeg.hidden = src !== -1 || sites.length < 2;
+  if (!siteSeg.hidden) {
+    siteSeg.replaceChildren(...[["all sites", null], ...sites.map((q, i) => [`${q.symbol}${sites.filter((s) => s.symbol === q.symbol).length > 1 ? ` ${i + 1}` : ""}`, i])].map(([label, i]) => {
+      const b = document.createElement("button");
+      b.type = "button";
+      b.textContent = label;
+      b.title = i === null ? "The master of every site together, weighted by their shares" : `The master of site ${i + 1} (${sites[i].symbol}) alone`;
+      b.setAttribute("aria-pressed", String(st.simSite === i));
+      b.addEventListener("click", () => { st.simSite = i; showMaster(); showSiteMarks(); });
+      return b;
+    }));
+  }
+  showHalf(src);
+  $("dock-master").dataset.empty = src === null ? "1" : "0";
+  if (!$("dock-master").hidden) {
+    const meta = src === null ? "" : src >= 0
+      ? `${phases[src].side} × ${phases[src].side} a hemisphere${phases[src].voltageKv ? ` · ${phases[src].voltageKv} kV` : ""}`
+      : `${2 * sim.halfw + 1} × ${2 * sim.halfw + 1} a hemisphere · ${st.simBin === null ? `${sim.voltageKv} kV beam` : `${bins[st.simBin]} kV bin`}${st.simSite === null ? "" : ` · site ${st.simSite + 1} alone`}`;
+    $("dock-meta").textContent = meta;
+    sel.title = meta ? `${meta}. Which master pattern: a candidate phase's, or the last simulated one` : "Which master pattern: a candidate phase's, or the last simulated one";
+    st.masterView.refresh();
+  }
+}
+
+/** Whether the master shown has a centre of symmetry (its lower hemisphere is the upper one
+ *  inverted), when that is known. */
+function masterCentro(src) {
+  if (src === null) return false;
+  if (src === -1) return !!st.sim?.crystal?.centrosymmetric;
+  return CENTRO_PG.has(st.ze.phases[src].pointGroup);
+}
+
+/** The hemispheres shown: what was chosen, else (for a crystal with a centre of symmetry, whose
+ *  two hemispheres are one) the upper alone, else both. */
+function showHalf(src = masterSource()) {
+  const centro = masterCentro(src);
+  const half = st.half ?? (centro ? "north" : "both");
+  for (const b of $("view-half").children) {
+    b.setAttribute("aria-pressed", String(b.dataset.half === half));
+    // (two hemispheres that are one have no difference; the globe shows all of the sphere)
+    b.disabled = (b.dataset.half === "diff" && centro) || (st.projection === "globe" && b.dataset.half !== "diff");
+  }
+  $("view-half").dataset.off = st.projection === "globe" && half !== "diff" ? "1" : "0";
+  const diff = half === "diff" && !centro;
+  st.masterView.setShown(half === "south" ? 2 : half === "both" ? 0 : 1, diff);
+}
+
+/** Show the simulation's master of one energy bin (or site) alone, or all of them again. */
+function pickSimPart(kind, i) {
+  if (!st.sim) return;
+  if (kind === "bin") st.simBin = st.simBin === i ? null : i;
+  else st.simSite = st.simSite === i ? null : i;
+  st.masterSrc = -1;
+  if ($("dock-master").hidden) selectDock("master"); else showMaster();
+  showEnergy();
+  showSiteMarks();
+}
+
+// ── the Simulate step: a master pattern from a crystal ──
+
+const fixed = (v, d) => (Math.abs(v - Math.round(v)) < 1e-9 ? String(Math.round(v)) : v.toFixed(d));
+
+/** Change the crystal (its free lattice parameters, a site's occupancy or B): the engine ties
+ *  what the crystal's family ties, and keeps how it was read. */
+function editCrystal(edit, said) {
   try {
-    const { side, data } = await st.ze.masterImage(st.phase);
-    // the two hemispheres side by side
-    const both = new Float32Array(2 * side * side);
-    for (let r = 0; r < side; r++) {
-      both.set(data.subarray(r * side, (r + 1) * side), r * 2 * side);
-      both.set(data.subarray(side * side + r * side, side * side + (r + 1) * side), r * 2 * side + side);
+    st.crystal = st.ze.editCrystal(edit);
+    log(`crystal ${st.crystalName}: ${said}`);
+    status(`${st.crystalName}: ${said}`);
+  } catch (e) {
+    const msg = String(e.message || e).replace(/^sim_edit_crystal: (sim_edit_crystal: )?/, "");
+    status(msg, true);
+    log(msg, true);
+  }
+  showCrystal();
+}
+
+/** The crystal the engine has: its name and group, its cell (the free parameters editable) and
+ *  sites (occupancy and B editable; each pointable, the cell view picking it out, and each a
+ *  click from its own master), its cell drawn, and how the electrons spread in it. */
+function showCrystal() {
+  const c = st.crystal;
+  app.dataset.crystal = c ? "1" : "0";
+  $("btn-simulate").disabled = !c;
+  $("btn-simulate").title = c ? `Simulate ${st.crystalName}'s master pattern under the settings below` : "Needs a crystal: open a CIF or pick a preset";
+  $("crystal-none").hidden = !!c;
+  $("crystal").hidden = !c;
+  st.cellInfo = null;
+  if (c) {
+    try { st.cellInfo = st.ze.cellInfo(st.cellView.cells); } catch (e) { log(String(e.message || e), true); }
+  }
+  st.cellView.show(st.cellInfo, c ? c.cell : null);
+  $("xtal-meta").textContent = c ? `${st.crystalName} · ${c.name} (${c.space_group})` : "";
+  $("xtal-meta").title = c && st.cellInfo ? `${st.cellInfo.atoms} atoms drawn: each site${st.cellInfo.cells > 1 ? " in every cell" : ""} with its images on the faces, edges and corners of the cell${st.cellInfo.cells > 1 ? "s" : ""}` : "";
+  showEnergy();
+  if (!c) return;
+  $("crystal-name").textContent = st.crystalName;
+  $("crystal-group").textContent = `${c.name}  (${c.space_group})`;
+  const pick = (el, what) => {
+    el.addEventListener("mouseenter", () => st.cellView.pick(what));
+    el.addEventListener("mouseleave", () => st.cellView.pick(null));
+  };
+  const number = (value, step, min, title, apply) => {
+    const input = document.createElement("input");
+    input.type = "number";
+    input.step = String(step);
+    input.min = String(min);
+    input.value = String(value);
+    input.title = title;
+    input.addEventListener("change", () => { const v = +input.value; if (Number.isFinite(v)) apply(v); else input.value = String(value); });
+    return input;
+  };
+  // the cell: the free parameters to type in, the tied ones following them
+  const names = [["a", "a", "Å", 4], ["b", "b", "Å", 4], ["c", "c", "Å", 4], ["α", "alpha", "°", 3], ["β", "beta", "°", 3], ["γ", "gamma", "°", 3]];
+  const tie = ["", "= a", "= a", "", "", ""];
+  $("cellpars").replaceChildren(...names.map(([sym, key, unit, d], i) => {
+    const el = document.createElement("label");
+    el.className = "par";
+    const name = document.createElement("i");
+    name.textContent = sym;
+    el.append(name);
+    if (c.free[i]) {
+      el.append(number(+c.cell[i].toFixed(d + 2), unit === "Å" ? 0.001 : 0.01, 0, `${sym} (${unit}): type a value; what the crystal's family ties follows`, (v) => {
+        const cell = c.cell.slice();
+        cell[i] = v;
+        editCrystal({ cell }, `${sym} = ${v} ${unit}`);
+      }));
+    } else {
+      const v = document.createElement("span");
+      v.textContent = fixed(c.cell[i], d);
+      v.title = `${sym} = ${fixed(c.cell[i], d)} ${unit}: tied by the crystal's family${i < 3 && tie[i] && Math.abs(c.cell[i] - c.cell[0]) < 1e-9 ? ` (${sym} ${tie[i]})` : ""}`;
+      el.append(v);
     }
-    drawGray($("master"), both, 2 * side, side);
-    $("dock-meta").textContent = `${st.ze.phases[st.phase].name} · ${side} × ${side} per hemisphere`;
-  } catch (e) { log(String(e.message || e), true); }
+    pick(el, key);
+    return el;
+  }));
+  // the sites: occupancy and the Debye–Waller B to type in
+  const head = document.createElement("div");
+  head.className = "site head";
+  head.innerHTML = "<span></span><span>site</span><span>x y z</span><span>occ.</span><span>B (Å²)</span>";
+  const edits = () => c.sites.map((q) => ({ occupancy: q.occupancy, b_iso: q.b_iso }));
+  $("crystal-sites").replaceChildren(head, ...c.sites.map((q, i) => {
+    const row = document.createElement("div");
+    row.className = "site";
+    row.dataset.site = String(i);
+    const dot = document.createElement("span");
+    dot.className = "dot";
+    dot.style.background = st.cellInfo?.sites[i]?.colour || "#888";
+    const sym = document.createElement("span");
+    sym.className = "sym";
+    sym.textContent = `${q.symbol} ×${q.multiplicity}`;
+    const at = document.createElement("span");
+    at.className = "at";
+    at.textContent = q.xyz.map((v) => fixed(v, 4)).join(" ");
+    at.title = `${q.symbol} at ${q.xyz.map((v) => fixed(v, 4)).join(", ")}: ${q.multiplicity} in the cell`;
+    const occ = number(q.occupancy, 0.01, 0, "The site's occupancy: the share of its places the element holds", (v) => { const s = edits(); s[i].occupancy = v; editCrystal({ sites: s }, `site ${i + 1} (${q.symbol}) occupancy ${v}`); });
+    const b = number(+q.b_iso.toFixed(4), 0.05, 0, "The site's isotropic Debye–Waller factor B, Å² (B = 8π²⟨u²⟩): how far its atoms' thermal motion damps the reflections. ebsdsim writes it in nm² (Å² / 100)", (v) => { const s = edits(); s[i].b_iso = v; editCrystal({ sites: s }, `site ${i + 1} (${q.symbol}) B ${v} Å²`); });
+    row.append(dot, sym, at, occ, b);
+    row.title = "Point to see its atoms on the cell; click its name to see its master alone (after a simulation)";
+    sym.addEventListener("click", () => { if (st.sim && st.sim.sites.length === c.sites.length && c.sites.length > 1) pickSimPart("site", i); });
+    pick(row, i);
+    return row;
+  }));
+  showSiteMarks();
+  $("crystal-facts").textContent = `${c.point_group}${c.centrosymmetric ? " (centrosymmetric)" : ""} · ${c.density.toFixed(3)} g/cm³ · ${(c.volume_nm3 * 1000).toFixed(2)} Å³`;
+}
+
+/** The site whose master is shown alone, marked in the list. */
+function showSiteMarks() {
+  for (const row of $("crystal-sites").querySelectorAll(".site[data-site]")) row.dataset.picked = st.simSite !== null && +row.dataset.site === st.simSite ? "1" : "0";
+}
+
+/** How the energy model spreads the electrons for the crystal under the settings, drawn under
+ *  its cell; the bins the last simulation solved picked out, when it ran under the same, each
+ *  a click from its own master. */
+function showEnergy() {
+  if (!st.ze || $("xtal-pane").offsetParent === null) return;
+  let m = null;
+  if (st.crystal) {
+    try { m = st.ze.energyModel(); } catch (e) { log(String(e.message || e), true); }
+  }
+  const s = st.settings;
+  const same = st.sim && st.sim.crystal === st.crystal && st.sim.energyKey === `${s.sim_voltage_kv}/${s.sim_tilt_deg}/${s.sim_bin_kev}`;
+  drawEnergy($("energy-e"), $("energy-z"), m, { solved: same ? st.sim.nBinsRun : null, picked: same ? st.simBin : null, pick: same ? (i) => pickSimPart("bin", i) : null });
+  st.energySolved = same ? st.sim.nBinsRun : 0;
+  $("energy-all").disabled = !same;
+  $("energy-all").setAttribute("aria-pressed", String(!same || st.simBin === null));
+  $("energy-readout").textContent = m ? `${m.bins.length} bins of ${m.bin_kev} keV${same ? `, ${st.sim.nBinsRun} solved` : ""} · mean loss ${m.mean_loss_kev.toFixed(2)} keV · mean depth ${m.mean_depth_nm.toFixed(1)} nm, 90 % within ${m.depth90_nm.toFixed(1)} nm` : "";
+}
+
+/** A CIF's text to the engine, which reads it (or says why not). */
+function loadCif(text, name) {
+  try {
+    st.crystal = st.ze.readCif(text);
+    st.crystalName = name.replace(/\.cif$/i, "");
+    $("sim-name").value = st.crystalName;
+    const c = st.crystal, r = c.reading;
+    log(`crystal ${name}: space group ${c.space_group} (${c.name}), ${c.sites.length} site(s)`);
+    // how the file was read
+    if (r) {
+      log(`  symmetry: ${r.symmetry_provenance}`);
+      log(`  setting: ${r.setting}${r.setting_note ? ` (${r.setting_note})` : ""}`);
+      if (r.cell_as_read.some((v, i) => Math.abs(v - c.cell[i]) > 1e-6)) log(`  cell as read: ${r.cell_as_read.slice(0, 3).map((v) => fixed(v, 4)).join(" ")}  ${r.cell_as_read.slice(3).map((v) => fixed(v, 2)).join(" ")}`);
+      if (r.sites_as_read !== c.sites.length) log(`  ${r.sites_as_read} sites as read, ${c.sites.length} in the asymmetric unit`);
+      if (r.sites_given_default_b) log(`  B = 0.5 Å² given to ${r.sites_given_default_b} of ${r.sites_as_read} sites (${r.thermal_parameters_in_file ? "zero in the file" : "none in the file"})`);
+    }
+    status(`${name}: space group ${c.space_group} (${c.name})`);
+  } catch (e) {
+    const msg = String(e.message || e).replace(/^sim_read_cif: (sim_read_cif: )?/, "");
+    status(`${name}: ${msg}`, true);
+    log(`${name}: ${msg}`, true);
+  }
+  showCrystal();
+}
+
+async function loadPreset(key) {
+  if (!key) return;
+  try {
+    const r = await fetch(`./cif/${key}.cif`);
+    if (!r.ok) throw new Error(`${r.status} ${r.statusText}`);
+    loadCif(await r.text(), `${key}.cif`);
+  } catch (e) { status(`preset ${key}: ${e.message || e}`, true); }
+  $("cif-preset").value = "";
+}
+
+/** What a simulation did, for the log. */
+function simReadout(r) {
+  const side = 2 * r.halfw + 1;
+  return [
+    `${st.sim.name}: ${r.nK.toLocaleString()} directions (the fundamental sector of ${side} × ${side} a hemisphere), ${r.nG.toLocaleString()} reflections, at most ${r.maxBeams} beams${r.maxWeak ? ` and ${r.maxWeak} weak` : ""} a direction`,
+    `energy bins: ${r.nBinsRun} of ${r.nBins}${r.stopped ? `, stopped when one changed the pattern by ${(100 * r.lastChange).toFixed(2)} %` : ""}`,
+    r.failed ? `${r.failed.toLocaleString()} directions failed to solve (left dark)` : "",
+  ].filter(Boolean);
+}
+
+async function runSimulate() {
+  if (!st.crystal) return;
+  const name = st.crystalName;
+  const s = st.settings;
+  await busy(`simulating ${name}'s master pattern…`, async () => {
+    const r = await st.ze.simulateMaster();
+    // (the bins it solved are the energy model's first, from the least loss)
+    const model = st.ze.energyModel();
+    st.sim = { ...r, name, voltageKv: s.sim_voltage_kv, crystal: st.crystal, energyKey: `${s.sim_voltage_kv}/${s.sim_tilt_deg}/${s.sim_bin_kev}`, added: false,
+      binKv: model.bins.slice(0, r.nBinsRun).map((b) => b.kv), sites: st.crystal.sites.map((q) => ({ symbol: q.symbol })) };
+    st.simBin = null;
+    st.simSite = null;
+    showSiteMarks();
+    for (const line of simReadout(r)) log(line);
+    $("sim-result").hidden = false;
+    if (!$("sim-name").value.trim()) $("sim-name").value = name;
+    st.masterSrc = -1;
+    st.half = null;
+    st.masterView.resetLayout();
+    selectDock("master");
+    showEnergy();
+  });
+  $("btn-sim-phase").disabled = $("btn-sim-save").disabled = !st.sim;
+}
+
+const simName = () => ($("sim-name").value.trim() || st.sim?.name || "simulated").replace(/[\\/:*?"<>|]/g, "_");
+
+/** The last simulation as a candidate phase; its .npz is kept, as an added file's would be, so
+ *  that removing another phase can add it again. */
+async function addSimPhase() {
+  if (!st.sim) return;
+  const name = simName();
+  await busy("adding the simulated phase…", async () => {
+    st.ze.addSimulatedPhase(name);
+    st.phaseFiles.push({ file: new File([st.ze.simulationNpz()], `${name}.npz`, { type: "application/octet-stream" }), on: true, info: null });
+    st.phase = st.ze.phases.length - 1;
+    st.sim.added = true;
+    phasesChanged();
+    log(`phase ${name} added from the simulation`);
+  });
 }
 
 // ── the map ──
@@ -703,10 +1106,12 @@ function selectCell(cell) {
   showCell();
 }
 
-/** The orientation the engine has for a cell: from indexing, else from the last fit. */
+/** The orientation the engine has for a cell: from indexing (while the geometry is the one the
+ *  map was indexed under: under another, that orientation is not this geometry's match), else
+ *  from the last fit. */
 function orientationOf(cell) {
   const R = st.results;
-  if (R && R.phase[cell] >= 0) {
+  if (R && R.phase[cell] >= 0 && st.resultsGeo === JSON.stringify(st.ze.geometry)) {
     return { phase: R.phase[cell], q: Array.from(R.quaternions.subarray(4 * cell, 4 * cell + 4)), ncc: R.ncc[cell], nmi: R.nmi[cell], z: R.z[cell], sweep: R.sweep[cell],
       euler: Array.from(R.euler.subarray(3 * cell, 3 * cell + 3)), from: "indexed" };
   }
@@ -728,7 +1133,8 @@ async function indexNow(cell) {
   let p = 0;
   for (let k = 1; k < recs.length / 8; k++) if (recs[8 * k + by] > recs[8 * p + by]) p = k;
   const r = recs.subarray(8 * p, 8 * p + 8);
-  const o = { phase: p, q: Array.from(r.subarray(0, 4)), ncc: r[4], nmi: r[5], z: r[7], sweep: null, euler: null, from: `found now, L ${st.settings.fit_bandwidth}` };
+  const moved = st.results && st.results.phase[cell] >= 0 ? "; the map was indexed under another geometry" : "";
+  const o = { phase: p, q: Array.from(r.subarray(0, 4)), ncc: r[4], nmi: r[5], z: r[7], sweep: null, euler: null, from: `found now, L ${st.settings.fit_bandwidth}${moved}` };
   if (st.live.size > 4096) st.live.clear();
   st.live.set(cell, o);
   return o;
@@ -787,7 +1193,8 @@ async function showCell() {
     drawPc();
     showNlpar(exp.nlpar);
     const win = `${2 * s.nlpar_radius + 1} × ${2 * s.nlpar_radius + 1}${s.nlpar_iterations > 1 ? `, ${s.nlpar_iterations} passes` : ""}`;
-    $("pat-exp-cap").textContent = `experimental · ${stage === "stored" ? "as stored" : [s.nlpar ? `averaged ${win}` : "", stage === "filtered" ? "filtered" : ""].filter(Boolean).join(", ")}`;
+    // (what the stage's name does not say: the averaging's window)
+    $("pat-exp-cap").textContent = stage === "averaged" ? win : stage === "filtered" && s.nlpar ? `averaged ${win}` : stage === "background" ? (s.static_background === "file" ? "the file's" : `the average of ${s.static_patterns}`) : "";
     const facts = [];
     $("pat-cell").textContent = `row ${Math.floor(cell / cols)}, col ${cell % cols}`;
     $("pat-cell").title = `map cell ${cell}; shown at ${h} × ${w}`;
@@ -806,7 +1213,9 @@ async function showCell() {
       if (run !== st.showRun) return;
       const norm = (a) => { let n = 0, t = 0; for (let i = 0; i < a.length; i++) if (mask[i]) { n++; t += a[i]; } const m = t / n; let ss = 0; const out = new Float32Array(a.length); for (let i = 0; i < a.length; i++) if (mask[i]) { out[i] = a[i] - m; ss += out[i] * out[i]; } const k = 1 / Math.sqrt(Math.max(ss, 1e-30)); for (let i = 0; i < a.length; i++) out[i] *= k; return out; };
       const a = norm(proc), b = norm(sim);
-      drawSigned($("pat-diff"), a.map((v, i) => v - b[i]), w, h);
+      st.cmp.diff = a.map((v, i) => v - b[i]);
+      st.cmp.exp = proc; st.cmp.sim = sim; st.cmp.w = w; st.cmp.h = h; st.cmp.mask = mask;
+      drawCompare();
       const ph = st.ze.phases[o.phase];
       $("pat-sim-cap").textContent = `simulated · ${ph.name} · ${o.from}`;
       if (nPh > 1) facts.push(["phase", ph.name]);
@@ -821,6 +1230,8 @@ async function showCell() {
       facts.push(["quaternion", red.q.map((v) => v.toFixed(4)).join("  ")]);
     } else {
       for (const id of ["pat-sim", "pat-diff"]) { const c = $(id); c.width = w; c.height = h; c.getContext("2d").clearRect(0, 0, w, h); }
+      st.cmp.exp = null;
+      $("pat-wipe").hidden = true;
       $("pat-sim-cap").textContent = !nPh ? "simulated · add a phase" : st.busy ? "simulated · when the job is done" : "simulated · fit or index to see it";
     }
     if (exp.nlpar) facts.push(["averaging", `${(100 * exp.nlpar.left).toFixed(0)} % of the noise left`]);
@@ -828,6 +1239,49 @@ async function showCell() {
   } catch (e) {
     if (run === st.showRun) { status(String(e.message || e), true); log(String(e.message || e), true); }
   }
+}
+
+/** The third image: the difference of the pattern and its simulation, or the two in one frame,
+ *  the experimental left of a bar and the simulation right of it. */
+function drawCompare() {
+  const c = st.cmp;
+  const canvas = $("pat-diff"), bar = $("pat-wipe"), well = $("pat-cmp-well");
+  const split = c.mode === "split";
+  $("pat-cmp").value = c.mode;
+  well.dataset.split = split && c.exp ? "1" : "0";
+  $("pat-cmp").title = split ? "The experimental pattern left of the bar, its simulation right of it. Drag the bar across." : "Experimental minus simulated, each zero-mean and unit-norm under the mask: what the NCC compares";
+  bar.hidden = !(split && c.exp);
+  if (!c.exp) return;
+  if (!split) { drawSigned(canvas, c.diff, c.w, c.h); return; }
+  const { w, h } = c;
+  canvas.width = w;
+  canvas.height = h;
+  const ctx = canvas.getContext("2d");
+  const img = ctx.createImageData(w, h);
+  const cut = Math.round(c.at * w);
+  const scale = (a) => { const [lo, hi] = quantiles(a, 0.005, 0.995); return [lo, 255 / Math.max(hi - lo, 1e-20)]; };
+  const [lo0, k0] = scale(c.exp), [lo1, k1] = scale(c.sim);
+  for (let i = 0; i < w * h; i++) {
+    const left = i % w < cut;
+    const v = Math.max(0, Math.min(255, left ? (c.exp[i] - lo0) * k0 : (c.sim[i] - lo1) * k1)) * (c.mask && !c.mask[i] ? 0.25 : 1);
+    img.data[4 * i] = img.data[4 * i + 1] = img.data[4 * i + 2] = v;
+    img.data[4 * i + 3] = 255;
+  }
+  ctx.putImageData(img, 0, 0);
+  // the bar, where the cut falls in the image as it is shown (the canvas is fitted into its well)
+  const r = imageBox(canvas);
+  bar.style.left = `${r.left + (cut / w) * r.width - 1}px`;
+  bar.style.top = `${r.top}px`;
+  bar.style.bottom = "auto";
+  bar.style.height = `${r.height}px`;
+}
+
+/** Where a canvas's image lies in its well (object-fit: contain), in the well's pixels. */
+function imageBox(canvas) {
+  const W = canvas.clientWidth, H = canvas.clientHeight;
+  const s = Math.min(W / canvas.width, H / canvas.height);
+  const width = canvas.width * s, height = canvas.height * s;
+  return { left: canvas.offsetLeft + (W - width) / 2, top: canvas.offsetTop + (H - height) / 2, width, height };
 }
 
 /** The pattern centre on the experimental pattern (Bruker convention: fractions from the left and top). */
@@ -860,7 +1314,7 @@ async function fitPc() {
     st.fit = st.ze.fitPatterns();
     st.votes = st.ze.pcLevels();
     st.pcStart = r.start;
-    $("fit-readout").textContent = `pattern centre  ${r.pc.map((v) => v.toFixed(5)).join("  ")}\nmean NCC ${r.score.toFixed(4)} (start ${r.startScore.toFixed(4)})  ·  bandwidth ${st.settings.fit_bandwidth}\n${r.nCandidates.toLocaleString()} candidates × ${r.nPatterns} patterns${r.atBorder ? "\nthe best candidate is at the search's border: widen it, or fit again from here" : ""}`;
+    $("fit-readout").textContent = `centre  ${r.pc.map((v) => v.toFixed(5)).join("  ")}\nNCC     ${r.score.toFixed(4)}  (start ${r.startScore.toFixed(4)})\n${r.nCandidates.toLocaleString()} candidates × ${r.nPatterns} patterns, L ${st.settings.fit_bandwidth}${r.atBorder ? "\nthe best candidate is at the search's border: widen it, or fit again from here" : ""}`;
     $("fit-readout").textContent += againstTrueGeometry();
     done("geometry");
     selectDock("votes");
@@ -870,17 +1324,56 @@ async function fitPc() {
   });
 }
 
-async function fitPose() {
-  await busy("fitting the pose…", async () => {
+// What a plane fit found: the plane's source at the map's middle, how its points lie about it, and
+// what it says of the tilt, the scan and the steps, each with its standard error.
+function planeReadout(r) {
+  const deg = (v) => (v * 180) / Math.PI;
+  const signed = (v, d) => `${v > 0 ? "+" : v < 0 ? "−" : ""}${Math.abs(v).toFixed(d)}`;
+  const g = st.ze.geometry;
+  const lines = [
+    `plane   ${r.kind === 2 ? "projective" : "affine"}, ${r.nUsed.toLocaleString()} of ${r.nPatterns.toLocaleString()} patterns`,
+    `centre  ${r.pc.map((v) => v.toFixed(5)).join("  ")}`,
+    `scatter ${r.rmsd.map((v) => v.toFixed(5)).join("  ")}`,
+    `tilt    ${signed(deg(r.saidRot[1]), 2)}° ± ${deg(r.saidRotSe[1]).toFixed(2)}°  (sample ${(g.sampleTiltDeg - deg(r.saidRot[1])).toFixed(2)}°)`,
+    `swing   ${signed(deg(r.saidRot[0]), 2)}° ± ${deg(r.saidRotSe[0]).toFixed(2)}°`,
+    `scan    turned ${signed(deg(r.saidRot[2]), 2)}° ± ${deg(r.saidRotSe[2]).toFixed(2)}°`,
+    `        ${signed(deg(r.skew), 2)}° ± ${deg(r.skewSe).toFixed(2)}° off square`,
+  ];
+  if (r.step[0] > 0) lines.push(`steps   row ${r.step[0].toFixed(3)} ± ${r.stepSe[0].toFixed(3)}`, `        column ${r.step[1].toFixed(3)} ± ${r.stepSe[1].toFixed(3)}`);
+  lines.push(`frame   ${r.frame ? "follows the plane" : "as the tilts say"}`, `NCC     ${r.ncc.toFixed(4)}  (start ${r.startNcc.toFixed(4)})`);
+  return lines.join("\n");
+}
+
+/** A plane fit is done (by itself, or after the vote): its numbers, its points, and everything drawn from the
+ *  geometry. `vote`: a line for the vote that came before it. */
+function afterPlane(r, vote = "") {
+  st.fit = st.ze.fitPatterns();
+  st.plane = { r, pts: st.ze.planePoints() };
+  $("fit-readout").textContent = vote + planeReadout(r) + againstTrueGeometry();
+  done("geometry");
+  selectDock("plane");
+  planeView.show(r, st.plane.pts, st.scan);
+  geometryChanged(true);
+  drawMapOverlay();
+}
+
+async function fitPlane() {
+  await busy("fitting the plane…", async () => {
     beforeFit();
-    const r = await st.ze.fitPose();
-    st.fit = st.ze.fitPatterns();
-    const deg = (v) => ((v * 180) / Math.PI).toFixed(3);
-    $("fit-readout").textContent = `pattern centre  ${r.pc.map((v) => v.toFixed(5)).join("  ")}\nswing, tilt, twist (°)  ${r.rot.map(deg).join("  ")}${r.pxUm > 0 ? `  ·  pixel ${r.pxUm.toFixed(1)} µm` : "\nno pixel size: every pattern is taken from one point, where the detector's rotation cannot be told from the crystals', so it is left as set"}\nmean NCC ${r.ncc.toFixed(4)} (start ${r.startNcc.toFixed(4)})  ·  ${r.iterations} iterations${r.converged ? "" : ", not converged"}  ·  ${r.nPatterns} patterns`;
-    $("fit-readout").textContent += againstTrueGeometry();
-    done("geometry");
-    geometryChanged(true);
-    drawMapOverlay();
+    afterPlane(await st.ze.fitPlane());
+  });
+}
+
+async function fitGeometry() {
+  await busy("fitting the geometry…", async () => {
+    beforeFit();
+    const r = await st.ze.fitGeometry();
+    st.votes = st.ze.pcLevels();
+    // (the vote's first grid is centred on where it started)
+    const mid = (a) => (a[0] + a[a.length - 1]) / 2;
+    st.pcStart = st.votes.length ? [mid(st.votes[0].x), mid(st.votes[0].y), mid(st.votes[0].z)] : null;
+    drawVotes();
+    afterPlane(r, `vote    ${r.startPc.map((v) => v.toFixed(5)).join("  ")}\n`);
   });
 }
 
@@ -889,6 +1382,7 @@ async function fitPose() {
 async function runIndex() {
   await busy("indexing…", async () => {
     await st.ze.indexBegin();
+    st.resultsGeo = JSON.stringify(st.ze.geometry);
     if (st.mapKind === "overview") setMapKind("ipf_z");
     const t0 = performance.now();
     let last = 0, visited = 0, s = null;
@@ -993,18 +1487,90 @@ function drawZ() {
 
 function selectDock(kind) {
   for (const b of $("dock-kind").children) b.setAttribute("aria-pressed", String(b.dataset.dock === kind));
-  for (const k of ["votes", "master", "z", "log"]) $(`dock-${k}`).hidden = k !== kind;
+  for (const k of ["votes", "plane", "master", "z"]) $(`dock-${k}`).hidden = k !== kind;
   $("dock-meta").textContent = "";
   $("votes-meta").hidden = kind !== "votes";
   if (kind === "master") showMaster();
   if (kind === "votes") votes.draw();
+  if (kind === "plane") planeView.draw();
   if (kind === "z") drawZ();
-  if (kind === "log") $("log").scrollTop = $("log").scrollHeight;
+}
+
+/** How the master view draws the sphere: a globe, the Lambert squares, the stereographic discs,
+ *  or the joint Lambert square (kept for the next visit). */
+const CENTRO_PG = new Set([2, 5, 8, 11, 15, 17, 20, 23, 27, 29, 32]);
+
+function setProjection(p) {
+  if (!PROJECTIONS.includes(p)) p = "globe";
+  st.projection = p;
+  try { localStorage.setItem("zebsdsolve.projection", p); } catch { /* private window */ }
+  for (const b of $("view-mode").children) b.setAttribute("aria-pressed", String(b.dataset.view === p));
+  st.masterView.setProjection(p);
+  showViewLock();
+  showHalf();
+}
+
+/** The lock applies to the flat projections only (dimmed on the globe); while it holds, the
+ *  buttons that would turn the sphere are dimmed too (the first view is still there). */
+function showViewLock() {
+  const flat = st.projection !== "globe";
+  $("view-lock").disabled = !flat;
+  $("view-lock-box").dataset.off = flat ? "0" : "1";
+  st.masterView.setLocked($("view-lock").checked);
+  for (const b of $("view-look").children) b.disabled = !!b.dataset.look && st.masterView.isLocked();
+  showStereo();
+}
+
+/** The globe as a stereogram: two views for the two eyes, the distance to the screen and the
+ *  eyes' separation set at the foot of the picture. */
+function showStereo() {
+  const globe = st.projection === "globe";
+  const on = globe && $("view-stereo").checked;
+  $("view-stereo").disabled = !globe;
+  $("view-stereo-box").dataset.off = globe ? "0" : "1";
+  $("stereo-bar").hidden = !on;
+  const dist = +$("stereo-dist").value, ipd = +$("stereo-ipd").value;
+  $("stereo-dist-out").textContent = `${dist} mm`;
+  $("stereo-ipd-out").textContent = `${ipd} mm`;
+  st.masterView.setStereo(on, dist, ipd, $("stereo-swap").checked);
+}
+
+/** Step the master's energy bin with the arrow keys: right toward less energy, left toward
+ *  more, past the first back to all of them. */
+function stepBin(dir) {
+  const solved = st.energySolved;
+  if (!solved) return false;
+  const at = st.simBin === null ? -1 : st.simBin;
+  const next = Math.max(-1, Math.min(solved - 1, at + dir));
+  if (next === at) return true;
+  st.simBin = next < 0 ? null : next;
+  st.masterSrc = -1;
+  if ($("dock-master").hidden) selectDock("master"); else showMaster();
+  showEnergy();
+  return true;
+}
+
+/** The region of interest on the map's bar: its size, and the cross that clears it. */
+function showRoi() {
+  const s = st.settings;
+  const on = s.roi_w > 0 && s.roi_h > 0;
+  $("btn-roi").setAttribute("aria-pressed", String(st.roiTool));
+  $("btn-roi").dataset.set = on ? "1" : "0";
+  $("roi-text").textContent = on ? `region ${s.roi_w} × ${s.roi_h}` : "region";
+  $("btn-roi").title = `${on ? `Region of interest: ${s.roi_w} × ${s.roi_h} cells from column ${s.roi_x}, row ${s.roi_y}; the fits and indexing keep to it. ` : "The region of interest, which the fits and indexing keep to (now the whole map). "}Press, then drag a box on the map (shift-drag does it any time).`;
+  $("btn-roi-clear").hidden = !on;
+  $("map-well").dataset.tool = st.roiTool ? "roi" : "";
+}
+
+function setRoi(set) {
+  try { st.ze.configure(set); } catch (err) { status(String(err.message || err), true); }
+  st.fit = null;
+  afterSettings(Object.keys(set));
 }
 
 function updateEnabled() {
   const ready = !!st.scan && st.ze.phases.length > 0;
-  for (const id of ["btn-fit-pc", "btn-fit-pose", "btn-index", "btn-tune"]) $(id).disabled = !ready;
+  for (const id of ["btn-fit-auto", "btn-fit-pc", "btn-fit-plane", "btn-index", "btn-tune"]) $(id).disabled = !ready;
   for (const b of document.querySelectorAll(".needs-results")) b.disabled = !st.results;
   for (const b of $("map-kind").children) if (RESULT_KINDS.includes(b.dataset.kind)) b.disabled = !st.results;
   $("btn-json").disabled = !st.scan;
@@ -1020,6 +1586,13 @@ function isMaster(f) {
  *  side files, master patterns. The project's settings go in before the scan opens (they may
  *  say how to read it) and its geometry after (over what the scan's file gives). */
 async function takeFiles(files) {
+  const cifs = files.filter((f) => /\.cif$/i.test(f.name));
+  if (cifs.length) {
+    loadCif(await cifs[0].text(), cifs[0].name);
+    selectTab("simulate");
+    files = files.filter((f) => !cifs.includes(f));
+    if (!files.length) return;
+  }
   const projects = files.filter((f) => /\.json$/i.test(f.name));
   const masters = files.filter((f) => !projects.includes(f) && isMaster(f));
   const scans = files.filter((f) => !projects.includes(f) && !masters.includes(f));
@@ -1033,8 +1606,13 @@ async function takeFiles(files) {
       return;
     }
     if (project.settings) {
-      try { st.ze.configure(project.settings); } catch (e) { status(String(e.message || e), true); log(String(e.message || e), true); return; }
-      afterSettings(Object.keys(project.settings));
+      // (a project saved by another version may hold settings this one does not have)
+      const have = st.ze.settings;
+      const gone = Object.keys(project.settings).filter((k) => !(k in have));
+      const take = Object.fromEntries(Object.entries(project.settings).filter(([k]) => k in have));
+      if (gone.length) log(`project ${projects[0].name}: settings this version does not have, left out: ${gone.join(", ")}`);
+      try { st.ze.configure(take); } catch (e) { status(String(e.message || e), true); log(String(e.message || e), true); return; }
+      afterSettings(Object.keys(take));
     }
   }
   if (scans.length) await openScan(scans);
@@ -1086,7 +1664,7 @@ function againstTrueGeometry() {
   const g = st.ze.geometry;
   const pc = Math.max(...g.pc.map((v, i) => Math.abs(v - T.pc[i])));
   const rot = Math.max(...g.rot.map((v, i) => Math.abs(v - T.rot[i]))) * 180 / Math.PI;
-  return `\nagainst the toy scan's geometry: pattern centre within ${pc.toFixed(5)}, rotation within ${rot.toFixed(3)}°${T.pxUm > 0 && g.pxUm > 0 ? `, pixel ${(100 * (g.pxUm / T.pxUm - 1)).toFixed(2)} % off` : ""}`;
+  return `\nagainst the toy scan's geometry: pattern centre within ${pc.toFixed(5)}, rotation within ${rot.toFixed(3)}°${Math.abs(g.pxUm - T.pxUm) > 1e-9 * T.pxUm ? `; the pixel size is ${g.pxUm.toFixed(1)} µm, the scan was made with ${T.pxUm.toFixed(1)}` : ""}`;
 }
 
 async function loadExample() {
@@ -1101,7 +1679,7 @@ async function loadExample() {
     st.scanName = scan.name;
     st.ze.clearPhases();
     await st.ze.addPhase(master);
-    st.phaseFiles = [master];
+    st.phaseFiles = [{ file: master, on: true, info: null }];
     afterOpen();
     phasesChanged();
   });
@@ -1121,6 +1699,20 @@ async function main() {
     // the candidate under the cross-hair becomes the pattern centre, to fit again from there
     setPc: (pc) => { beforeFit(); st.ze.setGeometry({ pc }); geometryChanged(); },
   });
+  planeView = createPlaneView();
+  // the master view (a phase's master or the last simulation's) and the crystal's cell, both
+  // rendered by the engine (nothing until there is one to show)
+  st.masterView = new MasterView($("master-well"), (o) => {
+    const source = st.ze ? masterSource() : null;
+    if (source === null) return null;
+    return st.ze.sphereView({ ...o, source, stored: source >= 0 && st.masterStage === "stored", bin: source < 0 ? st.simBin : null, site: source < 0 ? st.simSite : null });
+  }, (rot) => { if (st.link) st.cellView.setRotation(rot); });
+  // (the cell and the master share the crystal's Cartesian frame: linked, one rotation turns both)
+  st.cellView = new CellView($("cell-well"), (o) => (st.ze && st.crystal ? st.ze.cellView(o) : null), (rot) => { if (st.link) st.masterView.setRotation(rot); });
+  let projection = "globe";
+  try { projection = localStorage.getItem("zebsdsolve.projection") || "globe"; } catch { /* private window */ }
+  setProjection(projection);
+  app.dataset.crystal = "0";
   updateWiring();
   try {
     st.ze = await Zebsdsolve.create({ wasm: new URL("../zebsdsolve/zebsdsolve.wasm", import.meta.url) });
@@ -1150,9 +1742,9 @@ async function main() {
       if (ev.stage !== "index") progress(!st.busy && ev.done >= ev.total ? null : ev.done / Math.max(ev.total, 1));
     }
     else if (ev.kind === "pc") status(`pattern centre, level ${ev.level + 1}: ${ev.pc.map((v) => v.toFixed(4)).join("  ")}   mean NCC ${ev.score.toFixed(4)}${ev.at_border ? "  (at the border: moving the grid)" : ""}`);
-    else if (ev.kind === "pose") status(`pose fit, iteration ${ev.iter + 1}: mean NCC ${ev.ncc.toFixed(5)}   pattern centre ${ev.pc.map((v) => v.toFixed(5)).join("  ")}`);
   });
   updateEnabled();
+  showMaster();
   // the example scan is served by the site and by a checkout, not carried in the wheels
   fetch("./presets/nickel/Ni_master_20kV.npz", { method: "HEAD" }).then((r) => { $("btn-example").hidden = !r.ok; }, () => { $("btn-example").hidden = true; });
   status(`ready · zebsdsolve ${ze.version}`);
@@ -1166,16 +1758,19 @@ function wireSplits() {
   let saved = {};
   try { saved = JSON.parse(localStorage.getItem("zebsdsolve.layout") || "{}") || {}; } catch { /* no storage: the defaults */ }
   const apply = () => {
-    for (const [prop, v] of [["--dock-h", saved.dock], ["--pat-w", saved.pat]]) {
+    for (const [prop, v] of [["--dock-h", saved.dock], ["--pat-w", saved.pat], ["--xtal-w", saved.xtal]]) {
       if (v > 0) stage.style.setProperty(prop, `${v}px`); else stage.style.removeProperty(prop);
     }
   };
   const keep = () => { try { localStorage.setItem("zebsdsolve.layout", JSON.stringify(saved)); } catch { /* not kept */ } };
   apply();
-  const wire = (el, key, axis) => {
+  const wire = (el, which, axis) => {
+    // (the bar beside the pattern is the bar beside the crystal on the Simulate step)
+    const keyOf = () => (which === "pat" && app.dataset.tab === "simulate" ? "xtal" : which);
     el.addEventListener("mousedown", (e) => {
       if (e.button !== 0) return;
       e.preventDefault();
+      const key = keyOf();
       document.body.dataset.resize = axis;
       el.dataset.drag = "1";
       const move = (ev) => {
@@ -1193,7 +1788,7 @@ function wireSplits() {
       window.addEventListener("mousemove", move);
       window.addEventListener("mouseup", up);
     });
-    el.addEventListener("dblclick", () => { delete saved[key]; apply(); keep(); });
+    el.addEventListener("dblclick", () => { delete saved[keyOf()]; apply(); keep(); });
   };
   wire($("split-dock"), "dock", "row");
   wire($("split-pat"), "pat", "col");
@@ -1216,14 +1811,26 @@ function updateWiring() {
   $("btn-toy").addEventListener("click", makeToy);
   $("bin-choices").addEventListener("change", (e) => applySetting("binning", +e.target.value));
   $("btn-phase").addEventListener("click", () => $("file-phase").click());
+  $("btn-cif").addEventListener("click", () => $("file-cif").click());
+  $("file-cif").addEventListener("change", async (e) => { const f = e.target.files[0]; e.target.value = ""; if (f) loadCif(await f.text(), f.name); });
+  $("cif-preset").addEventListener("change", (e) => loadPreset(e.target.value));
+  $("btn-simulate").addEventListener("click", runSimulate);
+  $("btn-sim-phase").addEventListener("click", addSimPhase);
+  $("btn-sim-save").addEventListener("click", () => { if (st.sim) download(`${simName()}.npz`, st.ze.simulationNpz(), "application/octet-stream"); });
   $("file-phase").addEventListener("change", (e) => { const f = [...e.target.files]; e.target.value = ""; addPhases(f); });
+  $("btn-fit-auto").addEventListener("click", fitGeometry);
   $("btn-fit-pc").addEventListener("click", fitPc);
-  $("btn-fit-pose").addEventListener("click", fitPose);
+  $("btn-fit-plane").addEventListener("click", fitPlane);
+  $("btn-geo-plane").addEventListener("click", () => {
+    beforeFit();
+    st.ze.setGeometry({ planeKind: 0 });
+    geometryChanged();
+  });
   $("btn-geo-undo").addEventListener("click", () => {
     if (!st.geoBefore) return;
     // back to before the fit, or forward to after it: the two change places
     const g = st.ze.geometry;
-    const other = { pc: g.pc, rot: g.rot };
+    const other = { pc: g.pc, rot: g.rot, pxUm: g.pxUm, plane: g.plane, planeKind: g.planeKind };
     st.ze.setGeometry(st.geoBefore);
     st.geoBefore = other;
     st.geoIsBefore = !st.geoIsBefore;
@@ -1243,10 +1850,76 @@ function updateWiring() {
   $("btn-json").addEventListener("click", () => download(st.scanName.replace(/\.[^.]+$/, "") + ".zebsdsolve.json", projectJson(), "application/json"));
   $("map-kind").addEventListener("click", (e) => { const b = e.target.closest("button"); if (b && !b.disabled) setMapKind(b.dataset.kind); });
   $("dock-kind").addEventListener("click", (e) => { const b = e.target.closest("button"); if (b) selectDock(b.dataset.dock); });
-  $("pat-stage").addEventListener("click", (e) => { const b = e.target.closest("button"); if (b && !b.disabled) { st.stage = b.dataset.stage; showStage(); showCell(); } });
+  $("view-mode").addEventListener("click", (e) => { const b = e.target.closest("button"); if (b) setProjection(b.dataset.view); });
+  $("view-look").addEventListener("click", (e) => {
+    const b = e.target.closest("button");
+    if (!b) return;
+    if (b.dataset.look) st.masterView.lookAlong(b.dataset.look.split(",").map(Number)); else st.masterView.reset();
+  });
+  $("master-src").addEventListener("change", (e) => {
+    if (e.target.value === "") return;
+    if (e.target.value === "open") { showMaster(); $("file-phase").click(); return; }
+    st.masterSrc = +e.target.value;
+    st.half = null;
+    st.masterView.resetLayout();
+    if (st.masterSrc >= 0) { st.phase = st.masterSrc; showPhases(); }
+    showMaster();
+  });
+  $("master-stage").addEventListener("change", (e) => { st.masterStage = e.target.value; showMaster(); });
+  $("view-half").addEventListener("click", (e) => { const b = e.target.closest("button"); if (b && !b.disabled) { st.half = b.dataset.half; showHalf(); } });
+  for (const id of ["view-stereo", "stereo-dist", "stereo-ipd", "stereo-swap"]) $(id).addEventListener("input", showStereo);
+  $("view-lock").addEventListener("change", showViewLock);
+  $("cell-super").addEventListener("change", (e) => {
+    st.cellView.cells = e.target.checked ? 3 : 1;
+    if (st.crystal) showCrystal();
+  });
+  $("cell-link").addEventListener("change", (e) => {
+    st.link = e.target.checked;
+    // linked: the master turns to the cell as it is
+    if (st.link && st.cellView.rot) st.masterView.setRotation(st.cellView.rot);
+  });
+  $("energy-all").addEventListener("click", () => { if (st.simBin !== null) pickSimPart("bin", st.simBin); });
+  $("cell-look").addEventListener("click", (e) => {
+    const b = e.target.closest("button");
+    if (!b) return;
+    if (b.dataset.look) st.cellView.lookAlong(+b.dataset.look); else st.cellView.reset();
+  });
+  $("btn-roi").addEventListener("click", () => { st.roiTool = !st.roiTool; showRoi(); if (st.roiTool) status("drag a box on the map for the region of interest (Escape: never mind)"); });
+  $("btn-roi-clear").addEventListener("click", () => setRoi({ roi_x: 0, roi_y: 0, roi_w: 0, roi_h: 0 }));
+  // the log: the banner opens it (and folds it again); Escape folds it
+  $("console-bar").addEventListener("click", (e) => { if (!e.target.closest("#btn-stop")) openLog(); });
+  $("console-bar").addEventListener("keydown", (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); openLog(); } });
+  $("btn-log-close").addEventListener("click", () => openLog(false));
+  $("btn-log-copy").addEventListener("click", () => navigator.clipboard?.writeText($("log").innerText).then(() => status("the log is on the clipboard")));
+  document.addEventListener("keydown", (e) => {
+    if (e.key !== "Escape") return;
+    if ($("console").dataset.open === "1") openLog(false);
+    if (st.roiTool || st.roiDrag) { st.roiTool = false; st.roiDrag = null; showRoi(); drawMapOverlay(); }
+  });
+  $("pat-stage").addEventListener("change", (e) => { st.stage = e.target.value; showStage(); showCell(); });
   $("show-fit").addEventListener("change", drawMapOverlay);
   $("map-legend").addEventListener("click", () => { st.legendFolded = !st.legendFolded; drawLegend(); });
   $("pat-live").addEventListener("change", showCell);
+  $("pat-cmp").addEventListener("change", (e) => { st.cmp.mode = e.target.value; drawCompare(); });
+  // the bar between the pattern and its simulation: press or drag anywhere on the image
+  {
+    const well = $("pat-cmp-well");
+    const to = (e) => {
+      if (st.cmp.mode !== "split" || !st.cmp.exp) return;
+      const r = imageBox($("pat-diff"));
+      const box = well.getBoundingClientRect();
+      st.cmp.at = Math.max(0, Math.min(1, (e.clientX - box.left - r.left) / Math.max(r.width, 1)));
+      drawCompare();
+    };
+    well.addEventListener("mousedown", (e) => {
+      if (e.button !== 0 || st.cmp.mode !== "split") return;
+      e.preventDefault();
+      to(e);
+      const up = () => { window.removeEventListener("mousemove", to); window.removeEventListener("mouseup", up); };
+      window.addEventListener("mousemove", to);
+      window.addEventListener("mouseup", up);
+    });
+  }
   $("pat-full").addEventListener("change", showCell);
   $("btn-zoom").addEventListener("click", resetZoom);
 
@@ -1261,9 +1934,18 @@ function updateWiring() {
     const rect = well.getBoundingClientRect();
     zoomMap(Math.exp(-e.deltaY * (e.deltaMode === 1 ? 0.05 : 0.0015)), e.clientX - rect.left, e.clientY - rect.top);
   }, { passive: false });
-  well.addEventListener("keydown", (e) => {
+  // the arrow keys, wherever the focus is but in a field or a view with keys of its own: on the
+  // Simulate step they step the master's energy bin, elsewhere the selected pattern on the map
+  document.addEventListener("keydown", (e) => {
     const d = { ArrowLeft: [0, -1], ArrowRight: [0, 1], ArrowUp: [-1, 0], ArrowDown: [1, 0] }[e.key];
-    if (!d || !st.scan || st.cell < 0) return;
+    if (!d || e.altKey || e.ctrlKey || e.metaKey) return;
+    const t = e.target;
+    if (t.closest && t.closest("input, select, textarea, [contenteditable], #tabs, .votes-grid")) return;
+    if (app.dataset.tab === "simulate") {
+      if (d[0] === 0 && stepBin(d[1])) e.preventDefault();
+      return;
+    }
+    if (!st.scan || st.cell < 0) return;
     e.preventDefault();
     const { rows, cols } = st.scan;
     const k = e.shiftKey ? 10 : 1;
@@ -1275,7 +1957,7 @@ function updateWiring() {
     if (!st.scan || e.button !== 0) return;
     well.focus({ preventScroll: true });
     const p = mapCellAt(e);
-    if (e.shiftKey) {
+    if (e.shiftKey || st.roiTool) {
       if (p) { st.roiDrag = { r0: p.r, c0: p.c, r1: p.r, c1: p.c }; drawMapOverlay(); }
       e.preventDefault();
       return;
@@ -1317,18 +1999,19 @@ function updateWiring() {
     const roi = st.roiDrag;
     if (!roi) return;
     st.roiDrag = null;
+    st.roiTool = false;
     const x = Math.min(roi.c0, roi.c1), y = Math.min(roi.r0, roi.r1), w = Math.abs(roi.c1 - roi.c0) + 1, h = Math.abs(roi.r1 - roi.r0) + 1;
     // a click without a drag clears the region
-    const set = w < 2 && h < 2 ? { roi_x: 0, roi_y: 0, roi_w: 0, roi_h: 0 } : { roi_x: x, roi_y: y, roi_w: w, roi_h: h };
-    try { st.ze.configure(set); } catch (err) { status(String(err.message || err), true); }
-    st.fit = null;
-    afterSettings(Object.keys(set));
+    const whole = w < 2 && h < 2;
+    setRoi(whole ? { roi_x: 0, roi_y: 0, roi_w: 0, roi_h: 0 } : { roi_x: x, roi_y: y, roi_w: w, roi_h: h });
+    status(whole ? "region of interest: the whole map" : `region of interest: ${w} × ${h} cells from column ${x}, row ${y}`);
   });
   map.addEventListener("mouseleave", () => { $("map-hover").textContent = ""; });
   // whatever is laid out by hand follows its pane
   new ResizeObserver(() => { if (st.scan) { layoutMap(); drawMapOverlay(); } }).observe(well);
-  new ResizeObserver(() => { if (st.scan) drawPc(); }).observe($("pats"));
-  new ResizeObserver(() => { if (!$("dock-votes").hidden) votes.draw(); drawZ(); }).observe(document.querySelector(".dock"));
+  new ResizeObserver(() => { if (st.scan) { drawPc(); if (st.cmp.mode === "split") drawCompare(); } }).observe($("pats"));
+  new ResizeObserver(() => { if (!$("dock-votes").hidden) votes.draw(); if (!$("dock-plane").hidden) planeView.draw(); drawZ(); }).observe(document.querySelector(".dock"));
+  new ResizeObserver(() => showEnergy()).observe($("energy"));
 
   // drop files anywhere
   let depth = 0;

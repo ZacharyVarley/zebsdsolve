@@ -15,7 +15,7 @@
 #
 # The nickel scan that ships with kikuchipy (55 × 75 patterns of 60 × 60 pixels), from the file
 # to an indexed map: looking at patterns and what the filters do to them, fitting the pattern
-# centre from a wrong start by a vote, refining the detector pose, indexing, and comparing the
+# centre from a wrong start by a vote, fitting the plane of source points, indexing, and comparing the
 # result with the orientations and the pattern centre kikuchipy refined for the same scan.
 
 # %%
@@ -116,15 +116,40 @@ ax.set_title("mean best NCC of the fit patterns")
 fig.colorbar(im)
 
 # %% [markdown]
-# ## The pose fit
+# ## The plane of source points
 #
-# From the vote, the detector's position and the 25 patterns' orientations are refined together
-# by Levenberg–Marquardt on the Jacobian of the normalized simulations.
+# From the vote, every second pattern each way (`plane_stride`) is refined by itself: its
+# orientation and where its own source stood against the detector, six unknowns a pattern, as
+# Winkelmann et al. (2020) and kikuchipy's `refine_orientation_projection_center` do. Then the
+# transformation of the scan's rows and columns that passes through those source points is
+# fitted by least squares (`plane_kind`: affine, nine numbers, or projective, eleven), and the
+# geometry takes it: from here on every pattern's source is where the plane says, and the
+# scan's steps and the pixel size are not used. What the plane says of the tilt, the scan's
+# directions and its steps comes with a standard error each, from fitting it again without one
+# block of the map at a time. This map is three thousandths of the detector wide: the beam
+# hardly moves across it, so the plane's slopes are not told (their errors say so), but its
+# source at the map's middle is. `s.fit_geometry()` is the vote and this fit in one call.
 
 # %%
-pose = s.fit_pose()
-print("pattern centre:", np.round(pose["pc"], 5), " kikuchipy's:", np.round(pc_file, 5))
-print(f"mean NCC {pose['start_ncc']:.4f} → {pose['ncc']:.4f} in {pose['iterations']} iterations")
+plane = s.fit_plane()
+said = plane["said"]
+print("pattern centre:", np.round(plane["pc"], 5), "±", np.round(plane["pc_se"], 5), " kikuchipy's:", np.round(pc_file, 5))
+print(f"{plane['n_used']} of {plane['n_patterns']} patterns; mean NCC {plane['start_ncc']:.4f} → {plane['ncc']:.4f}, each pattern at its own best")
+print(f"the plane says: tilt {np.degrees(said['rot'][1]):+.1f}° ± {np.degrees(said['rot_se'][1]):.1f}°, steps {np.round(said['step'], 2)} ± {np.round(said['step_se'], 2)} of the given ones")
+
+# %% [markdown]
+# Each pattern's own source point (blue) and where the plane puts it (orange), across the map.
+
+# %%
+pts = s.plane_points()
+p_col, p_row = pts["cells"] % s.scan["cols"], pts["cells"] // s.scan["cols"]
+fig, axes = plt.subplots(1, 3, figsize=(11, 3))
+for k, (a, along, name) in enumerate(zip(axes, (p_col, p_row, p_row), ("column", "row", "row"))):
+    a.plot(along[pts["used"]], pts["pc"][pts["used"], k], ".", ms=2, alpha=0.4)
+    a.plot(along, pts["fit"][:, k], ".", ms=1, color="C1")
+    a.set_xlabel(f"map {name}")
+    a.set_ylabel(f"PC{'xyz'[k]}")
+fig.tight_layout()
 
 # %% [markdown]
 # ## Indexing
@@ -251,7 +276,8 @@ print(f"mean NCC {res['ncc'].mean():.3f} → {quiet['ncc'].mean():.3f}, median z
 # the checks that make this tutorial a test
 assert quiet["ncc"].mean() > res["ncc"].mean() + 0.03 and np.median(dis4) < 0.6 and (dis4 < 3).mean() > 0.97, (quiet["ncc"].mean(), np.median(dis4))
 assert np.abs(np.array(vote["pc"]) - pc_file).max() < 0.015, vote["pc"]
-assert np.abs(np.array(pose["pc"]) - pc_file).max() < 0.004, pose["pc"]
+assert np.abs(np.array(plane["pc"]) - pc_file).max() < 0.004, plane["pc"]
+assert plane["kind"] == "affine" and s.geometry["plane_kind"] == "affine" and s.geometry["rot"] == [0, 0, 0] and s.geometry["px_um"] == 560, s.geometry
 assert np.median(dis) < 0.6 and (dis < 3).mean() > 0.97, (np.median(dis), (dis < 3).mean())
 assert res["ncc"].mean() > 0.45
 assert np.median(dis2) < 0.6 and (dis2 < 3).mean() > 0.965 and first > 0.8, (np.median(dis2), (dis2 < 3).mean(), first)

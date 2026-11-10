@@ -1,22 +1,18 @@
-//! Rotations and rigid motions in f64 (host side).
+//! Rotations in f64 (host side).
 //!
 //! Conventions, the same throughout the engine and both front ends:
 //!  * A quaternion is (w, x, y, z), unit, and acts on a vector as q v q*.
 //!  * An orientation q maps sample-frame directions to crystal-frame directions:
 //!    v_crystal = q v_sample q*. Crystal symmetry therefore multiplies on the left (g · q).
 //!  * Bunge angles (phi1, Phi, phi2) are radians, ZXZ, passive: `fromBunge`.
-//!  * A rigid motion is [t(3), q(4)]: x' = q x q* + t. Tangent vectors are [tau(3), phi(3)].
 const std = @import("std");
 
 pub const Quat = [4]f64;
 pub const Vec3 = [3]f64;
 /// row-major 3×3
 pub const Mat3 = [9]f64;
-/// [t, q]
-pub const Se3 = [7]f64;
 
 pub const quat_identity: Quat = .{ 1, 0, 0, 0 };
-pub const se3_identity: Se3 = .{ 0, 0, 0, 1, 0, 0, 0 };
 
 pub fn dot(a: Vec3, b: Vec3) f64 {
     return a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
@@ -199,92 +195,6 @@ pub fn so3Log(q0: Quat) Vec3 {
     return .{ k * q[1], k * q[2], k * q[3] };
 }
 
-fn hat(v: Vec3) Mat3 {
-    return .{ 0, -v[2], v[1], v[2], 0, -v[0], -v[1], v[0], 0 };
-}
-
-const mat_identity: Mat3 = .{ 1, 0, 0, 0, 1, 0, 0, 0, 1 };
-
-fn matAxpy(a: Mat3, s: f64, b: Mat3) Mat3 {
-    var o = a;
-    for (0..9) |i| o[i] += s * b[i];
-    return o;
-}
-
-/// Left Jacobian of SO(3): Exp(phi + d) ≈ Exp(Jl d) Exp(phi).
-pub fn so3LeftJacobian(phi: Vec3) Mat3 {
-    const th2 = dot(phi, phi);
-    const th = @sqrt(th2);
-    const K = hat(phi);
-    const K2 = matMul(K, K);
-    const a = if (th < 1e-5) 0.5 - th2 / 24.0 else (1 - @cos(th)) / th2;
-    const b = if (th < 1e-5) 1.0 / 6.0 - th2 / 120.0 else (th - @sin(th)) / (th2 * th);
-    return matAxpy(matAxpy(mat_identity, a, K), b, K2);
-}
-
-fn so3LeftJacobianInv(phi: Vec3) Mat3 {
-    const th2 = dot(phi, phi);
-    const th = @sqrt(th2);
-    const K = hat(phi);
-    const K2 = matMul(K, K);
-    const c = if (th < 1e-5) 1.0 / 12.0 + th2 / 720.0 else (1.0 / th2) * (1 - th * @sin(th) / (2 * (1 - @cos(th))));
-    return matAxpy(matAxpy(mat_identity, -0.5, K), c, K2);
-}
-
-// ── se(3) ──
-
-/// exp of [tau, phi]: rotation Exp(phi), translation Jl(phi) tau.
-pub fn se3Exp(xi: [6]f64) Se3 {
-    const phi: Vec3 = .{ xi[3], xi[4], xi[5] };
-    const t = matVec(so3LeftJacobian(phi), .{ xi[0], xi[1], xi[2] });
-    const q = so3Exp(phi);
-    return .{ t[0], t[1], t[2], q[0], q[1], q[2], q[3] };
-}
-
-pub fn se3Log(T: Se3) [6]f64 {
-    const phi = so3Log(.{ T[3], T[4], T[5], T[6] });
-    const tau = matVec(so3LeftJacobianInv(phi), .{ T[0], T[1], T[2] });
-    return .{ tau[0], tau[1], tau[2], phi[0], phi[1], phi[2] };
-}
-
-/// a ∘ b: apply b, then a.
-pub fn se3Mul(a: Se3, b: Se3) Se3 {
-    const qa: Quat = .{ a[3], a[4], a[5], a[6] };
-    const qb: Quat = .{ b[3], b[4], b[5], b[6] };
-    const t = add(qapply(qa, .{ b[0], b[1], b[2] }), .{ a[0], a[1], a[2] });
-    const q = qstd(qmul(qa, qb));
-    return .{ t[0], t[1], t[2], q[0], q[1], q[2], q[3] };
-}
-
-pub fn se3Inv(a: Se3) Se3 {
-    const qi = qconj(.{ a[3], a[4], a[5], a[6] });
-    const t = scale(qapply(qi, .{ a[0], a[1], a[2] }), -1);
-    return .{ t[0], t[1], t[2], qi[0], qi[1], qi[2], qi[3] };
-}
-
-pub fn se3Act(T: Se3, p: Vec3) Vec3 {
-    return add(qapply(.{ T[3], T[4], T[5], T[6] }, p), .{ T[0], T[1], T[2] });
-}
-
-/// Left Jacobian of SE(3) at xi (6×6, row-major): Exp(xi + d) ≈ Exp(Jl d) Exp(xi). By central
-/// differences of the group's own exp and log, which is accurate to ~1e-9 and has no formula
-/// of its own to get wrong.
-pub fn se3LeftJacobian(xi: [6]f64) [36]f64 {
-    var J: [36]f64 = undefined;
-    const h = 1e-6;
-    const base_inv = se3Inv(se3Exp(xi));
-    for (0..6) |j| {
-        var xp = xi;
-        var xm = xi;
-        xp[j] += h;
-        xm[j] -= h;
-        const dp = se3Log(se3Mul(se3Exp(xp), base_inv));
-        const dm = se3Log(se3Mul(se3Exp(xm), base_inv));
-        for (0..6) |i| J[i * 6 + j] = (dp[i] - dm[i]) / (2 * h);
-    }
-    return J;
-}
-
 // ── cubochoric ↔ quaternion (Roşca, Morawiec, De Graef 2014) ──
 
 /// Half edge of the cubochoric cube: (π^(2/3)) / 2.
@@ -401,27 +311,9 @@ test "zyz composes z y z" {
     try expectVec(qapply(q, v), rz(0.4, ry(0.9, rz(-1.2, v))), tol);
 }
 
-test "so3 and se3 exp, log, jacobian" {
+test "so3 exp and log" {
     const phi: Vec3 = .{ 0.3, -0.2, 0.5 };
     try expectVec(so3Log(so3Exp(phi)), phi, 1e-12);
-    const xi: [6]f64 = .{ 0.4, -0.1, 0.25, 0.3, -0.2, 0.5 };
-    const back = se3Log(se3Exp(xi));
-    for (0..6) |i| try std.testing.expectApproxEqAbs(xi[i], back[i], 1e-12);
-    // Exp(xi + d) ≈ Exp(J d) Exp(xi)
-    const J = se3LeftJacobian(xi);
-    const d: [6]f64 = .{ 1e-5, -2e-5, 3e-5, 2e-5, 1e-5, -1e-5 };
-    var xd = xi;
-    var Jd: [6]f64 = @splat(0);
-    for (0..6) |i| {
-        xd[i] += d[i];
-        for (0..6) |j| Jd[i] += J[i * 6 + j] * d[j];
-    }
-    const lhs = se3Exp(xd);
-    const rhs = se3Mul(se3Exp(Jd), se3Exp(xi));
-    for (0..7) |i| try std.testing.expectApproxEqAbs(lhs[i], rhs[i], 1e-9);
-    // the rotation block of the SE(3) Jacobian is the SO(3) one
-    const Js = so3LeftJacobian(phi);
-    for (0..3) |i| for (0..3) |j| try std.testing.expectApproxEqAbs(Js[i * 3 + j], J[(3 + i) * 6 + 3 + j], 1e-7);
 }
 
 test "cubochoric is an equal-volume map onto the homochoric ball" {

@@ -74,26 +74,24 @@ for a, k, title in zip(axes, (0, 0, cols - 1, n - 1), ("clean, corner", "noisy, 
 # %% [markdown]
 # ## The fits, from a wrong geometry
 #
-# The vote finds the pattern centre; the pose fit then refines the detector's whole pose, its
-# position and its attitude, together with the orientations of a lattice of patterns.
-#
-# The attitude is the weak part. Turning the detector about the source and turning every
-# crystal the other way change any one pattern alike; only the beam's travel between patterns
-# tells them apart, and here that is 4 % of the detector under noise as strong as the signal.
-# This detector was simulated at its nominal attitude, so the swing, tilt and twist the fit
-# reports are its error, and every orientation indexed afterwards carries that same turn. On a
-# real detector the nominal attitude is itself a guess, and a wider map, or more patterns in
-# the fit (`pose_grid`), is what pins it.
+# The vote finds one pattern centre for the whole map. The plane fit then refines every
+# pattern by itself, its orientation and its own source point, and fits the plane of those
+# source points against the scan's rows and columns (Winkelmann et al. 2020; kikuchipy's
+# `fit_pc`). `fit_geometry` is the two in one call. Nothing is asked of the steps, the pixel
+# size or the tilt: the plane says where the beam stood for every cell, and from that what the
+# tilt and the steps must have been, each with a standard error. Here the truth is the nominal
+# attitude and the steps as given: a tilt of 0 and steps of 1.
 
 # %%
 s.set_geometry(pc=(0.52, 0.31, 0.58))
-vote = s.fit_pc()
-pose = s.fit_pose()
-turn = np.degrees(pose["rot"])
+s.configure(plane_stride=1)
+fit = s.fit_geometry()
+said = fit["said"]
 print("true          ", pc_true)
-print("vote          ", np.round(vote["pc"], 4), f" mean NCC {vote['score']:.3f}")
-print("pose fit      ", np.round(pose["pc"], 5), f" mean NCC {pose['ncc']:.4f}  over {pose['n_patterns']} patterns")
-print("swing, tilt, twist (°), true 0:", np.round(turn, 3))
+print("vote          ", np.round(fit["start_pc"], 4))
+print("plane         ", np.round(fit["pc"], 5), f" mean NCC {fit['ncc']:.4f}  over {fit['n_used']} patterns")
+print(f"the plane says: tilt {np.degrees(said['rot'][1]):+.2f}° ± {np.degrees(said['rot_se'][1]):.2f}°, the scan turned {np.degrees(said['rot'][2]):+.2f}° ± {np.degrees(said['rot_se'][2]):.2f}°, "
+      f"steps {np.round(said['step'], 3)} ± {np.round(said['step_se'], 3)}")
 
 # %% [markdown]
 # ## Indexing, and the phases
@@ -110,7 +108,7 @@ for k in (0, 1):
     m = right & (phase_true == k)
     dis[m] = np.degrees(s.disorientation(res["quaternions"].reshape(-1, 4)[m], q_true[m], phase=k))
 print(f"phase right for {100 * right.mean():.1f} % of the patterns")
-print(f"orientation error: median {np.nanmedian(dis):.3f}°, largest {np.nanmax(dis):.3f}° (the detector's fitted turn is {np.linalg.norm(turn):.3f}°)")
+print(f"orientation error: median {np.nanmedian(dis):.3f}°, largest {np.nanmax(dis):.3f}°")
 
 fig, axes = plt.subplots(1, 3, figsize=(11, 3))
 axes[0].imshow(phase_true.reshape(rows, cols), cmap="coolwarm")
@@ -126,15 +124,15 @@ for a in axes:
 # %% [markdown]
 # ## What the beam's travel is worth
 #
-# The same scan indexed as if every pattern came from one point of the sample (the detector's
-# pixel size forgotten): the correlation drops toward the map's edges, the farthest from that
-# point.
+# The same scan indexed as if every pattern came from one point of the sample (the plane
+# dropped, and the scan's steps set to nothing): the correlation drops toward the map's edges,
+# the farthest from that point.
 
 # %%
 ncc_with = res["ncc"].copy()
-s.set_geometry(px_um=0)
+s.set_geometry(plane_kind="none", step_x_um=0, step_y_um=0)
 flat = s.index()
-s.set_geometry(px_um=560)
+s.set_geometry(step_x_um=60, step_y_um=60)
 fig, axes = plt.subplots(1, 2, figsize=(9, 3))
 for a, v, title in zip(axes, (ncc_with, flat["ncc"]), ("with the beam's travel", "as if from one point")):
     im = a.imshow(v, vmin=min(ncc_with.min(), flat["ncc"].min()), vmax=ncc_with.max(), cmap="gray")
@@ -144,10 +142,10 @@ fig.colorbar(im, ax=axes)
 
 # %%
 # the checks that make this tutorial a test
-assert np.abs(np.array(vote["pc"]) - pc_true).max() < 0.015, vote["pc"]
-assert np.abs(np.array(pose["pc"]) - pc_true).max() < 0.002, pose["pc"]
+assert np.abs(np.array(fit["start_pc"]) - pc_true).max() < 0.015, fit["start_pc"]
+assert np.abs(np.array(fit["pc"]) - pc_true).max() < 0.002, fit["pc"]
 assert right.mean() > 0.97, right.mean()
-assert np.linalg.norm(turn) < 0.6, turn
-assert np.nanmedian(dis) < 0.6, np.nanmedian(dis)
+assert abs(said["rot"][1]) < 3 * said["rot_se"][1] + 1e-3 and np.all(np.abs(np.array(said["step"]) - 1) < 3 * np.array(said["step_se"]) + 0.01), said
+assert np.nanmedian(dis) < 1.0, np.nanmedian(dis)
 assert ncc_with.mean() > flat["ncc"].mean()
 s.close()

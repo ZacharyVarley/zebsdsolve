@@ -171,12 +171,16 @@ fn metaNumber(json: []const u8, key: []const u8) ?f64 {
 }
 
 fn loadEbsdsim(gpa: Allocator, f: *File) !Master {
+    return loadEbsdsimBy(gpa, f, true);
+}
+
+fn loadEbsdsimBy(gpa: Allocator, f: *File, by_grid: bool) !Master {
     var z = try Npz.open(gpa, f);
     defer z.deinit();
     var fs = (try z.array("fundamental_sector")) orelse (try z.array("integrated_fundamental_sector")) orelse return error.NotAMasterPattern;
     defer fs.deinit(gpa);
-    var kij = (try z.array("fundamental_kij")) orelse return error.NotAMasterPattern;
-    defer kij.deinit(gpa);
+    var kij_a = (try z.array("fundamental_kij")) orelse return error.NotAMasterPattern;
+    defer kij_a.deinit(gpa);
     var ops_a = (try z.array("pg_operators")) orelse return error.NotAMasterPattern;
     defer ops_a.deinit(gpa);
     var nrm_a = (try z.array("fs_normals")) orelse return error.NotAMasterPattern;
@@ -187,7 +191,7 @@ fn loadEbsdsim(gpa: Allocator, f: *File) !Master {
 
     // values per direction: energy 0 and site 0 are the integrated slices of format 2; the
     // legacy array is (direction, site)
-    const n_k = kij.shape[0];
+    const n_k = kij_a.shape[0];
     const vals = try gpa.alloc(f64, n_k);
     defer gpa.free(vals);
     if (fs.rank == 3) {
@@ -201,10 +205,78 @@ fn loadEbsdsim(gpa: Allocator, f: *File) !Master {
             vals[i] = s / @as(f64, @floatFromInt(n_sites));
         }
     }
-
+    const kij = try gpa.alloc([3]i32, n_k);
+    defer gpa.free(kij);
     var hw: usize = 0;
-    for (0..n_k) |i| hw = @max(hw, @as(usize, @intFromFloat(@max(@abs(kij.at(i * 3)), @abs(kij.at(i * 3 + 1))))));
+    for (0..n_k) |i| {
+        for (0..3) |c| kij[i][c] = @intFromFloat(kij_a.at(i * 3 + c));
+        hw = @max(hw, @as(usize, @intCast(@max(@abs(kij[i][0]), @abs(kij[i][1])))));
+    }
     if (metaNumber(meta, "halfw")) |h| hw = @intFromFloat(h);
+    const n_ops = ops_a.shape[0];
+    const ops = try gpa.alloc(rot.Mat3, n_ops);
+    defer gpa.free(ops);
+    for (0..n_ops) |g| for (0..9) |e| {
+        ops[g][e] = ops_a.at(g * 9 + e);
+    };
+    const n_nrm = if (nrm_a.rank == 2) nrm_a.shape[0] else 0;
+    const normals = try gpa.alloc(rot.Vec3, n_nrm);
+    defer gpa.free(normals);
+    for (0..n_nrm) |i| normals[i] = .{ nrm_a.at(i * 3), nrm_a.at(i * 3 + 1), nrm_a.at(i * 3 + 2) };
+    return fromSectorBy(gpa, vals, kij, hw, ops, normals, .{
+        .point_group = if (metaNumber(meta, "pg_num")) |v| @intFromFloat(v) else 0,
+        .space_group = if (metaNumber(meta, "space_group")) |v| @intFromFloat(v) else 0,
+        .voltage_kv = metaNumber(meta, "voltage_kv") orelse 0,
+    }, by_grid);
+}
+
+pub const SectorInfo = struct { point_group: u32 = 0, space_group: u32 = 0, voltage_kv: f64 = 0 };
+
+/// A master from intensities on a point group's fundamental sector (ebsdsim's layout): `vals`
+/// per direction, `kij` the Lambert pixel each is at (column, row from −hw, and the
+/// hemisphere's sign), expanded to both hemispheres with the point group's operators: each
+/// pixel takes the value of its symmetry-equivalent direction deepest inside the sector.
+/// (The name is empty and the symmetry not yet measured: see `load`.)
+pub fn fromSector(gpa: Allocator, vals: []const f64, kij: []const [3]i32, hw: usize, ops: []const rot.Mat3, normals: []const rot.Vec3, info: SectorInfo) !Master {
+    return fromSectorBy(gpa, vals, kij, hw, ops, normals, info, true);
+}
+
+/// One of the square grid's own symmetries, which the equal-area map commutes with: x ↔ y,
+/// then x ↦ −x, y ↦ −y, and z ↦ −z (the other sheet). As a matrix on directions:
+/// diag(sx, sy, sz) times the swap or the identity.
+const GridOp = struct {
+    swap: bool,
+    neg_x: bool,
+    neg_y: bool,
+    neg_z: bool,
+
+    fn of(code: usize) GridOp {
+        return .{ .swap = code & 1 != 0, .neg_x = code & 2 != 0, .neg_y = code & 4 != 0, .neg_z = code & 8 != 0 };
+    }
+
+    fn matrix(g: GridOp) rot.Mat3 {
+        const sx: f64 = if (g.neg_x) -1 else 1;
+        const sy: f64 = if (g.neg_y) -1 else 1;
+        const sz: f64 = if (g.neg_z) -1 else 1;
+        return if (g.swap) .{ 0, sx, 0, sy, 0, 0, 0, 0, sz } else .{ sx, 0, 0, 0, sy, 0, 0, 0, sz };
+    }
+
+    /// The pixel (sheet, row, column) whose direction is this operator's image of the given one's.
+    fn pixel(g: GridOp, hemi: usize, row: usize, col: usize, last: usize) usize {
+        var r = row;
+        var c = col;
+        if (g.swap) {
+            r = col;
+            c = row;
+        }
+        if (g.neg_x) c = last - c;
+        if (g.neg_y) r = last - r;
+        const h = if (g.neg_z) 1 - hemi else hemi;
+        return (h * (last + 1) + r) * (last + 1) + c;
+    }
+};
+
+fn fromSectorBy(gpa: Allocator, vals: []const f64, kij: []const [3]i32, hw: usize, ops: []const rot.Mat3, normals: []const rot.Vec3, info: SectorInfo, by_grid: bool) !Master {
     const side = 2 * hw + 1;
     const plane = side * side;
 
@@ -216,33 +288,44 @@ fn loadEbsdsim(gpa: Allocator, f: *File) !Master {
     @memset(sec, 0);
     @memset(has, false);
     var needs_south = false;
-    for (0..n_k) |i| {
-        const ix: i64 = @as(i64, @intFromFloat(kij.at(i * 3))) + @as(i64, @intCast(hw));
-        const iy: i64 = @as(i64, @intFromFloat(kij.at(i * 3 + 1))) + @as(i64, @intCast(hw));
+    for (kij, vals) |k, v| {
+        const ix: i64 = @as(i64, k[0]) + @as(i64, @intCast(hw));
+        const iy: i64 = @as(i64, k[1]) + @as(i64, @intCast(hw));
         if (ix < 0 or iy < 0 or ix >= side or iy >= side) continue;
-        const south = kij.at(i * 3 + 2) <= 0;
+        const south = k[2] <= 0;
         needs_south = needs_south or south;
         const at = (if (south) plane else 0) + @as(usize, @intCast(iy)) * side + @as(usize, @intCast(ix));
-        sec[at] = @floatCast(vals[i]);
+        sec[at] = @floatCast(v);
         has[at] = true;
     }
-
-    const n_ops = ops_a.shape[0];
-    const ops = try gpa.alloc(rot.Mat3, n_ops);
-    defer gpa.free(ops);
-    for (0..n_ops) |g| for (0..9) |e| {
-        ops[g][e] = ops_a.at(g * 9 + e);
-    };
-    const n_nrm = if (nrm_a.rank == 2) nrm_a.shape[0] else 0;
-    const normals = try gpa.alloc(rot.Vec3, n_nrm);
-    defer gpa.free(normals);
-    for (0..n_nrm) |i| normals[i] = .{ nrm_a.at(i * 3), nrm_a.at(i * 3 + 1), nrm_a.at(i * 3 + 2) };
 
     const sheets = try gpa.alloc(f32, 2 * plane);
     errdefer gpa.free(sheets);
     const eps = 1.0 / @as(f64, @floatFromInt(@max(hw, 1)));
     const last: f64 = @floatFromInt(side - 1);
+    // the grid's symmetries that are the crystal's too (m-3m has all sixteen): a pixel such an
+    // operator takes to an earlier one has that one's value, the representative of the same
+    // orbit, and is copied from it rather than looked up again
+    var grid: [16]GridOp = undefined;
+    var n_grid: usize = 0;
+    if (by_grid) for (1..16) |code| {
+        const M = GridOp.of(code).matrix();
+        for (ops) |g| {
+            var d: f64 = 0;
+            for (0..9) |e| d += @abs(g[e] - M[e]);
+            if (d < 1e-6) {
+                grid[n_grid] = GridOp.of(code);
+                n_grid += 1;
+                break;
+            }
+        }
+    };
     for (0..2) |hemi| for (0..side) |row| for (0..side) |col| {
+        const here = (hemi * side + row) * side + col;
+        const first = for (grid[0..n_grid]) |g| {
+            if (g.pixel(hemi, row, col, side - 1) < here) break false;
+        } else true;
+        if (!first) continue;
         const x = 2 * @as(f64, @floatFromInt(col)) / last - 1;
         const y = 2 * @as(f64, @floatFromInt(row)) / last - 1;
         const d = lambert.squareToSphere(x, y, hemi == 1);
@@ -266,6 +349,13 @@ fn loadEbsdsim(gpa: Allocator, f: *File) !Master {
         const uv = lambert.sphereToSquare(rep);
         sheets[hemi * plane + row * side + col] = sampleStored(sec[(if (south) plane else 0)..][0..plane], has[(if (south) plane else 0)..][0..plane], side, uv[0], uv[1]);
     };
+    // the rest from the first pixel of their orbit under those operators (looked up above)
+    if (n_grid > 0) for (0..2) |hemi| for (0..side) |row| for (0..side) |col| {
+        const here = (hemi * side + row) * side + col;
+        var at = here;
+        for (grid[0..n_grid]) |g| at = @min(at, g.pixel(hemi, row, col, side - 1));
+        if (at != here) sheets[here] = sheets[at];
+    };
     normalize(sheets);
 
     var m: Master = .{
@@ -274,11 +364,11 @@ fn loadEbsdsim(gpa: Allocator, f: *File) !Master {
         .side = @intCast(side),
         .raw = sheets,
         .source = "ebsdsim",
+        .point_group = info.point_group,
+        .space_group = info.space_group,
+        .voltage_kv = info.voltage_kv,
     };
     errdefer gpa.free(m.name);
-    if (metaNumber(meta, "pg_num")) |v| m.point_group = @intFromFloat(v);
-    if (metaNumber(meta, "space_group")) |v| m.space_group = @intFromFloat(v);
-    if (metaNumber(meta, "voltage_kv")) |v| m.voltage_kv = v;
     if (m.point_group == 0 and m.space_group != 0) m.point_group = sym.pointGroupOfSpaceGroup(m.space_group) orelse 0;
     m.laue = sym.laueOfPointGroup(m.point_group) orelse laueFromOperators(ops);
     m.rotation = sym.rotationsOfPointGroup(m.point_group) orelse m.laue;
@@ -538,6 +628,26 @@ pub fn weights(gpa: Allocator, L: u32, coef: []const sh.Complex, tab: []const f6
         }
     };
     return out;
+}
+
+test "a master's grid symmetries copy what the lookup gives" {
+    // nickel (m-3m: all sixteen of the grid's symmetries) and GaN (6mm: those of them it has),
+    // expanded by the operators alone and with the grid's copies: the same sheets
+    const gpa = std.testing.allocator;
+    for ([_][]const u8{ "testdata/nickel/Ni_master_20kV.npz", "testdata/gan/GaN_master_20kV.npz" }) |path| {
+        var f = File.open(gpa, path) catch |e| switch (e) {
+            error.FileNotFound => return, // run from the repo root
+            else => return e,
+        };
+        defer f.close();
+        var a = try loadEbsdsimBy(gpa, &f, true);
+        defer a.deinit();
+        var b = try loadEbsdsimBy(gpa, &f, false);
+        defer b.deinit();
+        var worst: f32 = 0;
+        for (a.raw, b.raw) |x, y| worst = @max(worst, @abs(x - y));
+        try std.testing.expect(worst < 1e-5);
+    }
 }
 
 test "the nickel master expands to a symmetric, normalized sphere" {

@@ -10,7 +10,7 @@
 //   project_dict  simulated patterns of dictionary orientations at one detector position
 //   seed          items with the orientations a search found (spherical peaks or dictionary hits)
 //   decoy         items with random orientations, for what mutual information chance gives
-//   sums          per item, the sums from which the host (pose fit) and refine_step build the
+//   sums          per item, the sums from which the host (plane fit) and refine_step build the
 //                 normalized cross-correlation with the item's pattern, its gradient and its
 //                 Gauss–Newton matrix over six directions: a shift of the detector (3) and a
 //                 rotation of the crystal (3), or over the rotation alone (flags bit 1), which
@@ -130,6 +130,121 @@ fn grad_at(v: vec3<f32>) -> vec4<f32> {
     let top = mix(mgrad[o], mgrad[o + 1u], tj);
     let bot = mix(mgrad[o + dp.side], mgrad[o + dp.side + 1u], tj);
     return mix(top, bot, fi - f32(r0));
+}
+
+// One sheet texel's intensity, the indices held inside the sheet.
+fn sheet_at(o: u32, r: i32, c: i32) -> f32 {
+    let last = i32(dp.side) - 1;
+    return mgrad[o + u32(clamp(r, 0, last)) * dp.side + u32(clamp(c, 0, last))].w;
+}
+
+// The master in crystal direction v by bicubic (Catmull–Rom) interpolation of its sheet, with
+// that surface's own gradient on the sphere (.xyz) and its intensity (.w): the intensity is
+// smooth across the sheet's pixels, where the bilinear one has a kink at every pixel's edge,
+// and the gradient is the derivative of the very surface the score is taken from, where
+// grad_at's is a finite difference a master pixel wide, interpolated. Sixteen texels for four.
+fn grad_at_cubic(v: vec3<f32>) -> vec4<f32> {
+    let uv = sphere_to_square(v);
+    let last = f32(dp.side - 1u);
+    let fj = clamp((uv.x + 1.0) * 0.5 * last, 0.0, last);
+    let fi = clamp((uv.y + 1.0) * 0.5 * last, 0.0, last);
+    let c0 = min(i32(fj), i32(dp.side) - 2);
+    let r0 = min(i32(fi), i32(dp.side) - 2);
+    var o = 0u;
+    if (v.z < 0.0) { o = dp.side * dp.side; }
+    let tj = fj - f32(c0);
+    let ti = fi - f32(r0);
+    // Catmull–Rom weights of the four texels along each way, and their slopes
+    let wj = vec4<f32>(((-tj + 2.0) * tj - 1.0) * tj, (3.0 * tj - 5.0) * tj * tj + 2.0, ((-3.0 * tj + 4.0) * tj + 1.0) * tj, (tj - 1.0) * tj * tj) * 0.5;
+    let wi = vec4<f32>(((-ti + 2.0) * ti - 1.0) * ti, (3.0 * ti - 5.0) * ti * ti + 2.0, ((-3.0 * ti + 4.0) * ti + 1.0) * ti, (ti - 1.0) * ti * ti) * 0.5;
+    let dj = vec4<f32>((-3.0 * tj + 4.0) * tj - 1.0, (9.0 * tj - 10.0) * tj, (-9.0 * tj + 8.0) * tj + 1.0, (3.0 * tj - 2.0) * tj) * 0.5;
+    let di = vec4<f32>((-3.0 * ti + 4.0) * ti - 1.0, (9.0 * ti - 10.0) * ti, (-9.0 * ti + 8.0) * ti + 1.0, (3.0 * ti - 2.0) * ti) * 0.5;
+    var val = 0.0;
+    var gj = 0.0;
+    var gi = 0.0;
+    for (var a = 0; a < 4; a = a + 1) {
+        let row = vec4<f32>(sheet_at(o, r0 - 1 + a, c0 - 1), sheet_at(o, r0 - 1 + a, c0), sheet_at(o, r0 - 1 + a, c0 + 1), sheet_at(o, r0 - 1 + a, c0 + 2));
+        val = val + wi[a] * dot(wj, row);
+        gj = gj + wi[a] * dot(dj, row);
+        gi = gi + di[a] * dot(wj, row);
+    }
+    // onto the sphere: how the sheet's coordinates move along two directions across v (the
+    // map's own differences, a thousandth of a radian either way)
+    var e1 = cross(v, vec3<f32>(0.0, 0.0, 1.0));
+    if (dot(e1, e1) < 1e-4) { e1 = cross(v, vec3<f32>(1.0, 0.0, 0.0)); }
+    e1 = normalize(e1);
+    let e2 = cross(v, e1);
+    let h = 1e-3;
+    let k = 0.5 * last / (2.0 * h);
+    let d1 = (sphere_to_square(normalize(v + h * e1)) - sphere_to_square(normalize(v - h * e1))) * k;
+    let d2 = (sphere_to_square(normalize(v + h * e2)) - sphere_to_square(normalize(v - h * e2))) * k;
+    return vec4<f32>(e1 * (gj * d1.x + gi * d1.y) + e2 * (gj * d2.x + gi * d2.y), val);
+}
+
+// Keys' six-point kernel (1981: cubic pieces, fourth-order accurate where Catmull–Rom is
+// third) at distance a ≥ 0 from a texel, and its slope there.
+fn keys6(a: f32) -> vec2<f32> {
+    if (a < 1.0) { return vec2<f32>(((4.0 / 3.0) * a - 7.0 / 3.0) * a * a + 1.0, (4.0 * a - 14.0 / 3.0) * a); }
+    if (a < 2.0) { return vec2<f32>(((-7.0 / 12.0 * a + 3.0) * a - 59.0 / 12.0) * a + 2.5, (-1.75 * a + 6.0) * a - 59.0 / 12.0); }
+    if (a < 3.0) { return vec2<f32>(((1.0 / 12.0 * a - 2.0 / 3.0) * a + 1.75) * a - 1.5, (0.25 * a - 4.0 / 3.0) * a + 1.75); }
+    return vec2<f32>(0.0, 0.0);
+}
+
+// grad_at_cubic with that kernel: thirty-six texels.
+fn grad_at_keys6(v: vec3<f32>) -> vec4<f32> {
+    let uv = sphere_to_square(v);
+    let last = f32(dp.side - 1u);
+    let fj = clamp((uv.x + 1.0) * 0.5 * last, 0.0, last);
+    let fi = clamp((uv.y + 1.0) * 0.5 * last, 0.0, last);
+    let c0 = min(i32(fj), i32(dp.side) - 2);
+    let r0 = min(i32(fi), i32(dp.side) - 2);
+    var o = 0u;
+    if (v.z < 0.0) { o = dp.side * dp.side; }
+    let tj = fj - f32(c0);
+    let ti = fi - f32(r0);
+    var wj: array<vec2<f32>, 6>;
+    var wi: array<vec2<f32>, 6>;
+    for (var m = 0; m < 6; m = m + 1) {
+        // texel m lies m − 2 from the one at (r0, c0)
+        let sj = tj - f32(m - 2);
+        let si = ti - f32(m - 2);
+        let kj = keys6(abs(sj));
+        let ki = keys6(abs(si));
+        wj[m] = vec2<f32>(kj.x, kj.y * sign(sj));
+        wi[m] = vec2<f32>(ki.x, ki.y * sign(si));
+    }
+    var val = 0.0;
+    var gj = 0.0;
+    var gi = 0.0;
+    for (var a = 0; a < 6; a = a + 1) {
+        var row = 0.0;
+        var drow = 0.0;
+        for (var b = 0; b < 6; b = b + 1) {
+            let s = sheet_at(o, r0 - 2 + a, c0 - 2 + b);
+            row = row + wj[b].x * s;
+            drow = drow + wj[b].y * s;
+        }
+        val = val + wi[a].x * row;
+        gj = gj + wi[a].x * drow;
+        gi = gi + wi[a].y * row;
+    }
+    var e1 = cross(v, vec3<f32>(0.0, 0.0, 1.0));
+    if (dot(e1, e1) < 1e-4) { e1 = cross(v, vec3<f32>(1.0, 0.0, 0.0)); }
+    e1 = normalize(e1);
+    let e2 = cross(v, e1);
+    let h = 1e-3;
+    let k = 0.5 * last / (2.0 * h);
+    let d1 = (sphere_to_square(normalize(v + h * e1)) - sphere_to_square(normalize(v - h * e1))) * k;
+    let d2 = (sphere_to_square(normalize(v + h * e2)) - sphere_to_square(normalize(v - h * e2))) * k;
+    return vec4<f32>(e1 * (gj * d1.x + gi * d1.y) + e2 * (gj * d2.x + gi * d2.y), val);
+}
+
+// The master and its gradient for the pose fit's kernels: bicubic (flags bit 4) or Keys'
+// six-point kernel (bit 8) when asked.
+fn grad_fit(v: vec3<f32>) -> vec4<f32> {
+    if ((dp.flags & 4u) != 0u) { return grad_at_cubic(v); }
+    if ((dp.flags & 8u) != 0u) { return grad_at_keys6(v); }
+    return grad_at(v);
 }
 
 fn ray_of(b: u32, row: u32, col: u32) -> vec3<f32> {
@@ -279,7 +394,7 @@ fn sums(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_index) 
             let u = ray_of(b, row, col);
             let dist = length(u);
             let c = qrot(q, u / dist);
-            let m = grad_at(c);
+            let m = grad_fit(c);
             let val = m.w;
             // d = (∂I/∂ detector shift, ∂I/∂ crystal rotation)
             let a = cross(c, m.xyz);

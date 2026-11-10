@@ -4,18 +4,21 @@ The plain functions in :mod:`zebsdsolve.api` (re-exported here) cover the common
 
     import zebsdsolve as ze
 
-    result = ze.index("scan.h5", ["Ni.npz"], fit="pose", bandwidth=64)
+    result = ze.index("scan.h5", ["Ni.npz"], fit="geometry", bandwidth=64)
     result.quaternions, result.ncc, result.phase       # per map cell
     result.geometry["pc"], result.geometry["rot"]      # the fitted pattern centre and detector rotation
 
 `Solver` is the engine itself, for when the steps are driven one at a time (as the web app does):
-open a scan, add phases, look at patterns, fit the pattern centre, fit the pose, index.
+open a scan, add phases, look at patterns, fit the pattern centre, fit the plane of source points,
+index.
 
 Conventions: quaternions are (w, x, y, z) and map sample directions to crystal directions;
 Bunge angles are radians. The geometry is one pose of the detector and, for each pattern, the
-point of the sample the beam stood on: the pattern centre (Bruker convention: x from the left
-and y from the top in fractions of the pattern's width and height, z in fractions of its
-height) is that pose's position, written for the map's centre. Map cells are numbered row-major.
+point of the sample the beam stood on: by the scan's steps from the map's centre, or, once a
+plane of source points is fitted (`fit_plane`), where that plane says. The pattern centre (Bruker
+convention: x from the left and y from the top in fractions of the pattern's width and height, z
+in fractions of its height) is the source's place at the map's centre. Map cells are numbered
+row-major.
 """
 import ctypes
 import json
@@ -25,12 +28,14 @@ import numpy as np
 
 from . import _native as _n
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 
 _lib = None
 _wgpu = None
 
 LAUE = {1: "-1", 2: "2/m", 3: "mmm", 4: "4/m", 5: "4/mmm", 6: "-3", 7: "-3m", 8: "6/m", 9: "6/mmm", 10: "m-3", 11: "m-3m"}
+# What the geometry's plane of source points is (`fit_plane`).
+PLANE_KINDS = ("none", "affine", "projective")
 METHODS = ("spherical", "dictionary", "pca")
 MAPS = {"ipf_x": 0, "ipf_y": 1, "ipf_z": 2, "ncc": 3, "nmi": 4, "phase": 5, "z": 6, "sweep": 7}
 
@@ -144,21 +149,39 @@ class Solver:
     def geometry(self):
         """The detector geometry: a dict with pc (3), sample_tilt_deg, detector_tilt_deg, rot (3,
         rotation vector, radians, in the detector's own axes: swing about its row direction,
-        tilt about its column direction, twist about its normal), px_um, step_x_um, step_y_um."""
+        tilt about its column direction, twist about its normal), px_um, step_x_um, step_y_um.
+
+        px_um is the size of one stored pattern pixel on the detector: the scan file's, or one
+        set by hand, or (when neither says) the detector's width, the setting
+        `detector_width_mm`, over the pattern's pixels across. With the scan's steps it says
+        how far the beam moved between patterns, in pixels.
+
+        plane_kind ("none", "affine", "projective") and plane (4 rows of 3): where the beam stood for
+        each map cell once `fit_plane` has run. ``np.array(plane) @ (column, row, 1)`` is
+        ``w * (PCx, PCy, PCz, 1)``, the source's place for that cell in pattern-centre
+        coordinates (the matrix of Winkelmann et al. 2020 and of kikuchipy's `fit_pc`). With a
+        plane, `pc` is the plane at the map's middle and the steps and the pixel size say
+        nothing of where the beam stood."""
         g = _n.Geometry()
         self._lib.ze_get_geometry(self._e, ctypes.byref(g))
         return {
             "pc": list(g.pc), "sample_tilt_deg": g.sample_tilt_deg, "detector_tilt_deg": g.detector_tilt_deg,
             "rot": list(g.rot), "px_um": g.px_um, "step_x_um": g.step_x_um, "step_y_um": g.step_y_um,
+            "plane_kind": PLANE_KINDS[g.plane_kind], "plane": [list(g.plane[3 * k:3 * k + 3]) for k in range(4)],
         }
 
     def set_geometry(self, **fields):
-        """Set any of the geometry's fields, e.g. ``set_geometry(pc=(0.5, 0.2, 0.5), px_um=70)``."""
+        """Set any of the geometry's fields, e.g. ``set_geometry(pc=(0.5, 0.2, 0.5), px_um=70)``.
+        ``px_um=0`` puts the pixel size back to the scan's own, or the one its detector's width gives."""
         g = _n.Geometry()
         self._lib.ze_get_geometry(self._e, ctypes.byref(g))
         for k, v in fields.items():
             if k in ("pc", "rot"):
                 setattr(g, k, (ctypes.c_double * 3)(*[float(x) for x in v]))
+            elif k == "plane":
+                setattr(g, k, (ctypes.c_double * 12)(*[float(x) for x in np.asarray(v, dtype=np.float64).reshape(12)]))
+            elif k == "plane_kind":
+                g.plane_kind = PLANE_KINDS.index(v) if isinstance(v, str) else int(v)
             elif hasattr(g, k):
                 setattr(g, k, float(v))
             else:
@@ -236,7 +259,7 @@ class Solver:
         fmt = buf.raw[:n].decode()
         return {
             "rows": s.rows, "cols": s.cols, "pattern_shape": (s.pat_h, s.pat_w), "dtype": ["uint8", "uint16", "float32"][s.pixel],
-            "format": fmt, "has_background": bool(s.has_background), "has_pc": bool(s.has_pc),
+            "format": fmt, "has_background": bool(s.has_background), "has_pc": bool(s.has_pc), "has_px": bool(s.has_px),
             "voltage_kv": s.voltage_kv or None, "bytes": int(s.bytes),
         }
 
@@ -255,10 +278,14 @@ class Solver:
         """One pattern as float32 (h, w), at the reduced size (the `binning` setting) or (`full`)
         the stored one. `processed`: True, as it is indexed (averaged with its neighbours when
         `nlpar` is on, then filtered); False, as it is stored; "averaged", averaged with its
-        neighbours and not filtered."""
+        neighbours and not filtered; "background", not the cell's pattern but the static
+        background subtracted from every pattern (an error when `static_background` subtracts
+        none)."""
         h, w = self.shape(full)
         out = np.empty(h * w, np.float32)
-        stage = 2 if processed == "averaged" else int(bool(processed))
+        stage = {"averaged": 2, "background": 3}.get(processed, None) if isinstance(processed, str) else None
+        if stage is None:
+            stage = int(bool(processed))
         self._check(self._lib.ze_pattern(self._e, int(cell), stage, int(full), _ptr(out, _n.f32p), out.size), "pattern")
         return out.reshape(h, w)
 
@@ -416,21 +443,165 @@ class Solver:
         self._lib.ze_pc_level_ballots(self._e, i, _ptr(den, _n.f32p), n, _ptr(info, _n.f64p))
         return {"density": den.reshape(shape) if n else None, "peak": tuple(float(v) for v in info[:3]), "ballots": int(info[3]), "inliers": int(info[4])}
 
-    def fit_pose(self):
-        """Fit the detector's pose and the fit patterns' orientations together (settings pose_grid,
-        pose_iters): the whole pose, six degrees of freedom. Any of them can be held with the
-        settings pose_x, pose_y, pose_z (the pattern centre's coordinates) and pose_tilt,
-        pose_swing, pose_twist (the detector's turns about the source). `pose_scale` adds a
-        seventh, the scale between the beam's travel and the detector (Sim(3)): the detector's
-        pixel size. The geometry takes the result; returns a dict, its `rot` the detector's
-        swing, tilt and twist (radians) and `px_um` the pixel size."""
-        r = _n.PoseResult()
-        self._check(self._lib.ze_fit_pose(self._e, ctypes.byref(r)), "fit_pose")
+    def fit_plane(self):
+        """Fit the plane of source points: where the beam stood for every map cell, as the
+        detector sees it (Winkelmann, Nolze, Cios, Tokarski and Bała, Materials 13 (2020) 2816;
+        kikuchipy's `EBSDDetector.fit_pc`).
+
+        Each fit pattern (every `plane_stride`-th cell each way, at most `plane_patterns_max`)
+        is first fitted by itself: its orientation and the place of its own source against
+        the detector, six unknowns a pattern, from the geometry as it stands (a source may
+        move `plane_trust` pattern heights). Then the transformation of the scan's indices
+        that passes through those points is fitted by least squares: `plane_kind` "affine"
+        (nine numbers) or "projective" (eleven). `plane_weights` "information" weighs each
+        point by how sharply its own pattern tells it, which is what lets thousands of small
+        patterns stand in for a few large calibration patterns; "equal" weighs them alike, as
+        kikuchipy does. Points further than `plane_outlier` robust standard deviations from
+        the plane are left out and the plane fitted again.
+
+        Nothing is asked of the scan's steps, the detector's pixel size or the tilts. The
+        geometry takes the plane (`geometry["plane"]`), and indexing then puts every pattern's
+        source where the plane says. `plane_frame` "nominal" leaves the sample frame the
+        orientations are in where it was; "follow" takes it from the plane (its normal the
+        plane's, its x along the scan's rows). `fit_pc` and a pattern centre set by hand go
+        back to one pattern centre and the scan's steps.
+
+        Returns a dict: plane (4 × 3), kind, frame, pc (the source at the map's middle), start_pc
+        (the pattern centre the fit began from), rot
+        (the geometry's turn now), n_patterns, n_used, rmsd (of the used points about the
+        plane: PCx, PCy, PCz), ncc and start_ncc (the fit patterns' mean score, each at its
+        own best, and before), iterations, and `said`: what the plane says of the geometry,
+        each with its standard error (`*_se`, from leaving out one block of the map at a
+        time): rot (the sample's frame against the nominal one: swing, tilt, and the scan's
+        turn in its own plane; radians), sample_tilt_deg (the sample tilt that tilt makes),
+        step (the beam's travel for a row and for a column, as a factor on what the steps and
+        the pixel size say), skew (the scan's directions off a right angle, radians)."""
+        r = _n.PlaneResult()
+        self._check(self._lib.ze_fit_plane(self._e, ctypes.byref(r)), "fit_plane")
+        return self._plane_result(r)
+
+    def fit_geometry(self):
+        """The automatic fit, from the geometry as it was given (by the scan or by
+        `set_geometry`; what earlier fits left is not used, so the same scan and settings give
+        the same fit): the vote for the pattern centre (`fit_pc`), then the plane of source
+        points from there (`fit_plane`). Returns the dict `fit_plane` does; its start_pc is the
+        vote's pattern centre."""
+        r = _n.PlaneResult()
+        self._check(self._lib.ze_fit_auto(self._e, ctypes.byref(r)), "fit_geometry")
+        return self._plane_result(r)
+
+    def _plane_result(self, r):
+        g = self.geometry
         return {
-            "pc": list(r.pc), "rot": list(r.rot), "start_pc": list(r.start_pc), "start_rot": list(r.start_rot),
-            "ncc": r.ncc, "start_ncc": r.start_ncc, "mean_turn": r.mean_turn, "px_um": r.px_um, "start_px_um": r.start_px_um,
-            "iterations": r.iterations, "accepted": r.accepted, "n_patterns": r.n_patterns, "converged": bool(r.converged),
+            "plane": np.array(r.plane, dtype=np.float64).reshape(4, 3), "kind": PLANE_KINDS[r.kind], "frame": ("nominal", "follow")[r.frame],
+            "pc": list(r.pc), "pc_se": list(r.pc_se), "start_pc": list(r.start_pc), "rot": list(r.rot),
+            "n_patterns": r.n_patterns, "n_used": r.n_used, "rmsd": list(r.rmsd), "ncc": r.ncc, "start_ncc": r.start_ncc, "iterations": r.iterations,
+            "said": {
+                "rot": list(r.said_rot), "rot_se": list(r.said_rot_se),
+                "sample_tilt_deg": g["sample_tilt_deg"] - float(np.degrees(r.said_rot[1])), "sample_tilt_se_deg": float(np.degrees(r.said_rot_se[1])),
+                "step": list(r.step), "step_se": list(r.step_se), "skew": r.skew, "skew_se": r.skew_se, "blocks": r.blocks,
+            },
         }
+
+    def plane_points(self):
+        """The source points the last `fit_plane` measured, a fit pattern each: a dict of
+        arrays: cells, pc (n × 3: where each pattern's own fit put its source, in
+        pattern-centre coordinates), fit (n × 3: where the plane has it), ncc, used (whether
+        it took part in the plane's fit)."""
+        n = self._lib.ze_plane_points(self._e, None, 0)
+        buf = (_n.PlanePoint * max(n, 1))()
+        self._lib.ze_plane_points(self._e, buf, n)
+        a = np.frombuffer(buf, dtype=np.dtype([("cell", "<u8"), ("pc", "<f8", 3), ("fit", "<f8", 3), ("ncc", "<f8"), ("used", "<u4"), ("pad", "<u4")]))[:n]
+        return {"cells": a["cell"].copy(), "pc": a["pc"].copy(), "fit": a["fit"].copy(), "ncc": a["ncc"].copy(), "used": a["used"].astype(bool)}
+
+    # ── master patterns simulated (src/simulate.zig) ──
+
+    def set_crystal(self, crystal):
+        """Set the crystal to simulate a master pattern for: a CIF (its path, or its text as
+        bytes), which the engine reads into its International Tables standard setting (refusing,
+        with the reason, a file that disagrees with itself); or a dict already in that setting,
+        {"space_group": n, "cell": (a, b, c, α, β, γ) in Å and degrees, "sites": [{"symbol":
+        "Ni" or "z": 28, "xyz": (x, y, z), "occupancy": 1, "b_iso": Å²}, …]}. Returns the
+        crystal as the engine has it (see `crystal`)."""
+        if isinstance(crystal, dict):
+            text = json.dumps(crystal).encode()
+            self._check(self._lib.ze_sim_set_crystal(self._e, text, len(text)), "set_crystal")
+        else:
+            if isinstance(crystal, (bytes, bytearray)):
+                text = bytes(crystal)
+            else:
+                with open(crystal, "rb") as f:
+                    text = f.read()
+            self._check(self._lib.ze_sim_read_cif(self._e, text, len(text)), "set_crystal")
+        return self.crystal()
+
+    def edit_crystal(self, cell=None, sites=None):
+        """Change the crystal set: `cell`, (a, b, c, α, β, γ) in Å and degrees (what the
+        crystal family ties follows the free parameters: b = a for a hexagonal crystal, and so
+        on); `sites`, one dict a site in order, each with its "occupancy" and "b_iso" (Å²; the
+        Debye-Waller factor), either left out to keep it. How the crystal was read is kept.
+        Returns the crystal as the engine has it (see `crystal`)."""
+        edit = {}
+        if cell is not None:
+            edit["cell"] = [float(v) for v in cell]
+        if sites is not None:
+            edit["sites"] = [{k: float(v) for k, v in s.items() if k in ("occupancy", "b_iso")} for s in sites]
+        text = json.dumps(edit).encode()
+        self._check(self._lib.ze_sim_edit_crystal(self._e, text, len(text)), "edit_crystal")
+        return self.crystal()
+
+    def crystal(self):
+        """The crystal set: space_group, name (its short H-M symbol), point_group (as the
+        master is folded by), centring, centrosymmetric, cell (Å, degrees) and which of its
+        parameters are free (`free`, six booleans), volume_nm3, density
+        (g/cm³), average_z and average_a (the energy model's inputs), sites (symbol, z, xyz in
+        the asymmetric unit, occupancy, b_iso in Å², multiplicity), and reading (from a CIF:
+        where the symmetry came from, the setting applied, and what the file declared; else
+        None)."""
+        n = self._lib.ze_sim_crystal(self._e, None, 0)
+        self._check(-1 if n < 0 else 0, "crystal")
+        buf = (ctypes.c_ubyte * n)()
+        self._lib.ze_sim_crystal(self._e, ctypes.cast(buf, ctypes.c_void_p), n)
+        return json.loads(bytes(buf))
+
+    def simulate_master(self):
+        """Simulate the crystal's master pattern under the settings sim_* (the energy model's
+        bins, each direction of the fundamental sector solved on the GPU). The engine keeps it: `simulated_master`, `add_simulated_phase` and
+        `save_simulation` use it. Returns a dict: n_k (directions), n_sites, n_g (reflections),
+        n_bins and n_bins_run (energy bins given and solved), max_beams and max_weak (the most
+        beams a direction solved, and followed as weak beams), overflow (directions with more strong
+        beams than one can solve, 512, whose others were followed as weak beams), failed
+        (directions whose solve failed), stopped (on sim_stop), halfw, rank, last_change."""
+        r = _n.SimSummary()
+        self._check(self._lib.ze_sim_run(self._e, ctypes.byref(r)), "simulate_master")
+        return {k: (bool(getattr(r, k)) if k == "stopped" else getattr(r, k)) for k, _ in r._fields_}
+
+    def simulated_master(self):
+        """The last simulation's master: (2, side, side) Lambert sheets, north then south,
+        normalized to zero mean and unit variance."""
+        side = self._lib.ze_sim_sheets(self._e, None, 0)
+        self._check(side if side < 0 else 0, "simulated_master")
+        out = np.empty(2 * side * side, np.float32)
+        self._lib.ze_sim_sheets(self._e, _ptr(out, _n.f32p), out.size)
+        return out.reshape(2, side, side)
+
+    def add_simulated_phase(self, name="simulated"):
+        """Add the last simulation as a candidate phase; returns its index."""
+        b = name.encode()
+        i = self._lib.ze_sim_add_phase(self._e, b, len(b))
+        self._check(i if i < 0 else 0, "add_simulated_phase")
+        return i
+
+    def save_simulation(self, path):
+        """Write the last simulation as an .npz in ebsdsim's layout (which ebsdsim and this
+        engine both read). Returns the path."""
+        n = self._lib.ze_sim_npz(self._e, None, 0)
+        self._check(-1 if n < 0 else 0, "save_simulation")
+        buf = (ctypes.c_ubyte * n)()
+        self._lib.ze_sim_npz(self._e, ctypes.cast(buf, ctypes.c_void_p), n)
+        with open(path, "wb") as f:
+            f.write(bytes(buf))
+        return path
 
     def fit_patterns(self):
         """The patterns of the last fit: (cells, phases, quaternions (n, 4), ncc)."""
@@ -666,4 +837,4 @@ def shader_modules():
         i += 1
 
 
-from .api import index, fit_pattern_center, fit_pose, load_patterns, Result  # noqa: E402,F401
+from .api import index, fit_pattern_center, fit_plane, load_patterns, Result  # noqa: E402,F401

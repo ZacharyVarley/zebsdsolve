@@ -20,7 +20,7 @@ if (!existsSync(wasm)) {
 }
 rmSync(OUT, { recursive: true, force: true });
 mkdirSync(join(OUT, "zebsdsolve"), { recursive: true });
-for (const d of ["index.html", "css", "js"]) cpSync(join(ROOT, "web", "app", d), join(OUT, d), { recursive: true });
+for (const d of ["index.html", "css", "js", "cif"]) cpSync(join(ROOT, "web", "app", d), join(OUT, d), { recursive: true });
 cpSync(wasm, join(OUT, "zebsdsolve", "zebsdsolve.wasm"));
 cpSync(join(ROOT, "web", "zebsdsolve.js"), join(OUT, "zebsdsolve", "zebsdsolve.js"));
 cpSync(join(ROOT, "testdata", "nickel"), join(OUT, "presets", "nickel"), { recursive: true });

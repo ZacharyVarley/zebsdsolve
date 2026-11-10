@@ -9,7 +9,8 @@ kikuchipy refined for it.
 
 - Source: <https://github.com/pyxem/kikuchipy-data/tree/master/nickel_ebsd_large>
 - Authors: Håkon Wiik Ånes and the kikuchipy developers (the scan was acquired at NTNU)
-- License: Creative Commons Attribution 4.0 International ([LICENSE](nickel/LICENSE)); the file is unchanged
+- License: Creative Commons Attribution 4.0 International ([LICENSE](nickel/LICENSE))
+- Changed from the source in one number: `Scan 1/EBSD/Header/detector_pixel_size`, which the file had as 1 (kikuchipy's value for unknown), is set to 70, the detector's pixel in micrometres. With the file's binning of 8 a pattern pixel is 560 µm, which puts the beam's travel in pixels until a plane of source points is fitted.
 
 `reference_quaternions.f32` holds the file's own refined orientations (its Bunge angles) as
 4125 × 4 little-endian float32 quaternions (w, x, y, z), so the tests and the browser test can

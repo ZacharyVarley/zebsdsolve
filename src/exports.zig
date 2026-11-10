@@ -13,7 +13,7 @@ const scan_mod = @import("scan.zig");
 const sym = @import("sym.zig");
 const rot = @import("rot.zig");
 const pcfit = @import("pcfit.zig");
-const posefit = @import("posefit.zig");
+const planefit = @import("planefit.zig");
 const output = @import("output.zig");
 
 const Engine = engine.Engine;
@@ -76,6 +76,7 @@ export fn ze_open_scan(e: *Engine, paths: [*]const u8, len: usize) i32 {
         n += 1;
     }
     e.openScan(list[0..n]) catch |err| return failed(e, "open_scan", err);
+    e.geo_given = e.geo;
     return 0;
 }
 
@@ -83,6 +84,7 @@ export fn ze_open_scan(e: *Engine, paths: [*]const u8, len: usize) i32 {
 export fn ze_set_patterns(e: *Engine, data: [*]const u8, len: usize, pixel: u32, rows: u32, cols: u32, h: u32, w: u32) i32 {
     if (pixel > 2) return failed(e, "set_patterns", error.UnsupportedPixelType);
     e.setPatterns(data[0..len], @enumFromInt(pixel), rows, cols, h, w) catch |err| return failed(e, "set_patterns", err);
+    e.geo_given = e.geo;
     return 0;
 }
 
@@ -94,6 +96,7 @@ export fn ze_set_patterns(e: *Engine, data: [*]const u8, len: usize, pixel: u32,
 export fn ze_synthesize(e: *Engine, quats: [*]f32, phase: [*]i32, grain: [*]i32, n: usize) i32 {
     e.cancel = false;
     e.synthesize(quats[0 .. 4 * n], phase[0..n], grain[0..n]) catch |err| return failed(e, "synthesize", err);
+    e.geo_given = e.geo;
     return 0;
 }
 
@@ -122,7 +125,23 @@ export fn ze_get_geometry(e: *Engine, out: *engine.Geometry) void {
 }
 
 export fn ze_set_geometry(e: *Engine, in: *const engine.Geometry) void {
-    e.geo = in.*;
+    // what the caller changed is given; what it passed back as it read it (a fit's result
+    // among it) is not
+    const was = e.geo;
+    var g = in.*;
+    // (no pixel size: the scan's own, or the one its detector's width gives)
+    if (!(g.px_um > 0)) g.px_um = e.defaultPx();
+    if (!std.meta.eql(in.pc, was.pc)) e.geo_given.pc = in.pc;
+    if (!std.meta.eql(in.rot, was.rot)) e.geo_given.rot = in.rot;
+    if (in.sample_tilt_deg != was.sample_tilt_deg) e.geo_given.sample_tilt_deg = in.sample_tilt_deg;
+    if (in.detector_tilt_deg != was.detector_tilt_deg) e.geo_given.detector_tilt_deg = in.detector_tilt_deg;
+    if (g.px_um != was.px_um) e.geo_given.px_um = g.px_um;
+    if (in.step_x_um != was.step_x_um) e.geo_given.step_x_um = in.step_x_um;
+    if (in.step_y_um != was.step_y_um) e.geo_given.step_y_um = in.step_y_um;
+    // (a pattern centre set by hand is one for the whole map again, the scan's steps saying how
+    // the beam went from it: the plane it was read from goes, unless a plane comes with it)
+    if (!std.meta.eql(in.pc, was.pc) and std.meta.eql(in.plane, was.plane) and in.plane_kind == was.plane_kind) g.plane_kind = 0;
+    e.geo = g;
 }
 
 // ── phases ──
@@ -131,6 +150,206 @@ export fn ze_set_geometry(e: *Engine, in: *const engine.Geometry) void {
 export fn ze_add_phase(e: *Engine, path: [*]const u8, len: usize) i32 {
     const i = e.addPhase(path[0..len]) catch |err| return failed(e, "add_phase", err);
     return @intCast(i);
+}
+
+// ── master patterns simulated (simulate.zig) ──
+
+const crystal_mod = @import("sim/crystal.zig");
+const cif_mod = @import("sim/cif.zig");
+const simulate_mod = @import("simulate.zig");
+const sim_tables = @import("sim/tables.zig");
+
+/// Set the crystal to simulate from a CIF's text (sim/cif.zig: taken into the standard setting;
+/// a file that disagrees with itself is refused, the last error saying why).
+export fn ze_sim_read_cif(e: *Engine, text: [*]const u8, len: usize) i32 {
+    var arena: std.heap.ArenaAllocator = .init(e.gpa);
+    defer arena.deinit();
+    var r: cif_mod.Reader = .{ .arena = arena.allocator() };
+    const s = r.read(text[0..len]) catch |err| {
+        if (err != error.Symmetry) return failed(e, "sim_read_cif", err);
+        e.fail("sim_read_cif: {s}", .{r.why()});
+        return -1;
+    };
+    const sites = arena.allocator().alloc(crystal_mod.Site, s.sites.len) catch |err| return failed(e, "sim_read_cif", err);
+    for (s.sites, sites) |a, *b| {
+        if (a.z == 0 or a.z > sim_tables.n_elements) {
+            e.fail("sim_read_cif: {s} (site {s}) has no tabulated scattering factors (elements 1 to {d} have)", .{ a.symbol, a.label, sim_tables.n_elements });
+            return -1;
+        }
+        b.* = .{ .z = a.z, .xyz = a.xyz, .occupancy = a.occupancy, .b_iso = a.u_iso * 8 * std.math.pi * std.math.pi };
+    }
+    var cell = crystal_mod.Cell.init(e.gpa, s.number, s.cell, sites) catch |err| return failed(e, "sim_read_cif", err);
+    cell.reading = cif_mod.account(&s, e.gpa) catch |err| {
+        cell.deinit();
+        return failed(e, "sim_read_cif", err);
+    };
+    if (e.crystal) |*c| c.deinit();
+    e.crystal = cell;
+    return 0;
+}
+
+/// Set the crystal to simulate from JSON, already in its standard setting: {"space_group": n,
+/// "cell": [a, b, c, α, β, γ] (Å, degrees), "sites": [{"z": Z or "symbol": "Ni", "xyz": [x,
+/// y, z], "occupancy": 1, "b_iso": Å²}, …]}.
+export fn ze_sim_set_crystal(e: *Engine, json: [*]const u8, len: usize) i32 {
+    const Site = struct { z: u32 = 0, symbol: []const u8 = "", xyz: [3]f64, occupancy: f64 = 1, b_iso: f64 = 0 };
+    const In = struct { space_group: u32, cell: [6]f64, sites: []const Site };
+    const parsed = std.json.parseFromSlice(In, e.gpa, json[0..len], .{ .ignore_unknown_fields = true }) catch |err| return failed(e, "sim_set_crystal", err);
+    defer parsed.deinit();
+    const sites = e.gpa.alloc(crystal_mod.Site, parsed.value.sites.len) catch |err| return failed(e, "sim_set_crystal", err);
+    defer e.gpa.free(sites);
+    for (parsed.value.sites, 0..) |s, i| {
+        var z = s.z;
+        if (z == 0) {
+            for (sim_tables.symbols, 1..) |sy, zi| if (std.ascii.eqlIgnoreCase(sy, s.symbol)) {
+                z = @intCast(zi);
+            };
+        }
+        if (z == 0) return failed(e, "sim_set_crystal", error.UnknownElement);
+        sites[i] = .{ .z = z, .xyz = s.xyz, .occupancy = s.occupancy, .b_iso = s.b_iso };
+    }
+    const cell = crystal_mod.Cell.init(e.gpa, parsed.value.space_group, parsed.value.cell, sites) catch |err| return failed(e, "sim_set_crystal", err);
+    if (e.crystal) |*c| c.deinit();
+    e.crystal = cell;
+    return 0;
+}
+
+/// Change the crystal set: {"cell": [a, b, c, α, β, γ] (Å, degrees; what its family ties
+/// follows the free parameters), "sites": [{"occupancy": …, "b_iso": Å²}, …] (one a site, in
+/// order; either may be left out)}; how it was read is kept.
+export fn ze_sim_edit_crystal(e: *Engine, json: [*]const u8, len: usize) i32 {
+    const c = if (e.crystal) |*x| x else return failed(e, "sim_edit_crystal", error.NoCrystal);
+    const SiteEdit = struct { occupancy: ?f64 = null, b_iso: ?f64 = null };
+    const In = struct { cell: ?[6]f64 = null, sites: ?[]const SiteEdit = null };
+    const parsed = std.json.parseFromSlice(In, e.gpa, json[0..len], .{ .ignore_unknown_fields = true }) catch |err| return failed(e, "sim_edit_crystal", err);
+    defer parsed.deinit();
+    const deg = 180.0 / std.math.pi;
+    var cell: [6]f64 = .{ c.a * 10, c.b * 10, c.c * 10, c.alpha * deg, c.beta * deg, c.gamma * deg };
+    if (parsed.value.cell) |given| cell = crystal_mod.constrained(c.space_group, given);
+    for (cell[0..3]) |v| if (!(v > 0 and v < 1000)) {
+        e.fail("sim_edit_crystal: a, b and c must be positive (Å)", .{});
+        return -1;
+    };
+    for (cell[3..6]) |v| if (!(v > 0 and v < 180)) {
+        e.fail("sim_edit_crystal: the angles must be between 0 and 180°", .{});
+        return -1;
+    };
+    const sites = e.gpa.alloc(crystal_mod.Site, c.sites.len) catch |err| return failed(e, "sim_edit_crystal", err);
+    defer e.gpa.free(sites);
+    for (c.sites, sites) |s, *o| o.* = .{ .z = s.z, .xyz = s.xyz, .occupancy = s.occupancy, .b_iso = s.b_nm2 * 100 };
+    if (parsed.value.sites) |edits| {
+        if (edits.len != sites.len) {
+            e.fail("sim_edit_crystal: {d} sites given, the crystal has {d}", .{ edits.len, sites.len });
+            return -1;
+        }
+        for (edits, sites) |x, *o| {
+            if (x.occupancy) |v| {
+                if (!(v > 0 and v <= 1)) {
+                    e.fail("sim_edit_crystal: an occupancy is a share, above 0 and at most 1", .{});
+                    return -1;
+                }
+                o.occupancy = v;
+            }
+            if (x.b_iso) |v| {
+                if (!(v > 0 and v < 100)) {
+                    e.fail("sim_edit_crystal: a B factor is positive (Å²)", .{});
+                    return -1;
+                }
+                o.b_iso = v;
+            }
+        }
+    }
+    var next = crystal_mod.Cell.init(e.gpa, c.space_group, cell, sites) catch |err| return failed(e, "sim_edit_crystal", err);
+    next.reading = e.gpa.dupe(u8, c.reading) catch |err| {
+        next.deinit();
+        return failed(e, "sim_edit_crystal", err);
+    };
+    c.deinit();
+    e.crystal = next;
+    return 0;
+}
+
+/// The crystal set, as JSON (crystal.zig's Cell.json): its length in bytes (copied when `cap`
+/// suffices), or −1 when there is none.
+export fn ze_sim_crystal(e: *Engine, out: ?[*]u8, cap: usize) i64 {
+    const c = if (e.crystal) |*x| x else return failed(e, "sim_crystal", error.NoCrystal);
+    const bytes = c.json(e.gpa) catch |err| return failed(e, "sim_crystal", err);
+    defer e.gpa.free(bytes);
+    if (out) |o| if (cap >= bytes.len) @memcpy(o[0..bytes.len], bytes);
+    return @intCast(bytes.len);
+}
+
+/// The crystal's cell (`cells` of them along each lattice vector) as the app draws it (sim/cellframe.zig info), as JSON: its length in
+/// bytes (copied when `cap` suffices), or −1.
+export fn ze_cell_info(e: *Engine, cells: u32, out: ?[*]u8, cap: usize) i64 {
+    const c = if (e.crystal) |*x| x else return failed(e, "cell_info", error.NoCrystal);
+    const bytes = @import("sim/cellframe.zig").info(e.gpa, c, cells) catch |err| return failed(e, "cell_info", err);
+    defer e.gpa.free(bytes);
+    if (out) |o| if (cap >= bytes.len) @memcpy(o[0..bytes.len], bytes);
+    return @intCast(bytes.len);
+}
+
+/// The crystal's cell in a picture for the app (cellview.zig): `turn` the view's rotation into
+/// the crystal's Cartesian frame (row-major 3 × 3), `zoom` 1 fitting the cell to the shorter
+/// side, `highlight` what to pick out (1–3 the edge a, b, c; 4–6 the angle α, β, γ; 16 + k the
+/// atoms of site k; 0 nothing); `width` × `height` RGBA8 pixels into `out` (`len` u32).
+export fn ze_cell_view(e: *Engine, turn: [*]const f32, zoom: f32, highlight: u32, cells: u32, width: u32, height: u32, out: [*]u32, len: usize) i32 {
+    @import("cellview.zig").render(e, turn[0..9].*, zoom, highlight, cells, width, height, out[0..len]) catch |err| return failed(e, "cell_view", err);
+    return 0;
+}
+
+/// How the energy model spreads the backscattered electrons over energy and depth for the
+/// crystal under the settings (sim_voltage_kv, sim_tilt_deg, sim_bin_kev), as JSON
+/// (sim/energy.zig describe): its length in bytes (copied when `cap` suffices), or −1.
+export fn ze_sim_energy(e: *Engine, out: ?[*]u8, cap: usize) i64 {
+    const c = if (e.crystal) |*x| x else return failed(e, "sim_energy", error.NoCrystal);
+    const s = &e.set;
+    const bytes = @import("sim/energy.zig").describe(e.gpa, c.density, c.average_z, c.average_a, s.sim_tilt_deg, s.sim_voltage_kv, s.sim_bin_kev) catch |err| return failed(e, "sim_energy", err);
+    defer e.gpa.free(bytes);
+    if (out) |o| if (cap >= bytes.len) @memcpy(o[0..bytes.len], bytes);
+    return @intCast(bytes.len);
+}
+
+/// Simulate the crystal's master pattern under the settings (sim_*); the engine keeps it.
+export fn ze_sim_run(e: *Engine, out: *simulate_mod.Summary) i32 {
+    const c = if (e.crystal) |*x| x else return failed(e, "sim_run", error.NoCrystal);
+    const s = simulate_mod.run(e, c) catch |err| return failed(e, "sim_run", err);
+    if (e.sim) |*x| x.deinit();
+    e.sim = s;
+    out.* = s.summary;
+    return 0;
+}
+
+/// The last simulation's master as two Lambert sheets (north, then south), side × side each,
+/// normalized to zero mean and unit variance. Returns the side (the sheets copied when `cap`
+/// floats suffice), or −1.
+export fn ze_sim_sheets(e: *Engine, out: ?[*]f32, cap: usize) i32 {
+    const s = if (e.sim) |*x| x else return failed(e, "sim_sheets", error.NoSimulation);
+    var m = s.master(e.gpa, "") catch |err| return failed(e, "sim_sheets", err);
+    defer m.deinit();
+    if (out) |o| if (cap >= m.raw.len) @memcpy(o[0..m.raw.len], m.raw);
+    return @intCast(m.side);
+}
+
+/// Add the last simulation's master as a candidate phase named `name`; returns its index.
+export fn ze_sim_add_phase(e: *Engine, name: [*]const u8, len: usize) i32 {
+    const s = if (e.sim) |*x| x else return failed(e, "sim_add_phase", error.NoSimulation);
+    var m = s.master(e.gpa, name[0..len]) catch |err| return failed(e, "sim_add_phase", err);
+    const i = e.addMaster(m) catch |err| {
+        m.deinit();
+        return failed(e, "sim_add_phase", err);
+    };
+    return @intCast(i);
+}
+
+/// The last simulation as an .npz file (ebsdsim's layout). Returns its size in bytes (the
+/// bytes copied when `cap` suffices), or −1.
+export fn ze_sim_npz(e: *Engine, out: ?[*]u8, cap: usize) i64 {
+    const s = if (e.sim) |*x| x else return failed(e, "sim_npz", error.NoSimulation);
+    const bytes = s.npz(e.gpa) catch |err| return failed(e, "sim_npz", err);
+    defer e.gpa.free(bytes);
+    if (out) |o| if (cap >= bytes.len) @memcpy(o[0..bytes.len], bytes);
+    return @intCast(bytes.len);
 }
 
 export fn ze_clear_phases(e: *Engine) void {
@@ -143,6 +362,20 @@ export fn ze_phase_count(e: *Engine) u32 {
 
 export fn ze_phase_info(e: *Engine, index: u32, out: *engine.PhaseInfo) i32 {
     out.* = e.phaseInfo(index) catch |err| return failed(e, "phase_info", err);
+    return 0;
+}
+
+/// A master in a picture for the app (sphereview.zig): `source` a phase (≥ 0) or the last
+/// simulation (−1); `stored` 1 a phase's master as loaded, 0 as patterns are compared with it;
+/// `bin` and `site`, for the simulation, one energy bin's and one site's alone (−1: all);
+/// `projection` 0 globe, 1 Lambert, 2 stereographic, 3 joint Lambert; `turn` the view's
+/// rotation into the crystal's frame (row-major 3 × 3, then four more numbers: the picture's pan
+/// across and down in shorter sides, the hemispheres shown (0 both, 1 upper, 2 lower), 1 for the
+/// upper less the lower's inversion); `width` × `height` RGBA8 pixels into
+/// `out` (`len` u32).
+export fn ze_sphere_view(e: *Engine, source: i32, stored: u32, bin: i32, site: i32, projection: u32, turn: [*]const f32, zoom: f32, width: u32, height: u32, out: [*]u32, len: usize) i32 {
+    if (projection > 3) return failed(e, "sphere_view", error.UnknownKind);
+    @import("sphereview.zig").render(e, source, stored != 0, bin, site, @enumFromInt(projection), turn[0..9].*, turn[9..13].*, zoom, width, height, out[0..len]) catch |err| return failed(e, "sphere_view", err);
     return 0;
 }
 
@@ -163,9 +396,10 @@ export fn ze_pattern_shape(e: *Engine, full: u32, out: *[2]u32) i32 {
 /// One pattern (map cell index, row-major) as f32, reduced or (`full`) at stored size, at a
 /// stage of the pipeline: `processed` 0 as it is stored, 1 as it is indexed (averaged with its
 /// neighbours when settings.nlpar, then filtered), 2 averaged with its neighbours and not
-/// filtered.
+/// filtered; 3 not the cell's pattern but the static background subtracted from every pattern
+/// (settings.static_background; an error when none is).
 export fn ze_pattern(e: *Engine, cell: u64, processed: u32, full: u32, out: [*]f32, len: usize) i32 {
-    if (processed > 2) return failed(e, "pattern", error.UnknownKind);
+    if (processed > 3) return failed(e, "pattern", error.UnknownKind);
     e.pattern(cell, @enumFromInt(processed), e.viewLevel(full != 0), out[0..len]) catch |err| return failed(e, "pattern", err);
     return 0;
 }
@@ -290,11 +524,29 @@ export fn ze_pc_level_ballots(e: *Engine, i: u32, out: ?[*]f32, cap: usize, info
     return @intCast(l.density.len);
 }
 
-/// Fit the detector's pose and the fit patterns' orientations together; the geometry takes the
-/// result.
-export fn ze_fit_pose(e: *Engine, out: *posefit.Result) i32 {
-    out.* = posefit.run(e) catch |err| return failed(e, "fit_pose", err);
+/// The vote for the pattern centre and then the plane of source points, from the geometry as
+/// it was given (planefit.auto); the geometry takes the result.
+export fn ze_fit_auto(e: *Engine, out: *planefit.PlaneResult) i32 {
+    out.* = planefit.auto(e) catch |err| return failed(e, "fit_auto", err);
     return 0;
+}
+
+/// Fit the plane of source points (planefit.plane): each fit pattern's own source point, and
+/// the affine or projective transformation of the scan's indices through them. The geometry
+/// takes the plane.
+export fn ze_fit_plane(e: *Engine, out: *planefit.PlaneResult) i32 {
+    out.* = planefit.plane(e) catch |err| return failed(e, "fit_plane", err);
+    return 0;
+}
+
+/// The source points the last plane fit measured (planefit.PlanePoint). Returns how many there
+/// are (copied when `cap` suffices).
+export fn ze_plane_points(e: *Engine, out: ?[*]planefit.PlanePoint, cap: usize) usize {
+    const t = e.plane_points.items;
+    if (out) |o| {
+        if (cap >= t.len) @memcpy(o[0..t.len], t);
+    }
+    return t.len;
 }
 
 /// The fit patterns of the last fit: their cells, phases, orientations (4 f32) and scores.

@@ -2,7 +2,6 @@
 //!   {"kind":"log","text":…}
 //!   {"kind":"progress","stage":…,"done":…,"total":…}
 //!   {"kind":"pc","level":…,"pc":[3],"score":…}       (a pattern-centre search level finished)
-//!   {"kind":"pose","iter":…,"ncc":…,"pc":[3],"rot":[3]} (a pose-fit iteration)
 //! In the browser each event goes straight to the page (import env.ze_event) so the UI can update
 //! while the module is suspended on the GPU or on a file read. Natively events queue until
 //! ze_events drains them.

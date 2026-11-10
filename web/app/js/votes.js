@@ -1,8 +1,9 @@
-// The pattern-centre search, laid open. Every grid it scored is a small volume of mean votes
-// over (x, y, z); the view cuts it three ways through the cross-hair, or lays every slice along
-// one axis side by side, with what led the search (each grid's winner and the next grid's
-// extent), what the fit patterns each preferred on their own, and the profile of the vote along
-// each axis. The cross-hair starts on the pattern centre and returns to it whenever the pattern
+// The pattern-centre search, laid open. Every grid it scored is a small volume of votes over
+// (x, y, z). The view shows the volume whole, as a cloud to turn about (each candidate a
+// glow as bright as its vote, the grids the search went through nested in it, and the way it
+// went), and cuts it three ways through the cross-hair, or lays every slice along one axis
+// side by side, with what led the search (each grid's winner and the next grid's extent) and
+// what the fit patterns each preferred on their own. The cross-hair starts on the pattern centre and returns to it whenever the pattern
 // centre changes (a fit, a typed value), so the cuts always go through the geometry in use
 // until the cross-hair is moved by hand.
 import { fit, svg, viridis } from "./draw.js";
@@ -11,6 +12,9 @@ const $ = (id) => document.getElementById(id);
 const NAMES = ["x", "y", "z"];
 // the three planes: [canvas id, horizontal axis, vertical axis, the axis held fixed]
 const PLANES = [["votes", 0, 1, 2], ["votes-xz", 0, 2, 1], ["votes-yz", 1, 2, 0]];
+// the volume turned about: the angles it starts at, and how far away the eye is (in half-widths)
+const TURN = { yaw: -0.62, pitch: 0.42 };
+const EYE = 5;
 // every slice along an axis: [horizontal axis, vertical axis, the axis the slices step along]
 const ALONG = { z: [0, 1, 2], y: [0, 2, 1], x: [1, 2, 0] };
 
@@ -27,7 +31,7 @@ const beyond = (v, a) => {
 };
 
 export function createVotes({ geometry, setPc }) {
-  const view = { levels: null, level: 0, at: [0, 0, 0], start: null, file: null, mode: "planes", what: "ballots", following: true, tiles: null };
+  const view = { levels: null, level: 0, at: [0, 0, 0], start: null, file: null, mode: "planes", what: "ballots", following: true, tiles: null, yaw: TURN.yaw, pitch: TURN.pitch, shots: null };
 
   const axesOf = (l) => [l.x, l.y, l.z];
   const sizes = (l) => [l.x.length, l.y.length, l.z.length];
@@ -211,56 +215,139 @@ export function createVotes({ geometry, setPc }) {
     slider("votes-all-slide", n[f], view.at[f], NAMES[f]);
   }
 
-  /** The mean vote along each axis through the cross-hair. */
-  function drawProfiles(l, lo, hi) {
-    const canvas = $("votes-profiles");
+  /** The volume whole, turned about. The grid in view fills it; x runs to the right, y away
+   *  down the pattern, z up (the detector's distance), each as long as its span, so the
+   *  basin's shape is its shape in pattern-centre units. */
+  function drawSpace(l, next, lo, hi) {
+    const canvas = $("votes-3d");
     const box = canvas.parentElement;
     const dpr = window.devicePixelRatio || 1;
     const W = Math.max(60, box.clientWidth), H = Math.max(60, box.clientHeight);
     canvas.width = Math.round(W * dpr);
     canvas.height = Math.round(H * dpr);
+    canvas.style.width = `${W}px`;
+    canvas.style.height = `${H}px`;
     const ctx = canvas.getContext("2d");
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     ctx.clearRect(0, 0, W, H);
-    ctx.font = "10.5px ui-monospace, Consolas, monospace";
-    ctx.textBaseline = "middle";
     const ax = axesOf(l), n = sizes(l);
-    const pc = geometry().pc;
-    const rowH = H / 3, padL = 14, padR = 4;
-    view.profiles = { W, rowH, padL, padR };
-    for (let k = 0; k < 3; k++) {
-      const top = k * rowH + 4, bot = (k + 1) * rowH - 5;
-      const x = (c) => (n[k] > 1 ? padL + (pos(c, ax[k]) / n[k]) * (W - padL - padR) : (padL + W - padR) / 2);
-      const y = (s) => bot - ((s - lo) / Math.max(hi - lo, 1e-20)) * (bot - top);
-      ctx.fillStyle = "#67676e";
-      ctx.textAlign = "left";
-      ctx.fillText(NAMES[k], 2, (top + bot) / 2);
-      ctx.strokeStyle = "#222226";
-      ctx.lineWidth = 1;
-      ctx.beginPath(); ctx.moveTo(padL, Math.round(bot) + 0.5); ctx.lineTo(W - padR, Math.round(bot) + 0.5); ctx.stroke();
-      // the cross-hair, and the pattern centre now where it lies within this grid
-      ctx.strokeStyle = "rgba(255,255,255,.45)";
-      const cx = Math.round(x(ax[k][view.at[k]])) + 0.5;
-      ctx.beginPath(); ctx.moveTo(cx, top - 2); ctx.lineTo(cx, bot); ctx.stroke();
-      if (beyond(pc[k], ax[k]) === 0 && n[k] > 1) {
-        ctx.strokeStyle = "#e8c77e";
-        const px = Math.round(x(pc[k])) + 0.5;
-        ctx.beginPath(); ctx.moveTo(px, bot - 5); ctx.lineTo(px, bot + 3); ctx.stroke();
-      }
-      const i = view.at.slice();
-      const pts = [];
-      for (let c = 0; c < n[k]; c++) { i[k] = c; const s = shownAt(l, i); pts.push([x(ax[k][c]), y(s), s]); }
-      ctx.strokeStyle = "#9d9da4";
-      ctx.lineWidth = 1.2;
-      ctx.beginPath();
-      pts.forEach(([px, py], c) => (c ? ctx.lineTo(px, py) : ctx.moveTo(px, py)));
-      ctx.stroke();
-      for (const [px, py, s] of pts) {
-        const c = viridis((s - lo) / Math.max(hi - lo, 1e-20));
-        ctx.fillStyle = `rgb(${c[0] | 0},${c[1] | 0},${c[2] | 0})`;
-        ctx.beginPath(); ctx.arc(px, py, 2.4, 0, 2 * Math.PI); ctx.fill();
+    const mid = ax.map((a) => (a[0] + a[a.length - 1]) / 2);
+    const cellOf = (a) => (a.length > 1 ? a[1] - a[0] : 0);
+    // half-widths, a cell's own half included
+    const half = ax.map((a) => (a[a.length - 1] - a[0]) / 2 + cellOf(a) / 2);
+    const unit = Math.max(...half, 1e-9);
+    const cy = Math.cos(view.yaw), sy = Math.sin(view.yaw), cp = Math.cos(view.pitch), sp = Math.sin(view.pitch);
+    const scale = (0.5 * Math.min(W, H)) / 1.85;
+    // a pattern centre → the screen (and its depth: larger is nearer)
+    const to = (v) => {
+      const X = (v[0] - mid[0]) / unit, Y = (v[2] - mid[2]) / unit, Z = -(v[1] - mid[1]) / unit;
+      const x1 = cy * X + sy * Z, z1 = -sy * X + cy * Z;
+      const y2 = cp * Y - sp * z1, z2 = sp * Y + cp * z1;
+      const k = EYE / (EYE - z2);
+      return [W / 2 + scale * k * x1, H / 2 - scale * k * y2, z2, k];
+    };
+    const line = (p, q, color, width, dash) => {
+      const a = to(p), b = to(q);
+      ctx.strokeStyle = color; ctx.lineWidth = width; ctx.setLineDash(dash || []);
+      ctx.beginPath(); ctx.moveTo(a[0], a[1]); ctx.lineTo(b[0], b[1]); ctx.stroke();
+      ctx.setLineDash([]);
+    };
+    const boxOf = (lo3, hi3, color, width, dash) => {
+      const c = (i) => [i & 1 ? hi3[0] : lo3[0], i & 2 ? hi3[1] : lo3[1], i & 4 ? hi3[2] : lo3[2]];
+      for (const [i, j] of [[0, 1], [2, 3], [4, 5], [6, 7], [0, 2], [1, 3], [4, 6], [5, 7], [0, 4], [1, 5], [2, 6], [3, 7]]) line(c(i), c(j), color, width, dash);
+    };
+    const lo3 = mid.map((m, k) => m - half[k]), hi3 = mid.map((m, k) => m + half[k]);
+    boxOf(lo3, hi3, "#34343a", 1);
+
+    // the candidates: a glow each, as bright and as large as its vote
+    const s = 1 / Math.max(hi - lo, 1e-20);
+    const r0 = (scale * Math.min(...ax.map((a, k) => (a.length > 1 ? cellOf(a) : 2 * half[k]))) / unit) * 0.62;
+    // (painted from the back forward, each over what lies behind it, so that a broad basin does
+    // not burn out and a sharp one still shows)
+    const shots = [];
+    const i = [0, 0, 0];
+    for (i[2] = 0; i[2] < n[2]; i[2]++) for (i[1] = 0; i[1] < n[1]; i[1]++) for (i[0] = 0; i[0] < n[0]; i[0]++) {
+      const t = (shownAt(l, i) - lo) * s;
+      const p = to([ax[0][i[0]], ax[1][i[1]], ax[2][i[2]]]);
+      shots.push([p[0], p[1], t, i[0], i[1], i[2], p[2], p[3]]);
+    }
+    for (const sh of shots.slice().sort((u, v) => u[6] - v[6])) {
+      const t = sh[2];
+      if (!(t > 0.015)) continue;
+      const c = viridis(t);
+      const r = Math.max(1.2, r0 * sh[7] * (0.5 + 0.6 * t));
+      const g = ctx.createRadialGradient(sh[0], sh[1], 0, sh[0], sh[1], r);
+      const a = 0.05 + 0.75 * t ** 1.5;
+      g.addColorStop(0, `rgba(${c[0] | 0},${c[1] | 0},${c[2] | 0},${a})`);
+      g.addColorStop(0.55, `rgba(${c[0] | 0},${c[1] | 0},${c[2] | 0},${0.45 * a})`);
+      g.addColorStop(1, `rgba(${c[0] | 0},${c[1] | 0},${c[2] | 0},0)`);
+      ctx.fillStyle = g;
+      ctx.beginPath(); ctx.arc(sh[0], sh[1], r, 0, 2 * Math.PI); ctx.fill();
+    }
+    view.shots = shots;
+
+    // each fit pattern's own best candidate
+    if ($("votes-pats").checked) {
+      const count = new Map();
+      for (const c of l.patBest) count.set(c, (count.get(c) || 0) + 1);
+      ctx.strokeStyle = "rgba(255,255,255,.75)"; ctx.lineWidth = 1;
+      for (const [c, m] of count) {
+        const k = split(l, c);
+        const p = to(k.map((q, a) => ax[a][q]));
+        ctx.beginPath(); ctx.arc(p[0], p[1], 1.5 + 5 * Math.sqrt(m / l.patBest.length), 0, 2 * Math.PI); ctx.stroke();
       }
     }
+    // where the next grid looked, and the way the search went: every grid's winner in turn
+    if (next) {
+      const na = axesOf(next);
+      boxOf(na.map((a) => a[0] - cellOf(a) / 2), na.map((a) => a[a.length - 1] + cellOf(a) / 2), "rgba(255,255,255,.6)", 1, [4, 3]);
+    }
+    const way = [view.start, ...view.levels.map((g) => split(g, g.winner).map((q, a) => axesOf(g)[a][q]))].filter(Boolean);
+    for (let k = 1; k < way.length; k++) line(way[k - 1], way[k], "rgba(255,255,255,.55)", 1.2);
+    // the three cuts through the cross-hair, and the cross-hair
+    const here = view.at.map((q, a) => ax[a][q]);
+    for (let a = 0; a < 3; a++) {
+      const p = here.slice(), q = here.slice();
+      p[a] = lo3[a]; q[a] = hi3[a];
+      line(p, q, "rgba(255,255,255,.4)", 1);
+    }
+    const mark = (pc, color, shape) => {
+      if (!pc) return;
+      const p = to(pc), r = 5;
+      const d = shape === "plus" ? [[-r, 0, r, 0], [0, -r, 0, r]] : [[-r, -r, r, r], [-r, r, r, -r]];
+      for (const [w, col] of [[4, "#0a0a0b"], [1.8, color]]) {
+        ctx.strokeStyle = col; ctx.lineWidth = w;
+        ctx.beginPath();
+        for (const [x0, y0, x1, y1] of d) { ctx.moveTo(p[0] + x0, p[1] + y0); ctx.lineTo(p[0] + x1, p[1] + y1); }
+        ctx.stroke();
+      }
+    };
+    const win = to(split(l, l.winner).map((q, a) => ax[a][q]));
+    ctx.strokeStyle = "#fff"; ctx.lineWidth = 1.6;
+    ctx.strokeRect(win[0] - 5.5, win[1] - 5.5, 11, 11);
+    mark(view.start, "#9d9da4", "x");
+    mark(view.file, "#6a9ec8", "x");
+    mark(geometry().pc, "#e8c77e", "plus");
+    // the axes, named at the ends that face the eye
+    ctx.font = "10.5px ui-monospace, Consolas, monospace";
+    ctx.textAlign = "center"; ctx.textBaseline = "middle";
+    for (let a = 0; a < 3; a++) {
+      // along the edge of the box that lies furthest out on the screen, and outside it
+      const [b, c] = [0, 1, 2].filter((k) => k !== a);
+      let best = null;
+      for (const sb of [0, 1]) for (const sc of [0, 1]) {
+        const m = mid.slice();
+        m[b] = sb ? hi3[b] : lo3[b];
+        m[c] = sc ? hi3[c] : lo3[c];
+        const p = to(m);
+        const far = Math.hypot(p[0] - W / 2, p[1] - H / 2);
+        if (!best || far > best.far) best = { far, p };
+      }
+      const dx = best.p[0] - W / 2, dy = best.p[1] - H / 2, d = Math.max(Math.hypot(dx, dy), 1);
+      ctx.fillStyle = "#9d9da4";
+      ctx.fillText(`${NAMES[a]} ${ax[a][0].toFixed(3)} … ${ax[a][n[a] - 1].toFixed(3)}`, Math.max(52, Math.min(W - 52, best.p[0] + (dx / d) * 16)), Math.max(8, Math.min(H - 8, best.p[1] + (dy / d) * 12)));
+    }
+    $("votes-3d-cap").textContent = `the whole grid: ${n[0]} × ${n[1]} × ${n[2]} candidates  ·  drag to turn, click a candidate, double-click to turn back`;
   }
 
   function draw() {
@@ -283,7 +370,7 @@ export function createVotes({ geometry, setPc }) {
     $("votes-grid").dataset.mode = view.mode;
     $("votes-follow").disabled = view.following;
     if (view.mode === "planes") drawPlanes(l, next, lo, hi); else drawEvery(l, next, lo, hi);
-    drawProfiles(l, lo, hi);
+    drawSpace(l, next, lo, hi);
 
     const here = view.at.map((i, k) => ax[k][i]);
     const agree = l.patBest.filter((c) => c === l.winner).length;
@@ -350,15 +437,43 @@ export function createVotes({ geometry, setPc }) {
     $("votes-all-slide").addEventListener("input", (e) => move({ [along()[2]]: +e.target.value }));
     keys(canvas.parentElement, () => along()[0], () => along()[1], () => along()[2]);
   }
-  // a click on a profile moves the cross-hair along that profile's axis
-  $("votes-profiles").addEventListener("click", (e) => {
-    if (!view.levels || !view.profiles) return;
-    const r = $("votes-profiles").getBoundingClientRect();
-    const { W, rowH, padL, padR } = view.profiles;
-    const k = clamp(Math.floor((e.clientY - r.top) / rowH), 0, 2);
-    const n = sizes(view.levels[view.level]);
-    move({ [k]: Math.floor(((e.clientX - r.left - padL) / (W - padL - padR)) * n[k]) });
-  });
+  // the volume: a drag turns it, a click takes the candidate under the pointer (the brightest
+  // of those near it), a double-click turns it back
+  {
+    const canvas = $("votes-3d");
+    let drag = null;
+    canvas.addEventListener("mousedown", (e) => {
+      if (e.button !== 0) return;
+      e.preventDefault();
+      drag = { x: e.clientX, y: e.clientY, yaw: view.yaw, pitch: view.pitch, moved: false };
+      const move = (ev) => {
+        const dx = ev.clientX - drag.x, dy = ev.clientY - drag.y;
+        if (Math.abs(dx) + Math.abs(dy) > 3) drag.moved = true;
+        view.yaw = drag.yaw + dx * 0.01;
+        view.pitch = clamp(drag.pitch + dy * 0.01, -1.5, 1.5);
+        if (drag.moved) draw();
+      };
+      const up = (ev) => {
+        window.removeEventListener("mousemove", move);
+        window.removeEventListener("mouseup", up);
+        if (!drag.moved && view.shots) {
+          const r = canvas.getBoundingClientRect();
+          const x = ev.clientX - r.left, y = ev.clientY - r.top;
+          let best = null, least = 14;
+          for (const sh of view.shots) {
+            const dist = Math.hypot(sh[0] - x, sh[1] - y) - 8 * Math.max(sh[2], 0);
+            if (dist < least) { least = dist; best = sh; }
+          }
+          if (best) move3(best);
+        }
+        drag = null;
+      };
+      window.addEventListener("mousemove", move);
+      window.addEventListener("mouseup", up);
+    });
+    const move3 = (sh) => move({ 0: sh[3], 1: sh[4], 2: sh[5] });
+    canvas.addEventListener("dblclick", () => { view.yaw = TURN.yaw; view.pitch = TURN.pitch; draw(); });
+  }
   $("votes-levels").addEventListener("click", (e) => { const b = e.target.closest("button"); if (b) select(+b.dataset.level); });
   $("votes-mode").addEventListener("click", (e) => { const b = e.target.closest("button"); if (b) { view.mode = b.dataset.mode; draw(); } });
   $("votes-pats").addEventListener("change", draw);
