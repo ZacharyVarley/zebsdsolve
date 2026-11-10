@@ -366,7 +366,8 @@ pub const Spherical = struct {
         g.ensure(&self.spec, n_items * ph.specBytes(t));
         const so = self.soParams(ph, n_items);
         const k = self.lineParams(t.n, n_items * t.L * ph.nc);
-        g.dispatch(self.fftPipe("so3", "spectrum"), k.f[0], k.f[1], 1, &.{ g.uniform(0, std.mem.asBytes(&k.u)), t.tw.at(2), g.uniform(3, std.mem.asBytes(&so)), w.at(4), t.dq.at(5), alm.at(6), self.spec.at(7) });
+        const u = g.uniformPair(0, std.mem.asBytes(&k.u), 3, std.mem.asBytes(&so));
+        g.dispatch(self.fftPipe("so3", "spectrum"), k.f[0], k.f[1], 1, &.{ u[0], t.tw.at(2), u[1], w.at(4), t.dq.at(5), alm.at(6), self.spec.at(7) });
         self.fftLines(self.spec, ph.nc, n_items * so.nb * t.L, ph.nc);
     }
 
@@ -393,7 +394,8 @@ pub const Spherical = struct {
         var rd = rden;
         rd.slot = 8;
         const k = self.aParams(ph, n_items);
-        g.dispatch(self.fftPipe("so3", "a_peak"), k.f[0], k.f[1], 1, &.{ g.uniform(0, std.mem.asBytes(&k.u)), t.tw.at(2), g.uniform(3, std.mem.asBytes(&so)), self.spec.at(7), rd, self.cand_v.at(9), self.cand_i.at(10) });
+        const u = g.uniformPair(0, std.mem.asBytes(&k.u), 3, std.mem.asBytes(&so));
+        g.dispatch(self.fftPipe("so3", "a_peak"), k.f[0], k.f[1], 1, &.{ u[0], t.tw.at(2), u[1], self.spec.at(7), rd, self.cand_v.at(9), self.cand_i.at(10) });
         var f = Gpu.flat(n_items);
         so.grid_x = f[0];
         g.dispatch(self.pipe("so3", "peak_reduce"), f[0], f[1], 1, &.{ g.uniform(3, std.mem.asBytes(&so)), self.cand_v.at(9), self.cand_i.at(10), self.best.at(11) });
@@ -410,7 +412,8 @@ pub const Spherical = struct {
         self.spectrum(ph, w, self.w_alm, n_items);
         const so = self.soParams(ph, n_items);
         const k = self.aParams(ph, n_items);
-        g.dispatch(self.fftPipe("so3", "a_volume"), k.f[0], k.f[1], 1, &.{ g.uniform(0, std.mem.asBytes(&k.u)), t.tw.at(2), g.uniform(3, std.mem.asBytes(&so)), self.spec.at(7), out.at(12) });
+        const u = g.uniformPair(0, std.mem.asBytes(&k.u), 3, std.mem.asBytes(&so));
+        g.dispatch(self.fftPipe("so3", "a_volume"), k.f[0], k.f[1], 1, &.{ u[0], t.tw.at(2), u[1], self.spec.at(7), out.at(12) });
     }
 
     /// Record: the reciprocal denominator volumes of the normalized correlation for each window

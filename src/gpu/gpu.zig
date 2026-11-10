@@ -254,6 +254,13 @@ pub const Gpu = struct {
         return .{ .slot = slot, .buf = self.ubuf, .offset = off, .size = need };
     }
 
+    /// Allocate both uniforms without submitting between their bindings.
+    pub fn uniformPair(self: *Gpu, slot0: u32, bytes0: []const u8, slot1: u32, bytes1: []const u8) [2]Bind {
+        const next = std.mem.alignForward(usize, self.uoff + std.mem.alignForward(usize, bytes0.len, 16), self.ualign);
+        if (next + std.mem.alignForward(usize, bytes1.len, 16) > self.ustage.len) self.submit();
+        return .{ self.uniform(slot0, bytes0), self.uniform(slot1, bytes1) };
+    }
+
     /// Read-only data for one dispatch (e.g. a pose matrix), bound at `slot` from the storage
     /// arena: each call gets its own slot, so no buffer is needed per dispatch.
     pub fn stage(self: *Gpu, slot: u32, bytes: []const u8) Bind {
