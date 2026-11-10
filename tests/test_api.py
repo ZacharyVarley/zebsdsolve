@@ -864,6 +864,16 @@ def main():
     dis = np.degrees(s.disorientation(r["quaternions"].reshape(-1, 4), q_ref))
     check("the nickel scan indexes with a simulated master", np.median(dis) < 0.6 and (dis < 3).mean() > 0.97,
           f"median {np.median(dis):.3f}° from kikuchipy's, within 3°: {100 * (dis < 3).mean():.1f} %, mean NCC {r['ncc'].mean():.3f}, accepted {100 * (r['sweep'] >= 0).mean():.1f} %")
+    # its exports name the crystal's cell (Å, degrees), not placeholders
+    with tempfile.TemporaryDirectory() as d:
+        s.export(os.path.join(d, "x.ang"))
+        s.export(os.path.join(d, "x.ctf"))
+        ang = open(os.path.join(d, "x.ang"), encoding="latin-1").read()
+        ctf = open(os.path.join(d, "x.ctf"), encoding="latin-1").read()
+    ang_cell = next((l for l in ang.splitlines() if l.startswith("# LatticeConstants")), "")
+    ctf_cell = next((l for l in ctf.splitlines() if l.startswith("3.475")), "")
+    check("a simulated phase exports with its lattice parameters", "3.47514587" in ang_cell and " 90.00000000" in ang_cell and "90.00000000;90.00000000;90.00000000" in ctf_cell,
+          f"ANG: {ang_cell.split(None, 2)[-1].strip()}; CTF: {ctf_cell.split(chr(9))[0]} {ctf_cell.split(chr(9))[1] if chr(9) in ctf_cell else ''}")
     s.close()
 
     # ── the plain functions ──

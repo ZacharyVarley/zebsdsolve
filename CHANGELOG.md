@@ -44,6 +44,16 @@ notes.
   with the run and its result at the top.
 - What the file reader found and the simulator's summaries go to the log.
 
+### Fixed
+
+- Spherical indexing could give a pattern a wrong orientation and a low NCC depending on the GPU
+  work before it: a dispatch's two uniform blocks could be split by the arena filling up, the
+  first then overwritten before it ran (#2, by [Tijmenvermeij](https://github.com/Tijmenvermeij)). The master view's dispatch is
+  guarded the same way.
+- ANG and CTF exports write each phase's lattice parameters, read from ebsdsim and EMsoft masters
+  and taken from the crystal for simulated ones, in place of `1 1 1 90 90 90`; a phase whose
+  master carries none is refused (#1, by [Tijmenvermeij](https://github.com/Tijmenvermeij)).
+
 ## 0.1.0 — 2026-10-08
 
 First release: indexing EBSD scans by dictionary matching against master patterns on the GPU

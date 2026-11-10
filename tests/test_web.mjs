@@ -217,8 +217,10 @@ try {
     const cmpSel = document.getElementById("pat-cmp");
     cmpSel.value = "split";
     cmpSel.dispatchEvent(new Event("change"));
-    await new Promise((r) => setTimeout(r, 300));
+    // (the bar shows once the pattern's simulation is drawn: on a slow GPU, well after the change)
     const wipe = document.getElementById("pat-wipe"), cmp = document.getElementById("pat-cmp-well");
+    for (let t = 0; t < 100 && wipe.hidden; t++) await new Promise((r) => setTimeout(r, 100));
+    await new Promise((r) => setTimeout(r, 100));
     const wipe0 = wipe.getBoundingClientRect().left, cb = cmp.getBoundingClientRect();
     cmp.dispatchEvent(new MouseEvent("mousedown", { button: 0, clientX: cb.left + cb.width * 0.3, clientY: cb.top + cb.height / 2, bubbles: true }));
     window.dispatchEvent(new MouseEvent("mouseup", {}));
