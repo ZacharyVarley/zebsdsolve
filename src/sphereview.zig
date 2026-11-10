@@ -92,6 +92,7 @@ pub fn render(e: *Engine, source: i32, stored: bool, bin: i32, site: i32, projec
     };
     const p: MsP = .{ .side = c.side, .grid_x = width, .radius = height, .n_ops = @intFromEnum(projection), .k = .{ zoom, c.lo, 1.0 / @max(c.hi - c.lo, 1e-20), 0 } };
     const pipe = g.pipeline("mastersph/sphere_view", shaders.mastersph, "sphere_view") catch gpu_mod.NO_PIPE;
+    g.reserve(@sizeOf(MsP), @sizeOf(@TypeOf(rows)));
     g.dispatch(pipe, (width + 15) / 16, (height + 15) / 16, 1, &.{ g.uniform(0, std.mem.asBytes(&p)), c.sheets.at(1), g.stage(3, std.mem.sliceAsBytes(&rows)), c.pix.at(5) });
     g.read(c.pix, 0, std.mem.sliceAsBytes(out));
     try g.wait();

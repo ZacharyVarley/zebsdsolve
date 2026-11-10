@@ -261,6 +261,15 @@ pub const Gpu = struct {
         return .{ self.uniform(slot0, bytes0), self.uniform(slot1, bytes1) };
     }
 
+    /// Room for one uniform of `uniform_bytes` and one staged block of `stage_bytes`, submitting
+    /// now if either arena lacks it: a dispatch that takes one of each then cannot have the
+    /// second's flush reset the arena under the first (as `uniformPair` for two uniforms).
+    pub fn reserve(self: *Gpu, uniform_bytes: usize, stage_bytes: usize) void {
+        const u_need = std.mem.alignForward(usize, uniform_bytes, 16);
+        const s_need = std.mem.alignForward(usize, @max(stage_bytes, 16), 16);
+        if (self.uoff + u_need > self.ustage.len or self.soff + s_need > self.sstage.len) self.submit();
+    }
+
     /// Read-only data for one dispatch (e.g. a pose matrix), bound at `slot` from the storage
     /// arena: each call gets its own slot, so no buffer is needed per dispatch.
     pub fn stage(self: *Gpu, slot: u32, bytes: []const u8) Bind {
