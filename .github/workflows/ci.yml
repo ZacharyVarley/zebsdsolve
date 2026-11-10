@@ -95,7 +95,7 @@ jobs:
   # 10× against a private repo's allowance, so this job only runs for code changes (paths-ignore).
   gpu-macos:
     needs: build
-    runs-on: macos-14
+    runs-on: macos-15
     timeout-minutes: 25
     env:
       PYTHONUNBUFFERED: "1"

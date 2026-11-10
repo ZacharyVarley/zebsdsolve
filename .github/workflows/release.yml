@@ -87,7 +87,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest, macos-14]
+        os: [ubuntu-latest, windows-latest, macos-15]
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
     env:
@@ -124,37 +124,37 @@ jobs:
         run: cp tests/test_app.py "$RUNNER_TEMP/" && cd "$RUNNER_TEMP" && "$PY" test_app.py
 
       - name: Every shader builds on this GPU
-        if: matrix.os == 'macos-14'
+        if: matrix.os == 'macos-15'
         shell: bash
         run: |
           "$PY" tests/check_shaders.py
 
       - name: Python API on the GPU
-        if: matrix.os == 'macos-14'
+        if: matrix.os == 'macos-15'
         shell: bash
         run: cp tests/test_api.py "$RUNNER_TEMP/" && cd "$RUNNER_TEMP" && ZEBSDSOLVE_TESTDATA="$GITHUB_WORKSPACE/testdata" "$PY" test_api.py
 
       - name: Web app in headless Chrome (WebGPU), recording the pipelines it compiles
-        if: matrix.os == 'macos-14'
+        if: matrix.os == 'macos-15'
         run: |
           mkdir -p "$RUNNER_TEMP/pipelines"
           node tests/test_web.mjs --dir out/web --save-pipelines "$RUNNER_TEMP/pipelines/pipelines.json"
 
       - name: Tutorials (examples/ run as notebooks on the installed wheel)
-        if: matrix.os == 'macos-14'
+        if: matrix.os == 'macos-15'
         shell: bash
         run: |
           "$PY" -m pip install --quiet jupytext nbconvert ipykernel matplotlib scipy
           "$PY" scripts/run_tutorials.py "$RUNNER_TEMP/tutorials"
 
       - uses: actions/upload-artifact@v7
-        if: matrix.os == 'macos-14'
+        if: matrix.os == 'macos-15'
         with:
           name: tutorials
           path: ${{ runner.temp }}/tutorials
 
       - uses: actions/upload-artifact@v7
-        if: matrix.os == 'macos-14'
+        if: matrix.os == 'macos-15'
         with:
           name: pipelines
           path: ${{ runner.temp }}/pipelines
