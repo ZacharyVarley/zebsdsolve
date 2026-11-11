@@ -644,7 +644,7 @@ export fn ze_index_cells_by(e: *Engine, cells: [*]const u64, n: usize, method: u
 
 /// Results per map cell (row-major), by kind: 0 orientations (4 f32 per cell: w, x, y, z),
 /// 1 NCC, 2 NMI (f32), 3 phase (i32, −1: not indexed), 4 Bunge angles (3 f32, radians: those of
-/// the stored quaternions, each in its phase's fundamental zone),
+/// the stored fitted quaternions, without crystal symmetry reduction),
 /// 5 the NMI's distance above chance (f32, standard deviations), 6 the sweep that found an
 /// accepted match (i32, −1: none). Returns the number of values written.
 export fn ze_results(e: *Engine, kind: u32, out: [*]u8, len: usize) i64 {
@@ -709,7 +709,12 @@ export fn ze_export(e: *Engine, kind: u32, buf: ?[*]u8, cap: usize) i64 {
     return @intCast(text.len);
 }
 
-/// An orientation as the results store one: `q` is replaced by its representative in the
+/// Bunge angles of a quaternion, radians, without crystal symmetry reduction.
+export fn ze_bunge(q: *const [4]f32, euler: *[3]f64) void {
+    euler.* = rot.toBunge(.{ q[0], q[1], q[2], q[3] });
+}
+
+/// Explicit symmetry reduction: `q` is replaced by its representative in the
 /// phase's fundamental zone (the equivalent of the smallest rotation, among those the proper
 /// rotations of the phase's point group give), and `euler` receives that quaternion's Bunge
 /// angles, radians.

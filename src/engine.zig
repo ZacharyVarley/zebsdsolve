@@ -2161,7 +2161,8 @@ pub const Engine = struct {
             // an acceptable match replaces whatever was kept; otherwise the better one stays
             const good = if (s.accept_nmi > 0) r.nmi >= s.accept_nmi else r.z >= s.accept_z;
             if (self.res.phase[at] < 0 or (good and r.step <= settle) or r.z > self.res.z[at]) {
-                const q = sym.toFz(.{ r.q[0], r.q[1], r.q[2], r.q[3] }, self.phases.items[p].master.rotation);
+                // Preserve the winning detector pose; crystal symmetry reduction is explicit.
+                const q = rot.qstd(.{ r.q[0], r.q[1], r.q[2], r.q[3] });
                 for (0..4) |k| self.res.quat[4 * at + k] = @floatCast(q[k]);
                 self.res.ncc[at] = r.ncc;
                 self.res.nmi[at] = r.nmi;

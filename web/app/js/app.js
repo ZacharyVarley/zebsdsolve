@@ -1224,10 +1224,9 @@ async function showCell() {
         facts.push(["NMI", `${o.nmi.toFixed(4)},  z ${o.z.toFixed(1)} above chance`]);
         if (o.sweep !== null) facts.push(["accepted", o.sweep >= 0 ? (s.sweeps > 1 ? `in sweep ${o.sweep + 1}` : "yes") : ((s.accept_nmi > 0 ? o.nmi < s.accept_nmi : o.z < s.accept_z) ? `no (below ${acceptText()})` : "no (refinement not settled)")]);
       }
-      // (as the results store an orientation: its representative in the fundamental zone)
-      const red = st.ze.reduced(o.phase, o.q);
-      facts.push(["Bunge (°)", red.euler.map((v) => ((v * 180) / Math.PI).toFixed(2)).join("  ")]);
-      facts.push(["quaternion", red.q.map((v) => v.toFixed(4)).join("  ")]);
+      const euler = o.euler || st.ze.bunge(o.q);
+      facts.push(["Bunge (°)", euler.map((v) => ((v * 180) / Math.PI).toFixed(2)).join("  ")]);
+      facts.push(["quaternion", o.q.map((v) => v.toFixed(4)).join("  ")]);
     } else {
       for (const id of ["pat-sim", "pat-diff"]) { const c = $(id); c.width = w; c.height = h; c.getContext("2d").clearRect(0, 0, w, h); }
       st.cmp.exp = null;

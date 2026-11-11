@@ -24,7 +24,7 @@ class Result:
     """Indexing results per map cell, with the geometry they were indexed under."""
 
     quaternions: np.ndarray
-    """(rows, cols, 4): w, x, y, z; sample → crystal, in the phase's fundamental zone"""
+    """(rows, cols, 4): w, x, y, z; sample → crystal, fitted pose without symmetry reduction"""
     euler: np.ndarray
     """(rows, cols, 3): the quaternions' Bunge angles, radians"""
     ncc: np.ndarray

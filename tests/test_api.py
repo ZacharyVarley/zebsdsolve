@@ -211,7 +211,8 @@ def main():
     dis = np.degrees(s.disorientation(r["quaternions"].reshape(-1, 4), q_true))
     check("spherical indexing recovers the orientations", np.median(dis) < 0.15 and dis.max() < 1.0,
           f"median {np.median(dis):.3f}°, max {dis.max():.3f}°, mean NCC {r['ncc'].mean():.3f}, {time.perf_counter() - t0:.2f} s")
-    check("every cell is indexed, in the fundamental zone", (r["phase"] == 0).all() and (r["quaternions"][..., 0] >= np.cos(np.radians(62.81) / 2) - 1e-4).all())
+    check("every cell retains a normalized fitted pose", (r["phase"] == 0).all() and (r["quaternions"][..., 0] >= 0).all()
+          and np.allclose(np.linalg.norm(r["quaternions"], axis=-1), 1, atol=1e-6))
 
     s.configure(refine=False)
     r0 = s.index()
@@ -501,7 +502,7 @@ def main():
             dis[mk] = np.degrees(s.disorientation(r["quaternions"].reshape(-1, 4)[mk], q_true[mk], phase=k))
         check(f"two phases are told apart by {by}", right.mean() > 0.97 and np.median(dis[right]) < 0.3, f"{100 * right.mean():.0f} % right, median {np.median(dis[right]):.3f}°")
     ni, gan = s.phases
-    # an orientation and its stored form are the same orientation: they simulate the same pattern.
+    # Explicit symmetry reduction preserves a pattern when the group's axes match the master.
     # For GaN that takes the rotations of 6mm itself (six about c), not its Laue class's twelve,
     # half of which would turn the polar axis over
     qs = rng.normal(size=(200, 4)).astype(np.float32)
@@ -515,7 +516,7 @@ def main():
     flipped = qs.astype(np.float64) @ np.array([[0, -1, 0, 0], [1, 0, 0, 0], [0, 0, 0, 1], [0, 0, -1, 0]])  # q · (a half turn about the crystal's x) … as (w, x, y, z) rows
     d_flip = np.degrees(s.disorientation(flipped, qs, phase=1))
     check("a polar crystal's orientations are reduced by its own rotations", same(0) > 0.995 and same(1) > 0.995 and d_flip.min() > 1,
-          f"patterns of an orientation and of its stored form correlate at least {same(0):.4f} (nickel), {same(1):.4f} (GaN); GaN turned over about x is {d_flip.min():.0f}° to {d_flip.max():.0f}° away, not 0")
+          f"patterns of an orientation and its explicitly reduced form correlate at least {same(0):.4f} (nickel), {same(1):.4f} (GaN); GaN turned over about x is {d_flip.min():.0f}° to {d_flip.max():.0f}° away, not 0")
     # a toy scan from the two masters: a seed is a scan, and its answer comes with it
     s.set_geometry(pc=(0.45, 0.25, 0.52), rot=(0, 0, 0), px_um=0)
     toy = s.synthesize(toy_seed=7, toy_rows=20, toy_cols=28, toy_height=60, toy_width=60, toy_grains=12, toy_counts=20)
@@ -700,13 +701,13 @@ def main():
           and lbox == (0, 0, 0, 0) and lk[..., 3].max() == 0 and (dark_map[..., :3].max(-1) < 140).mean() > 0.05 and not np.array_equal(dark_map, rgba),
           f"centres {tuple(int(v) for v in light)} and {tuple(int(v) for v in dark)}; {100 * (dark_map[..., :3].max(-1) < 140).mean():.0f} % of the map's cells on the dark side")
 
-    # an orientation as the results store one: in the fundamental zone, with its Bunge angles
+    # Symmetry reduction is explicit; result angles describe the retained fitted poses.
     qz, eu = s.reduce(q_ref[:50])
     again, _ = s.reduce(qz)
     stored = r["quaternions"].reshape(-1, 4)[:50]
     check("orientations reduce to the fundamental zone", np.degrees(s.disorientation(qz, q_ref[:50])).max() < 1e-3 and np.abs(again - qz).max() < 1e-6 and np.isfinite(eu).all()
-          and np.abs(s.reduce(stored)[0] - stored).max() < 1e-6 and np.abs(r["euler"].reshape(-1, 3)[:50] - s.reduce(stored)[1]).max() < 1e-5,
-          "as the results are stored, and their Bunge angles the results' own")
+          and np.abs(r["euler"].reshape(-1, 3)[:50] - s.bunge(stored)).max() < 1e-5,
+          "explicit reduction is idempotent, and result angles describe the stored poses")
 
     # any cells can be indexed without storing, with the settings' search or one given
     some = np.arange(0, 4125, 207)

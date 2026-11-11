@@ -774,8 +774,19 @@ class Solver:
         with open(path, "wb") as f:
             f.write(buf.raw[:n])
 
+    def bunge(self, quaternions):
+        """Bunge angles (radians) of the given poses, without crystal symmetry reduction."""
+        q = _f32(quaternions)
+        if q.ndim < 1 or q.shape[-1] != 4:
+            raise ValueError("quaternions must have shape (..., 4)")
+        euler = np.empty(q.shape[:-1] + (3,), np.float64)
+        flat_q, flat_euler = q.reshape(-1, 4), euler.reshape(-1, 3)
+        for i in range(len(flat_q)):
+            self._lib.ze_bunge(_ptr(flat_q[i:i + 1], _n.f32p), _ptr(flat_euler[i:i + 1], _n.f64p))
+        return euler
+
     def reduce(self, quaternions, phase=0):
-        """Orientations as the results store them: (quaternions, euler), each quaternion's
+        """Explicit symmetry reduction: (quaternions, euler), each quaternion's
         representative in the phase's fundamental zone and its Bunge angles (radians). The zone
         is that of the proper rotations of the phase's point group (for GaN, 6mm, the six about
         c: not its Laue class's twelve, half of which turn the polar axis over)."""

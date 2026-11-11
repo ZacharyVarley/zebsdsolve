@@ -21,7 +21,6 @@
 const std = @import("std");
 const engine = @import("engine.zig");
 const rot = @import("rot.zig");
-const sym = @import("sym.zig");
 const detector = @import("detector.zig");
 const pcfit = @import("pcfit.zig");
 const Geometry = @import("geometry.zig").Geometry;
@@ -727,8 +726,7 @@ pub fn plane(e: *Engine) !PlaneResult {
     const R0 = before.nominal();
     const turn = rot.qmul(rot.so3Exp(rot.matVec(R0, before.rot)), rot.qconj(rot.so3Exp(rot.matVec(R0, e.geo.rot))));
     for (0..n) |k| {
-        const p: usize = @intCast(fit.phase[k]);
-        const q = sym.toFz(rot.qmul(fit.q[k], turn), e.phases.items[p].master.rotation);
+        const q = rot.qstd(rot.qmul(fit.q[k], turn));
         for (0..4) |c| quats[4 * k + c] = @floatCast(q[c]);
         nccs[k] = if (fit.use[k]) @floatCast(fit.keep[k].ncc) else fit.seed_ncc[k];
     }
