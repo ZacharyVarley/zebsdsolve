@@ -6,6 +6,8 @@ notes.
 
 ## Unreleased
 
+## 0.2.1 — 2026-11-11
+
 ### Fixed
 
 - Orientations were reduced to the fundamental zone by the point group's rotations as tables

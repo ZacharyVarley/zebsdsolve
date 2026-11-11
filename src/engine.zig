@@ -43,7 +43,7 @@ const Allocator = std.mem.Allocator;
 pub const Settings = settings_mod.Settings;
 pub const Geometry = geometry_mod.Geometry;
 
-pub const version = "0.2.0";
+pub const version = "0.2.1";
 
 /// A pattern resolution: reduced by settings.binning, or as stored.
 pub const Level = enum(u1) { reduced = 0, full = 1 };
