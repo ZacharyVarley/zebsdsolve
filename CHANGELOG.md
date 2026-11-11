@@ -23,6 +23,11 @@ notes.
   setting (the bundled nickel and GaN); results indexed with others before should be indexed
   again. Found by [Tijmenvermeij](https://github.com/Tijmenvermeij) (#3).
 - `zig build test` now runs the symmetry module's own tests, which it had left out.
+- In the app, switching a master pattern off or on, or adding one, left patterns indexed on the
+  spot naming phases by their old places in the list, and a pattern being drawn while the list
+  was rebuilt could look up a phase no longer there. The pattern view could then draw the wrong
+  phase's simulation, or fail with "Cannot read properties of undefined". Both are dropped now
+  whenever the list changes.
 
 ## 0.2.0 — 2026-11-10
 

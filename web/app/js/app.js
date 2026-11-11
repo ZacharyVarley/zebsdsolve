@@ -464,9 +464,19 @@ async function runOverview() {
 // ── phases ──
 
 /** What a change of the candidate phases leaves standing: nothing found with the old ones. */
-function phasesChanged() {
+/** Everything that names a phase by its place in the list, dropped when the list changes (and
+ *  before the engine's is emptied and filled again, which takes a while on a slow GPU): a
+ *  pattern on its way to the pattern view, which would find another phase there or none, the
+ *  patterns indexed on the spot, the fits' and the indexing's results. */
+function forgetPhases() {
+  st.showRun++;
+  st.live.clear();
   st.results = null;
   st.fit = null;
+}
+
+function phasesChanged() {
+  forgetPhases();
   st.keys.clear();
   done("index", false);
   showPhases();
@@ -497,6 +507,7 @@ async function removePhase(i) {
 
 /** The engine's phases are the master patterns that are on, in order: give it them again. */
 async function rebuildPhases() {
+  forgetPhases();
   st.ze.clearPhases();
   for (const p of st.phaseFiles) if (p.on) await st.ze.addPhase(p.file);
 }
@@ -1204,7 +1215,8 @@ async function showCell() {
       o = await indexNow(cell);
       if (run !== st.showRun) return;
     }
-    if (o && nPh) {
+    // (an orientation always names a phase of the list as it is: forgetPhases drops the others)
+    if (o && o.phase < nPh) {
       const sim = await st.ze.simulate(o.phase, [cell], o.q, full);
       if (run !== st.showRun) return;
       drawGray($("pat-sim"), sim, w, h, { mask });
@@ -1677,6 +1689,7 @@ async function loadExample() {
     const [scan, master] = await Promise.all([get("patterns_v2.h5"), get("Ni_master_20kV.npz")]);
     await st.ze.openScan([scan]);
     st.scanName = scan.name;
+    forgetPhases();
     st.ze.clearPhases();
     await st.ze.addPhase(master);
     st.phaseFiles = [{ file: master, on: true, info: null }];
