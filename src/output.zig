@@ -54,7 +54,10 @@ pub fn map(e: *Engine, kind: u32, out: []u8) !void {
                 v[kind] = 1;
                 const key = &keys[@intCast(ph)];
                 if (key.* == null) key.* = e.ipfKeyOf(@intCast(ph));
-                const c = key.*.?.color(rot.normalize(rot.qapply(.{ q[0], q[1], q[2], q[3] }, v)));
+                // the sample direction in the crystal, then in the standard setting the keys are
+                // drawn in (the master's own axes may be along others: a unique axis b)
+                const d = rot.normalize(rot.qapply(.{ q[0], q[1], q[2], q[3] }, v));
+                const c = key.*.?.color(e.phases.items[@intCast(ph)].master.setting.toStandard(d));
                 for (0..3) |k| px[k] = @intFromFloat(@round(255 * std.math.clamp(c[k], 0, 1)));
             },
             3, 4, 6 => {

@@ -371,6 +371,28 @@ fn inverse(m: [9]f64) ?[9]f64 {
     };
 }
 
+/// The point group of space group `space_group` (its standard setting, as the CIF reader takes
+/// it) in the Cartesian frame of a cell `cell` (a, b, c in Å, α, β, γ in degrees): a along x,
+/// c* along z, as EMsoft's and ebsdsim's master patterns are written. For a master whose file
+/// gives its space group and cell but not its operators.
+pub fn pointGroupOps(gpa: std.mem.Allocator, space_group: u32, cell: [6]f64) ![]rot.Mat3 {
+    if (space_group < 1 or space_group > 230) return error.BadSpaceGroup;
+    const ops_list = try group.hallOps(tables.std_hall[space_group - 1]);
+    const deg = std.math.pi / 180.0;
+    const ca = @cos(cell[3] * deg);
+    const cb = @cos(cell[4] * deg);
+    const cg = @cos(cell[5] * deg);
+    const sg_ = @sin(cell[5] * deg);
+    const a = cell[0];
+    const b = cell[1];
+    const c = cell[2];
+    const volume = a * b * c * @sqrt(@max(1 + 2 * ca * cb * cg - ca * ca - cb * cb - cg * cg, 0));
+    if (!(volume > 0) or !(sg_ > 0)) return error.BadCell;
+    // (Cell.init's direct structure matrix; the lengths' unit cancels in M W M⁻¹)
+    const dsm: [9]f64 = .{ a, b * cg, c * cb, 0, b * sg_, -c * (cb * cg - ca) / sg_, 0, 0, volume / (a * b * sg_) };
+    return cartesianPointGroup(gpa, ops_list.slice(), dsm);
+}
+
 /// The crystal's point group in Cartesian: the space group's rotation parts conjugated by the
 /// direct structure matrix (M W M⁻¹), each once.
 fn cartesianPointGroup(gpa: std.mem.Allocator, ops: []const Op, dsm: [9]f64) ![]rot.Mat3 {

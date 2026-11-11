@@ -711,20 +711,20 @@ export fn ze_export(e: *Engine, kind: u32, buf: ?[*]u8, cap: usize) i64 {
 
 /// An orientation as the results store one: `q` is replaced by its representative in the
 /// phase's fundamental zone (the equivalent of the smallest rotation, among those the proper
-/// rotations of the phase's point group give), and `euler` receives that quaternion's Bunge
-/// angles, radians.
+/// rotations its master obeys give, about the master's own axes), and `euler` receives that
+/// quaternion's Bunge angles, radians.
 export fn ze_reduce(e: *Engine, phase: u32, q: *[4]f32, euler: *[3]f64) void {
-    const laue = if (phase < e.phases.items.len) e.phases.items[phase].master.rotation else sym.Laue.c1;
-    const r = sym.toFz(.{ q[0], q[1], q[2], q[3] }, laue);
+    const ops: []const rot.Quat = if (phase < e.phases.items.len) e.phases.items[phase].master.rotations() else sym.operators(.c1);
+    const r = sym.toFz(.{ q[0], q[1], q[2], q[3] }, ops);
     for (0..4) |k| q[k] = @floatCast(r[k]);
     euler.* = rot.toBunge(r);
 }
 
 /// Smallest rotation between two orientations under a phase's symmetry (the proper rotations
-/// of its point group), radians.
+/// its master obeys, about its own axes), radians.
 export fn ze_disorientation(e: *Engine, phase: u32, a: *const [4]f32, b: *const [4]f32) f64 {
-    const laue = if (phase < e.phases.items.len) e.phases.items[phase].master.rotation else sym.Laue.c1;
-    return sym.disorientation(.{ a[0], a[1], a[2], a[3] }, .{ b[0], b[1], b[2], b[3] }, laue);
+    const ops: []const rot.Quat = if (phase < e.phases.items.len) e.phases.items[phase].master.rotations() else sym.operators(.c1);
+    return sym.disorientation(.{ a[0], a[1], a[2], a[3] }, .{ b[0], b[1], b[2], b[3] }, ops);
 }
 
 // ── tests and profiling ──

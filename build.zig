@@ -61,7 +61,7 @@ pub fn build(b: *std.Build) void {
     // Host-side unit tests: everything that needs no GPU (run from the repo root: the file
     // readers' tests open testdata/).
     const test_step = b.step("test", "run the host-side unit tests");
-    for ([_][]const u8{ "src/sh.zig", "src/master.zig", "src/scan.zig", "src/geometry.zig", "src/plane.zig", "src/settings.zig", "src/reduce.zig", "src/sim_host.zig" }) |f| {
+    for ([_][]const u8{ "src/sh.zig", "src/sym.zig", "src/master.zig", "src/scan.zig", "src/geometry.zig", "src/plane.zig", "src/settings.zig", "src/reduce.zig", "src/sim_host.zig" }) |f| {
         const t = b.addTest(.{ .root_module = b.createModule(.{ .root_source_file = b.path(f), .target = target, .optimize = optimize, .link_libc = target.result.os.tag != .windows }) });
         test_step.dependOn(&b.addRunArtifact(t).step);
     }

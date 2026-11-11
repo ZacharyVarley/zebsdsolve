@@ -16,6 +16,7 @@ const lambert = @import("lambert.zig");
 const File = @import("io/file.zig").File;
 const Npz = @import("io/npz.zig").Npz;
 const hdf5 = @import("io/hdf5.zig");
+const crystal = @import("sim/crystal.zig");
 
 const Allocator = std.mem.Allocator;
 
@@ -33,14 +34,25 @@ pub const Master = struct {
     space_group: u32 = 0,
     laue: sym.Laue = .o,
     /// the proper rotations of the point group: what makes two orientations the same (the Laue
-    /// class's own only for a crystal with a centre of symmetry)
+    /// class's own only for a crystal with a centre of symmetry). The kinds of group only: the
+    /// axes they are about are the master's own, in `setting`
     rotation: sym.Laue = .o,
     voltage_kv: f64 = 0,
     /// "ebsdsim" or "emsoft"
     source: []const u8 = "",
     /// the point-group operators the master itself obeys (row-major 3 × 3 each), measured
-    /// from the raw sheets by `measureSymmetry`
+    /// from the raw sheets by `measureSymmetry`; before that, the ones its file gives (or that
+    /// its crystal implies), which are what is measured
     ops: []rot.Mat3 = &.{},
+    /// its symmetry as measured, in its own crystal frame: the rotations every orientation is
+    /// reduced by, and the frame they are about (`measureSymmetry`)
+    setting: sym.Setting = .{},
+
+    /// The rotations that leave this master unchanged, in its crystal frame: g · q and q are
+    /// the same orientation (the same pattern) for these g, and only for these.
+    pub fn rotations(self: *const Master) []const rot.Quat {
+        return self.setting.rotations();
+    }
 
     pub fn deinit(self: *Master) void {
         self.gpa.free(self.name);
@@ -54,10 +66,14 @@ pub const Master = struct {
         return lambert.sample(if (v[2] >= 0) self.north(self.raw) else self.south(self.raw), self.side, uv[0], uv[1]);
     }
 
-    /// Find which operators of the Laue class (each rotation, and each rotation with an
-    /// inversion) leave the raw master unchanged, by correlating it with itself over random
-    /// directions. A filter that does not commute with the crystal's symmetry is followed by an
-    /// average over exactly these.
+    /// Find which point-group operators leave the raw master unchanged, by correlating it with
+    /// itself over random directions, and from them its symmetry in its own setting. The
+    /// candidates are the operators its file gives or its crystal implies (`ops` as loaded: in
+    /// the master's own frame, whatever axes its crystal's are along) and the tables' for its
+    /// Laue class in the standard setting, each rotation and each with an inversion; only
+    /// those the intensities obey are kept. A filter that does not commute with the crystal's
+    /// symmetry is followed by an average over exactly these, and orientations are reduced by
+    /// their proper rotations. When they make no crystallographic group, nothing is reduced.
     pub fn measureSymmetry(self: *Master) !void {
         const gpa = self.gpa;
         var found: std.ArrayList(rot.Mat3) = .empty;
@@ -82,26 +98,43 @@ pub const Master = struct {
         mean /= n;
         var var0: f64 = 0;
         for (base) |b| var0 += (b - mean) * (b - mean);
+        var cands: std.ArrayList(rot.Mat3) = .empty;
+        defer cands.deinit(gpa);
+        try cands.appendSlice(gpa, self.ops);
         for (sym.operators(self.laue)) |q| {
             const R = rot.toMat(q);
             for ([_]f64{ 1, -1 }) |sgn| {
                 var g = R;
                 for (&g) |*e| e.* *= sgn;
-                var cov: f64 = 0;
-                var var1: f64 = 0;
-                var m1: f64 = 0;
-                for (dirs) |d| m1 += self.rawAt(rot.matVec(g, d));
-                m1 /= n;
-                for (dirs, base) |d, b| {
-                    const v = self.rawAt(rot.matVec(g, d)) - m1;
-                    cov += v * (b - mean);
-                    var1 += v * v;
-                }
-                if (cov / @sqrt(@max(var0 * var1, 1e-300)) > 0.97) try found.append(gpa, g);
+                try cands.append(gpa, g);
             }
+        }
+        for (cands.items) |g| {
+            var dup = false;
+            for (found.items) |f| {
+                var d: f64 = 0;
+                for (0..9) |i| d += @abs(f[i] - g[i]);
+                dup = dup or d < 1e-6;
+            }
+            if (dup) continue;
+            var cov: f64 = 0;
+            var var1: f64 = 0;
+            var m1: f64 = 0;
+            for (dirs) |d| m1 += self.rawAt(rot.matVec(g, d));
+            m1 /= n;
+            for (dirs, base) |d, b| {
+                const v = self.rawAt(rot.matVec(g, d)) - m1;
+                cov += v * (b - mean);
+                var1 += v * v;
+            }
+            if (cov / @sqrt(@max(var0 * var1, 1e-300)) > 0.97) try found.append(gpa, g);
         }
         gpa.free(self.ops);
         self.ops = try found.toOwnedSlice(gpa);
+        // (no crystallographic group in any setting: reduce by nothing, which is never wrong)
+        self.setting = sym.settingOf(self.ops) orelse .{};
+        self.laue = self.setting.laue;
+        self.rotation = self.setting.rotation;
     }
 
     pub fn north(self: *const Master, sheets: []const f32) []const f32 {
@@ -445,6 +478,9 @@ fn fromSectorBy(gpa: Allocator, vals: []const f64, kij: []const [3]i32, hw: usiz
     if (m.point_group == 0 and m.space_group != 0) m.point_group = sym.pointGroupOfSpaceGroup(m.space_group) orelse 0;
     m.laue = sym.laueOfPointGroup(m.point_group) orelse laueFromOperators(ops);
     m.rotation = sym.rotationsOfPointGroup(m.point_group) orelse m.laue;
+    // the operators the sector was unfolded with: the master's own, in its own frame (what
+    // measureSymmetry tests)
+    m.ops = try gpa.dupe(rot.Mat3, ops);
     return m;
 }
 
@@ -615,6 +651,11 @@ fn loadEmsoft(gpa: Allocator, f: *File) !Master {
     m.point_group = sym.pointGroupOfSpaceGroup(m.space_group) orelse 0;
     m.laue = sym.laueOfPointGroup(m.point_group) orelse .c1;
     m.rotation = sym.rotationsOfPointGroup(m.point_group) orelse m.laue;
+    // the point group's operators as the crystal's own axes have them (EMsoft's frame: a along x,
+    // c* along z), for measureSymmetry to test; the standard tables' alone when the cell is not known
+    if (m.lattice) |cell| if (m.space_group != 0) {
+        m.ops = crystal.pointGroupOps(gpa, m.space_group, cell) catch &.{};
+    };
     return m;
 }
 
@@ -731,6 +772,42 @@ test "a master's grid symmetries copy what the lookup gives" {
     }
 }
 
+test "GaN's master is reduced by its own six rotations about c" {
+    const gpa = std.testing.allocator;
+    var m = load(gpa, "testdata/gan/GaN_master_20kV.npz") catch |e| switch (e) {
+        error.FileNotFound => return, // run from the repo root
+        else => return e,
+    };
+    defer m.deinit();
+    // 6mm: its rotations 6, its Laue class 6/mmm; the mirrors hold, the inversion does not
+    // (a dynamical master breaks Friedel's law)
+    try std.testing.expectEqual(sym.Laue.c6, m.setting.rotation);
+    try std.testing.expectEqual(sym.Laue.d6, m.setting.laue);
+    try std.testing.expectEqual(@as(usize, 6), m.rotations().len);
+    try std.testing.expectEqual(@as(usize, 12), m.ops.len);
+    try std.testing.expectApproxEqAbs(@as(f64, 1), @abs(rot.qapply(m.setting.frame, .{ 0, 0, 1 })[2]), 1e-9);
+    // every rotation it reduces by leaves it unchanged (correlated over the sphere)
+    var prng = std.Random.DefaultPrng.init(7);
+    const r = prng.random();
+    for (m.rotations()) |g| {
+        var sxy: f64 = 0;
+        var sxx: f64 = 0;
+        var syy: f64 = 0;
+        for (0..2000) |_| {
+            const z = 2 * r.float(f64) - 1;
+            const phi = 2 * std.math.pi * r.float(f64);
+            const st = @sqrt(@max(0.0, 1 - z * z));
+            const v: rot.Vec3 = .{ st * @cos(phi), st * @sin(phi), z };
+            const a = m.at(m.raw, v);
+            const b = m.at(m.raw, rot.qapply(g, v));
+            sxy += a * b;
+            sxx += a * a;
+            syy += b * b;
+        }
+        try std.testing.expect(sxy / @sqrt(sxx * syy) > 0.97);
+    }
+}
+
 test "the nickel master expands to a symmetric, normalized sphere" {
     const gpa = std.testing.allocator;
     var m = load(gpa, "testdata/nickel/Ni_master_20kV.npz") catch |e| switch (e) {
@@ -743,6 +820,10 @@ test "the nickel master expands to a symmetric, normalized sphere" {
     try std.testing.expectEqual(sym.Laue.o, m.laue);
     try std.testing.expectEqualStrings("Ni_master_20kV", m.name);
     try std.testing.expectEqual(@as(usize, 48), m.ops.len);
+    // its orientations reduced by 432 about the tables' own axes
+    try std.testing.expectEqual(sym.Laue.o, m.setting.rotation);
+    try std.testing.expectEqual(@as(usize, 24), m.rotations().len);
+    try std.testing.expectApproxEqAbs(@as(f64, 1), @abs(rot.qapply(m.setting.frame, .{ 0, 0, 1 })[2]), 1e-9);
     try std.testing.expectApproxEqAbs(@as(f64, 20), m.voltage_kv, 1e-9);
     var s: f64 = 0;
     var ss: f64 = 0;

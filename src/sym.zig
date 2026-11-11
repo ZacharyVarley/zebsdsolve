@@ -113,11 +113,14 @@ pub fn operators(laue: Laue) []const Quat {
 }
 
 /// The symmetry-equivalent of `q` with the smallest rotation angle (its fundamental-zone
-/// representative): g · q over the group, since q maps sample to crystal.
-pub fn toFz(q: Quat, laue: Laue) Quat {
+/// representative): g · q over the rotations `ops`, since q maps sample to crystal. `ops` are
+/// the rotations the master pattern itself obeys, in its own crystal frame (Master.rotations):
+/// g · q is the same orientation only when g is a symmetry of the master, so a group written
+/// in some other setting would store a different pose.
+pub fn toFz(q: Quat, ops: []const Quat) Quat {
     var best: Quat = rot.qstd(q);
     var best_w: f64 = best[0];
-    for (operators(laue)[1..]) |g| {
+    for (ops) |g| {
         const c = rot.qstd(rot.qmul(g, q));
         if (c[0] > best_w + 1e-12) {
             best_w = c[0];
@@ -127,17 +130,233 @@ pub fn toFz(q: Quat, laue: Laue) Quat {
     return best;
 }
 
-/// The smallest rotation angle between two orientations of one phase (radians).
-pub fn disorientation(a: Quat, b: Quat, laue: Laue) f64 {
+/// The smallest rotation angle between two orientations of one phase (radians), over its
+/// rotations `ops` (as for `toFz`).
+pub fn disorientation(a: Quat, b: Quat, ops: []const Quat) f64 {
     const m = rot.qmul(a, rot.qconj(b));
     var best: Quat = m;
-    for (operators(laue)) |g| {
+    for (ops) |g| {
         const c = rot.qmul(g, m);
         if (@abs(c[0]) > @abs(best[0])) best = c;
     }
     // from the vector part: the arc cosine of a scalar part near 1 loses half its digits, and
     // quaternions that arrive as f32 would never come closer than 0.04° to each other
     return 2 * std.math.atan2(@sqrt(best[1] * best[1] + best[2] * best[2] + best[3] * best[3]), @abs(best[0]));
+}
+
+// ── a master's symmetry in its own setting ──
+
+/// The most rotations a crystallographic point group has (432).
+pub const MAX_ROTATIONS = 24;
+
+/// A master's symmetry as found from the operators it obeys: the kind of its group of proper
+/// rotations and of its Laue class, the frame they are written in, and the rotations
+/// themselves in the master's crystal frame. `frame` takes the standard setting of the tables
+/// here (the unique axis along z, a dihedral two-fold along x) to the master's: its rotations
+/// are frame · g · frame⁻¹ for g of `operators(rotation)`. A monoclinic master with its
+/// two-fold along y (unique axis b) has `frame` a quarter turn that takes z to y.
+pub const Setting = struct {
+    rotation: Laue = .c1,
+    laue: Laue = .c1,
+    frame: Quat = rot.quat_identity,
+    rots: [MAX_ROTATIONS]Quat = [_]Quat{rot.quat_identity} ** MAX_ROTATIONS,
+    n: usize = 1,
+
+    pub fn rotations(self: *const Setting) []const Quat {
+        return self.rots[0..self.n];
+    }
+
+    /// A crystal direction of the master's frame in the standard setting's (where the
+    /// inverse pole figure keys are drawn).
+    pub fn toStandard(self: *const Setting, d: Vec3) Vec3 {
+        return rot.qapply(rot.qconj(self.frame), d);
+    }
+};
+
+/// The unique axis of a rotation and the order it implies (2π / its angle, rounded; 1 for
+/// the identity).
+fn axisOrder(q: Quat) struct { axis: Vec3, order: u32 } {
+    const s = @sqrt(q[1] * q[1] + q[2] * q[2] + q[3] * q[3]);
+    if (s < 1e-9) return .{ .axis = .{ 0, 0, 1 }, .order = 1 };
+    const t = 2 * std.math.atan2(s, @abs(q[0]));
+    return .{ .axis = .{ q[1] / s, q[2] / s, q[3] / s }, .order = @intFromFloat(@round(2 * std.math.pi / t)) };
+}
+
+fn sameRotation(a: Quat, b: Quat) bool {
+    return @abs(a[0] * b[0] + a[1] * b[1] + a[2] * b[2] + a[3] * b[3]) > 1 - 1e-6;
+}
+
+fn has(set: []const Quat, q: Quat) bool {
+    for (set) |s| if (sameRotation(s, q)) return true;
+    return false;
+}
+
+/// Two sets of rotations are the same (each element up to its sign).
+fn sameSet(a: []const Quat, b: []const Quat) bool {
+    if (a.len != b.len) return false;
+    for (a) |q| if (!has(b, q)) return false;
+    return true;
+}
+
+/// The group the rotations in `buf[0..n]` generate, in place (identity first); null past
+/// MAX_ROTATIONS, which no crystal has.
+fn close(buf: *[MAX_ROTATIONS]Quat, n0: usize) ?usize {
+    var n = n0;
+    if (!has(buf[0..n], rot.quat_identity)) {
+        if (n == MAX_ROTATIONS) return null;
+        buf[n] = rot.quat_identity;
+        n += 1;
+    }
+    // identity first
+    for (buf[0..n], 0..) |q, i| if (sameRotation(q, rot.quat_identity)) {
+        buf[i] = buf[0];
+        buf[0] = rot.quat_identity;
+        break;
+    };
+    var grew = true;
+    while (grew) {
+        grew = false;
+        var i: usize = 0;
+        while (i < n) : (i += 1) {
+            var j: usize = 0;
+            while (j < n) : (j += 1) {
+                const c = rot.qstd(rot.qmul(buf[i], buf[j]));
+                if (has(buf[0..n], c)) continue;
+                if (n == MAX_ROTATIONS) return null;
+                buf[n] = c;
+                n += 1;
+                grew = true;
+            }
+        }
+    }
+    return n;
+}
+
+/// Which of the eleven groups a group of rotations is, by its size and its highest order.
+fn kindOf(set: []const Quat) ?Laue {
+    var top: u32 = 1;
+    for (set) |q| top = @max(top, axisOrder(q).order);
+    return switch (set.len) {
+        1 => .c1,
+        2 => .c2,
+        3 => .c3,
+        4 => if (top == 4) .c4 else .d2,
+        6 => if (top == 6) .c6 else .d3,
+        8 => .d4,
+        12 => if (top == 6) .d6 else .t,
+        24 => .o,
+        else => null,
+    };
+}
+
+/// The order of a group's principal axes, which the standard setting puts along z (and, for
+/// the cubic groups, along x as well).
+fn principalOrder(k: Laue) u32 {
+    return switch (k) {
+        .c1 => 1,
+        .c2, .d2, .t => 2,
+        .c3, .d3 => 3,
+        .c4, .d4, .o => 4,
+        .c6, .d6 => 6,
+    };
+}
+
+/// The rotation that takes z to `zv` and x to `xv` (unit and perpendicular).
+fn frameFrom(zv: Vec3, xv: Vec3) Quat {
+    const yv = rot.cross(zv, xv);
+    // columns: the images of x, y and z
+    return rot.qstd(rot.fromMat(.{ xv[0], yv[0], zv[0], xv[1], yv[1], zv[1], xv[2], yv[2], zv[2] }));
+}
+
+/// Whether the group `k` written in the frame `f` is exactly `set`.
+fn isIn(set: []const Quat, k: Laue, f: Quat) bool {
+    const std_ops = operators(k);
+    if (std_ops.len != set.len) return false;
+    for (std_ops) |g| if (!has(set, rot.qmul(rot.qmul(f, g), rot.qconj(f)))) return false;
+    return true;
+}
+
+/// A master's setting from the point-group operators it obeys (3 × 3, row-major, acting on its
+/// crystal directions; proper and improper): their proper rotations are what make two
+/// orientations the same, and those with the improper ones turned proper (−M) its Laue
+/// class. Null when they are not a crystallographic point group in any setting.
+pub fn settingOf(mats: []const rot.Mat3) ?Setting {
+    var p: [MAX_ROTATIONS]Quat = undefined;
+    var l: [MAX_ROTATIONS]Quat = undefined;
+    var np: usize = 0;
+    var nl: usize = 0;
+    for (mats) |m| {
+        const proper = rot.det(m) > 0;
+        var r = m;
+        if (!proper) for (&r) |*e| {
+            e.* = -e.*;
+        };
+        const q = rot.qstd(rot.fromMat(r));
+        if (proper and !has(p[0..np], q)) {
+            if (np == MAX_ROTATIONS) return null;
+            p[np] = q;
+            np += 1;
+        }
+        if (!has(l[0..nl], q)) {
+            if (nl == MAX_ROTATIONS) return null;
+            l[nl] = q;
+            nl += 1;
+        }
+    }
+    np = close(&p, np) orelse return null;
+    nl = close(&l, nl) orelse return null;
+    const kp = kindOf(p[0..np]) orelse return null;
+    const kl = kindOf(l[0..nl]) orelse return null;
+    var out: Setting = .{ .rotation = kp, .laue = kl, .n = np };
+    @memcpy(out.rots[0..np], p[0..np]);
+    if (kl == .c1) return out;
+    // the frame: a principal axis of the Laue class along z, one perpendicular to it (a
+    // two-fold of a dihedral class, a principal axis of a cubic one; any for a cyclic class)
+    // along x, such that both groups are the tables' in it. Several do (any of a cube's
+    // four-folds can be z; c up or down for a polar class); the one nearest the identity is
+    // kept, so a master in the tables' own setting has the identity, and a polar axis keeps its
+    // sense where the tables can
+    const want_x: u32 = switch (kl) {
+        .o => 4,
+        .t, .d2, .d3, .d4, .d6 => 2,
+        else => 0,
+    };
+    var best_w: f64 = -1;
+    const Try = struct {
+        fn frame(o: *Setting, bw: *f64, ls: []const Quat, k_l: Laue, ps: []const Quat, k_p: Laue, f: Quat) void {
+            if (@abs(f[0]) <= bw.* + 1e-12) return;
+            if (!isIn(ls, k_l, f) or !isIn(ps, k_p, f)) return;
+            bw.* = @abs(f[0]);
+            o.frame = rot.qstd(f);
+        }
+    };
+    for (l[0..nl]) |qz| {
+        const az = axisOrder(qz);
+        if (az.order != principalOrder(kl)) continue;
+        for ([_]f64{ 1, -1 }) |sz| {
+            const zv = rot.scale(az.axis, sz);
+            if (want_x == 0) {
+                // any perpendicular: the one nearest the frame's own x, or else its y
+                const e: Vec3 = if (@abs(zv[0]) < 0.9) .{ 1, 0, 0 } else .{ 0, 1, 0 };
+                const xv = rot.normalize(rot.sub(e, rot.scale(zv, rot.dot(e, zv))));
+                Try.frame(&out, &best_w, l[0..nl], kl, p[0..np], kp, frameFrom(zv, xv));
+                continue;
+            }
+            for (l[0..nl]) |qx| {
+                const ax = axisOrder(qx);
+                if (ax.order != want_x or @abs(rot.dot(ax.axis, zv)) > 1e-6) continue;
+                for ([_]f64{ 1, -1 }) |sx| Try.frame(&out, &best_w, l[0..nl], kl, p[0..np], kp, frameFrom(zv, rot.scale(ax.axis, sx)));
+            }
+        }
+    }
+    return if (best_w >= 0) out else null;
+}
+
+/// The standard setting's group `k` as a setting (the identity frame).
+pub fn standardSetting(rotation: Laue, laue: Laue) Setting {
+    var out: Setting = .{ .rotation = rotation, .laue = laue, .n = operators(rotation).len };
+    @memcpy(out.rots[0..out.n], operators(rotation));
+    return out;
 }
 
 /// Laue class of a crystallographic point group, numbered 1–32 in International Tables order.
@@ -824,14 +1043,89 @@ test "groups are closed and of the right order" {
 
 test "fundamental zone and disorientation" {
     const q = rot.qstd(.{ 0.1, 0.7, -0.3, 0.64 });
-    const f = toFz(q, .o);
+    const f = toFz(q, operators(.o));
     // cubic FZ: rotation angle at most 62.8°
     try std.testing.expect(2 * std.math.acos(f[0]) <= 62.81 * std.math.pi / 180.0);
-    try std.testing.expectApproxEqAbs(@as(f64, 0), disorientation(q, f, .o), 1e-7);
+    try std.testing.expectApproxEqAbs(@as(f64, 0), disorientation(q, f, operators(.o)), 1e-7);
     const g = operators(.o)[17];
-    try std.testing.expectApproxEqAbs(@as(f64, 0), disorientation(rot.qmul(g, q), q, .o), 1e-7);
+    try std.testing.expectApproxEqAbs(@as(f64, 0), disorientation(rot.qmul(g, q), q, operators(.o)), 1e-7);
     const d = rot.so3Exp(.{ 0.01, 0.02, -0.015 });
-    try std.testing.expectApproxEqAbs(@sqrt(0.01 * 0.01 + 0.02 * 0.02 + 0.015 * 0.015), disorientation(rot.qmul(d, q), q, .o), 1e-9);
+    try std.testing.expectApproxEqAbs(@sqrt(0.01 * 0.01 + 0.02 * 0.02 + 0.015 * 0.015), disorientation(rot.qmul(d, q), q, operators(.o)), 1e-9);
+}
+
+/// A point group written in frame `f` (f · g · f⁻¹ for each of the tables' rotations, with the
+/// inversion added when `centro`), as 3 × 3 operators.
+fn groupIn(k: Laue, f: Quat, centro: bool, out: []rot.Mat3) []rot.Mat3 {
+    var n: usize = 0;
+    for (operators(k)) |g| {
+        const m = rot.toMat(rot.qmul(rot.qmul(f, g), rot.qconj(f)));
+        out[n] = m;
+        n += 1;
+        if (centro) {
+            out[n] = m;
+            for (&out[n]) |*e| e.* = -e.*;
+            n += 1;
+        }
+    }
+    return out[0..n];
+}
+
+test "a master's symmetry in its own setting: monoclinic with the unique axis b" {
+    // 2/m with its two-fold along y, as a unique-b crystal has it
+    const two_y: Quat = .{ 0, 0, 1, 0 };
+    var buf: [4]rot.Mat3 = undefined;
+    const s = settingOf(groupIn(.c2, frameFrom(.{ 0, 1, 0 }, .{ 0, 0, 1 }), true, &buf)).?;
+    try std.testing.expectEqual(Laue.c2, s.rotation);
+    try std.testing.expectEqual(Laue.c2, s.laue);
+    try std.testing.expectEqual(@as(usize, 2), s.n);
+    // its unique axis is y, not the tables' z
+    const z = rot.qapply(s.frame, .{ 0, 0, 1 });
+    try std.testing.expectApproxEqAbs(@as(f64, 1), @abs(z[1]), 1e-9);
+    // a half turn about z is no symmetry of it: reducing by its own rotations keeps a pose that
+    // the tables' 2 (about z) would have turned into another orientation
+    const q = rot.qstd(rot.so3Exp(.{ 0.1, -0.2, 2.9 }));
+    const own = toFz(q, s.rotations());
+    try std.testing.expectApproxEqAbs(@as(f64, 0), disorientation(own, q, s.rotations()), 1e-9);
+    try std.testing.expect(rot.angleBetween(own, q) < 1e-9 or rot.angleBetween(own, rot.qmul(two_y, q)) < 1e-9);
+    const tables = toFz(q, operators(.c2));
+    try std.testing.expect(rot.angleBetween(tables, q) > 1 and rot.angleBetween(tables, rot.qmul(two_y, q)) > 1);
+    // directions go back to the tables' setting for the keys
+    const back = s.toStandard(z);
+    try std.testing.expectApproxEqAbs(@as(f64, 1), back[2], 1e-9);
+}
+
+test "a master's symmetry in its own setting: the trigonal and cubic groups turned" {
+    var buf: [48]rot.Mat3 = undefined;
+    // -3m with its two-folds 30° from the tables' (P-31m against P-3m1), and 6mm (polar: its
+    // rotations 6, its Laue class 6/mmm), each recovered with the frame that makes them so
+    const turn30 = rot.so3Exp(.{ 0, 0, std.math.pi / 6.0 });
+    for ([_]struct { k: Laue, centro: bool, f: Quat, rot: Laue, laue: Laue }{
+        .{ .k = .d3, .centro = true, .f = turn30, .rot = .d3, .laue = .d3 },
+        .{ .k = .o, .centro = true, .f = rot.qstd(rot.so3Exp(.{ 0.3, -1.1, 0.7 })), .rot = .o, .laue = .o },
+        .{ .k = .t, .centro = false, .f = rot.qstd(rot.so3Exp(.{ -0.4, 0.2, 1.3 })), .rot = .t, .laue = .t },
+        .{ .k = .d4, .centro = true, .f = rot.qstd(rot.so3Exp(.{ std.math.pi / 2.0, 0, 0 })), .rot = .d4, .laue = .d4 },
+    }) |case| {
+        const s = settingOf(groupIn(case.k, case.f, case.centro, &buf)).?;
+        try std.testing.expectEqual(case.rot, s.rotation);
+        try std.testing.expectEqual(case.laue, s.laue);
+        // the group in the frame found is the one given
+        for (operators(case.k)) |g| try std.testing.expect(has(s.rotations(), rot.qmul(rot.qmul(case.f, g), rot.qconj(case.f))));
+        try std.testing.expect(isIn(s.rotations(), s.rotation, s.frame));
+    }
+    // 6mm: the six rotations about c and its mirrors (−1 times the two-folds across c)
+    var six: [12]rot.Mat3 = undefined;
+    for (operators(.d6), 0..) |g, i| {
+        six[i] = rot.toMat(g);
+        if (i >= 6) for (&six[i]) |*e| {
+            e.* = -e.*;
+        };
+    }
+    const s6 = settingOf(&six).?;
+    try std.testing.expectEqual(Laue.c6, s6.rotation);
+    try std.testing.expectEqual(Laue.d6, s6.laue);
+    // a group that is no crystal's: nothing found
+    const odd = [_]rot.Mat3{rot.toMat(rot.so3Exp(.{ 0, 0, 2 * std.math.pi / 5.0 }))};
+    try std.testing.expect(settingOf(&odd) == null);
 }
 
 test "numbers and names" {

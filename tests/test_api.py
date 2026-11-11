@@ -876,6 +876,80 @@ def main():
           f"ANG: {ang_cell.split(None, 2)[-1].strip()}; CTF: {ctf_cell.split(chr(9))[0]} {ctf_cell.split(chr(9))[1] if chr(9) in ctf_cell else ''}")
     s.close()
 
+    # ── a master whose axes are not the tables': monoclinic with the unique axis b ──
+    # Its two-fold is about y. Reduced by the tables' 2 (about z), a pose would become another
+    # orientation with another pattern; every pose kept must be reduced by the master's own
+    # rotations, and so simulate the pattern it was fitted to (found by Tijmenvermeij, #3).
+    s = ze.Solver()
+    s.configure(master_smooth=0, static_background="none", dynamic_background="none", mask=False, clahe=False, bandwidth=32, refine_iters=8,
+                sim_halfw=32, sim_dmin_nm=0.12, sim_bin_kev=5, sim_c_weak=0,
+                toy_seed=17, toy_rows=3, toy_cols=4, toy_height=40, toy_width=40, toy_grains=12, toy_counts=0, toy_contrast=1, batch=12, sweeps=1)
+    s.set_crystal({"space_group": 10, "cell": [3.5, 4.5, 5.5, 90, 105, 90],
+                   "sites": [{"symbol": "Al", "xyz": [0.17, 0.23, 0.31], "b_iso": 0.5}, {"symbol": "Cu", "xyz": [0.29, 0.11, 0.43], "b_iso": 0.5}]})
+    s.simulate_master()
+    s.add_simulated_phase("C2/m unique b")
+    s.set_geometry(pc=(0.45, 0.3, 0.6), px_um=0)
+    s.synthesize()
+
+    def qmul(a, b):
+        a, b = np.asarray(a, np.float64), np.asarray(b, np.float64)
+        w1, x1, y1, z1 = np.moveaxis(a, -1, 0)
+        w2, x2, y2, z2 = np.moveaxis(b, -1, 0)
+        return np.stack([w1 * w2 - x1 * x2 - y1 * y2 - z1 * z2, w1 * x2 + x1 * w2 + y1 * z2 - z1 * y2,
+                         w1 * y2 - x1 * z2 + y1 * w2 + z1 * x2, w1 * z2 + x1 * y2 - y1 * x2 + z1 * w2], -1)
+
+    def same_pattern(a, b):
+        """The least correlation, cell by cell, of two stacks of patterns."""
+        return min(float(np.corrcoef(x.ravel(), y.ravel())[0, 1]) for x, y in zip(a, b))
+
+    def pose_apart(a, b):
+        """Degrees between rotations, sign aside, no symmetry allowed (from the vector part of
+        a b⁻¹: an arc cosine near 1 loses half the digits of an f32 quaternion)."""
+        b = np.asarray(b, np.float64) * np.array([1, -1, -1, -1.0])
+        m = qmul(a, b)
+        return np.degrees(2 * np.arctan2(np.linalg.norm(m[..., 1:], axis=-1), np.abs(m[..., 0])))
+
+    raw = s.index_cells(np.arange(12))["quaternions"][0]
+    r = s.index()
+    q = r["quaternions"].reshape(-1, 4).astype(np.float64)
+    half_y, half_z = np.array([0, 0, 1, 0.0]), np.array([0, 0, 0, 1.0])
+    kept = same_pattern(s.simulate(q), s.simulate(raw))
+    by_y = same_pattern(s.simulate(qmul(half_y, q)), s.simulate(q))
+    by_z = max(float(np.corrcoef(a.ravel(), b.ravel())[0, 1]) for a, b in zip(s.simulate(qmul(half_z, q)), s.simulate(q)))
+    moved = pose_apart(q, raw)
+    check("a master with its unique axis b keeps the pose it was fitted with, reduced about b",
+          (r["phase"] == 0).all() and kept > 0.999 and by_y > 0.99 and by_z < 0.9
+          and all(m < 0.05 or abs(m - 180) < 0.05 or pose_apart(q[i], qmul(half_y, raw[i])) < 0.05 for i, m in enumerate(moved)),
+          f"stored and fitted poses simulate patterns correlating at least {kept:.4f}; a half turn about b leaves them {by_y:.4f}, about c {by_z:.2f} at most; "
+          f"{int((pose_apart(q, raw) > 1).sum())} of 12 stored as their equivalent about b")
+    qz, _ = s.reduce(q)
+    d_sym = np.degrees(s.disorientation(qmul(half_y, q), q))
+    d_c = np.degrees(s.disorientation(qmul(half_z, q), q))
+    check("its explicit reduction and disorientation are about b too",
+          pose_apart(qz, q).max() < 1e-3 and d_sym.max() < 1e-3 and d_c.min() > 1,
+          f"reduced as stored (to {pose_apart(qz, q).max():.1e}°); a half turn about b is {d_sym.max():.1e}° away, about c {d_c.min():.0f}°")
+    # the export's Bunge angles are those of the stored poses (the engine's convention, here in NumPy)
+    with tempfile.TemporaryDirectory() as d:
+        s.export(os.path.join(d, "x.ang"))
+        rows_ang = np.loadtxt(os.path.join(d, "x.ang"), comments="#", usecols=(0, 1, 2), ndmin=2)
+    p1, P, p2 = rows_ang.T
+    sig, dlt = 0.5 * (p1 + p2), 0.5 * (p1 - p2)
+    q_ang = np.stack([np.cos(P / 2) * np.cos(sig), -np.sin(P / 2) * np.cos(dlt), -np.sin(P / 2) * np.sin(dlt), -np.cos(P / 2) * np.sin(sig)], -1)
+    check("its ANG export writes the stored poses", rows_ang.shape == (12, 3) and pose_apart(q_ang, q).max() < 1e-3,
+          f"{rows_ang.shape[0]} rows, {pose_apart(q_ang, q).max():.1e}° from the stored poses")
+    # the pattern-centre vote and the plane fit keep poses that simulate their patterns
+    s.configure(fit_grid=4, fit_bandwidth=32, pc_steps=1, pc_steps_z=1, pc_levels=1, refine=False)
+    s.fit_pc()
+    cells, phases, qf, _ = s.fit_patterns()
+    vote = same_pattern(s.simulate(qf, cells=cells), s.simulate(s.index_cells(cells, bandwidth=32)["quaternions"][0], cells=cells))
+    s.configure(plane_stride=1, plane_iters=3, accept_z=0, accept_step_deg=180, refine=True)
+    s.fit_plane()
+    cells, phases, qp, _ = s.fit_patterns()
+    plane = same_pattern(s.simulate(qp, cells=cells), [s.pattern(int(c), processed=False) for c in cells])
+    check("its fits keep poses that simulate their patterns", (phases == 0).all() and vote > 0.999 and plane > 0.99,
+          f"the vote's poses against the search's: at least {vote:.4f}; the plane fit's against the patterns: at least {plane:.4f}")
+    s.close()
+
     # ── the plain functions ──
     res = ze.index(SCAN, [NI], roi_x=0, roi_y=0, roi_w=30, roi_h=10, batch=128)
     check("ze.index returns a Result", res.quaternions.shape == (55, 75, 4) and int((res.phase >= 0).sum()) == 300 and res.z.shape == (55, 75) and res.phases[0]["name"] == "Ni_master_20kV")

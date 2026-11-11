@@ -577,7 +577,7 @@ pub fn run(e: *Engine) !Result {
             }
         }
         const pk = peaks_h[p * per_phase + at * 8 ..][0..8];
-        const q = sym.toFz(.{ pk[0], pk[1], pk[2], pk[3] }, e.phases.items[p].master.rotation);
+        const q = sym.toFz(.{ pk[0], pk[1], pk[2], pk[3] }, e.phases.items[p].master.rotations());
         for (0..4) |k| e.fit_quats[4 * b + k] = @floatCast(q[k]);
         e.fit_phase[b] = @intCast(p);
         e.fit_ncc[b] = pk[4];
