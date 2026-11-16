@@ -333,6 +333,18 @@ class Solver:
         mean, std = out[0::2], out[1::2]
         return (mean.reshape(s["rows"], s["cols"]), std.reshape(s["rows"], s["cols"])) if whole else (mean, std)
 
+    def stored_overview(self):
+        """Stored acquisition quality map, or None; never computes pattern statistics."""
+        n = self._check(self._lib.ze_scan_overview(self._e, None, 0), "stored_overview")
+        if not n:
+            return None
+        values = np.empty(n, dtype=np.float32)
+        self._check(self._lib.ze_scan_overview(self._e, _ptr(values, _n.f32p), n), "stored_overview")
+        kind = self._lib.ze_scan_overview_kind(self._e)
+        label = {1: "Band contrast", 2: "Image quality", 3: "Radon quality", 4: "Pattern quality"}[kind]
+        info = self.scan
+        return {"kind": kind, "label": label, "values": values.reshape(info["rows"], info["cols"])}
+
     # ── phases ──
 
     def add_phase(self, path):

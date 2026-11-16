@@ -387,7 +387,7 @@ function ioImports(state) {
 // Exports that never wait (plain calls); every other function export may suspend (on the GPU
 // or on a file read) and is called through WebAssembly.promising.
 const SYNC_EXPORTS = new Set(["ze_alloc", "ze_free", "ze_version", "ze_create", "ze_destroy", "ze_adapter", "ze_error",
-  "ze_configure", "ze_settings", "ze_events", "ze_cancel", "ze_close_scan", "ze_scan_info", "ze_scan_format",
+  "ze_configure", "ze_settings", "ze_events", "ze_cancel", "ze_close_scan", "ze_scan_info", "ze_scan_format", "ze_scan_overview_kind",
   "ze_get_geometry", "ze_set_geometry", "ze_clear_phases", "ze_phase_count", "ze_phase_info", "ze_pattern_shape", "ze_nlpar_view",
   "ze_pc_scores", "ze_fit_patterns", "ze_results", "ze_map", "ze_ipf_key", "ze_export", "ze_reduce", "ze_disorientation", "ze_shader",
   "ze_index_status", "ze_tune_begin", "ze_tune_report", "ze_pixel_angle", "ze_lattice", "ze_sweep", "ze_pc_level_count", "ze_pc_level", "ze_pc_level_ballots",
@@ -690,6 +690,21 @@ export class Zebsdsolve {
     s.format = this._text((p, cap) => this.x.ze_scan_format(this.e, p, cap), 64);
     s.dtype = ["uint8", "uint16", "float32"][s.pixel];
     return s;
+  }
+
+  /** The acquisition's stored scalar map, without reading diffraction patterns. */
+  storedOverview() {
+    return this._serial(() => this._frame(async (f) => {
+      const n = this._check(await this.x.ze_scan_overview(this.e, 0, 0), "stored overview");
+      if (!n) return null;
+      const kind = this.x.ze_scan_overview_kind(this.e);
+      const label = [null, "Band contrast", "Image quality", "Radon quality", "Pattern quality"][kind];
+      if (!label) throw new Error("Unknown stored overview kind.");
+      const p = f.alloc(n * 4);
+      const count = this._check(await this.x.ze_scan_overview(this.e, p, n), "stored overview");
+      if (count !== n) throw new Error("Stored overview size changed while reading.");
+      return { kind, label, values: new Float32Array(this.mem, p, n).slice() };
+    }));
   }
 
   /** [height, width] of a pattern: reduced by the binning setting, or (full) as stored. */

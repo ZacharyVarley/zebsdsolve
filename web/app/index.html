@@ -237,6 +237,10 @@
           <button type="button" class="ghost mini" id="btn-zoom" disabled title="Scroll to zoom in on the map, drag to move it, double-click (or this) to show all of it">whole map</button>
           <label class="check" title="The lattice of patterns the fits use (green once a fit has given them orientations)"><input type="checkbox" id="show-fit" checked> fit patterns</label>
         </div>
+        <div class="pane-bar overview-bar">
+          <select id="overview-source" aria-label="Overview source" disabled><option value="none">Overview</option><option value="calculated">Pattern contrast</option></select>
+          <button type="button" class="ghost mini" id="btn-overview" disabled>Calculate pattern contrast</button>
+        </div>
         <div class="well" id="map-well" tabindex="0" title="Click or drag to select a pattern; the arrow keys step it (with shift: by ten). Scroll zooms about the pointer, a drag moves a zoomed map.">
           <canvas id="map" width="1" height="1"></canvas>
           <svg id="map-over" class="over"></svg>

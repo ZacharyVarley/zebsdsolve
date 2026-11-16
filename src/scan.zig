@@ -24,6 +24,8 @@ pub var last_why: []const u8 = "";
 
 pub const Format = enum { h5_kikuchipy, h5_bruker, h5_edax, h5_oxford, edax_up, oxford_ebsp, nordif, h5_emsoft };
 
+pub const OverviewKind = enum(u32) { none = 0, band_contrast = 1, image_quality = 2, radon_quality = 3, pattern_quality = 4 };
+
 pub const Pixel = enum(u32) { u8 = 0, u16 = 1, f32 = 2 };
 
 /// What the caller knows that the file may not say (0: not given).
@@ -70,6 +72,9 @@ pub const Scan = struct {
     offsets: []u64 = &.{},
     /// static background (pat_h · pat_w), when the file stores one
     background: []f32 = &.{},
+    /// Optional quality map in the acquisition Data group; discovery reads metadata only.
+    overview_addr: ?u64 = null,
+    overview_kind: OverviewKind = .none,
     why: []const u8 = "",
 
     pub fn count(self: *const Scan) u64 {
@@ -86,6 +91,57 @@ pub const Scan = struct {
 
     pub fn patternBytes(self: *const Scan) u64 {
         return @as(u64, self.info.pat_h) * self.info.pat_w * self.bytesPerPx();
+    }
+
+    pub fn readStoredOverview(self: *Scan, out: []f32) !void {
+        const n: usize = @intCast(self.count());
+        if (out.len != n) return error.BadLength;
+        const address = self.overview_addr orelse return error.NoStoredOverview;
+        const values = try self.gpa.alloc(f64, n);
+        defer self.gpa.free(values);
+        if ((try self.h5.?.numbers(address, values)) != n) return error.InvalidStoredOverview;
+        for (values, out) |x, *v| v.* = if (std.math.isFinite(x) and @abs(x) <= std.math.floatMax(f32)) @floatCast(x) else std.math.nan(f32);
+    }
+
+    fn discoverOverview(self: *Scan, data: u64) void {
+        const Candidate = struct { name: []const u8, kind: OverviewKind };
+        // Ordered preference is deterministic, with no fallback to pattern IO.
+        const candidates = [_]Candidate{
+            .{ .name = "Band Contrast", .kind = .band_contrast },
+            .{ .name = "band_contrast", .kind = .band_contrast },
+            .{ .name = "BandContrast", .kind = .band_contrast },
+            .{ .name = "Image Quality", .kind = .image_quality },
+            .{ .name = "IQ", .kind = .image_quality },
+            .{ .name = "image_quality", .kind = .image_quality },
+            .{ .name = "iq", .kind = .image_quality },
+            .{ .name = "ImageQuality", .kind = .image_quality },
+            .{ .name = "RadonQuality", .kind = .radon_quality },
+            .{ .name = "Radon Quality", .kind = .radon_quality },
+            .{ .name = "Pattern Quality", .kind = .pattern_quality },
+            .{ .name = "PatternQuality", .kind = .pattern_quality },
+        };
+        const h = &self.h5.?;
+        const original_why = h.why;
+        defer h.why = original_why;
+        for (candidates) |candidate| {
+            const address = (h.child(data, candidate.name) catch null) orelse continue;
+            var ds = h.dataset(address) catch continue;
+            defer ds.deinit(self.gpa);
+            const n = self.count();
+            const vector = (ds.rank == 1 and ds.dims[0] == n) or
+                (ds.rank == 2 and ((ds.dims[0] == n and ds.dims[1] == 1) or (ds.dims[0] == 1 and ds.dims[1] == n)));
+            const raster = ds.rank == 2 and ds.dims[0] == self.info.rows and ds.dims[1] == self.info.cols;
+            if (!vector and !raster) continue;
+            const numeric = switch (ds.dtype.class) {
+                .uint, .int => ds.dtype.size == 1 or ds.dtype.size == 2 or ds.dtype.size == 4 or ds.dtype.size == 8,
+                .float => ds.dtype.size == 4 or ds.dtype.size == 8,
+                else => false,
+            };
+            if (!numeric) continue;
+            self.overview_addr = address;
+            self.overview_kind = candidate.kind;
+            return;
+        }
     }
 
     pub fn formatName(self: *const Scan) []const u8 {
@@ -378,6 +434,7 @@ pub const Scan = struct {
                 info.cols = @intCast(n_stored);
             } else return error.ScanIsNotAFullGrid;
         }
+        self.discoverOverview(data);
         info.step_x_um = num.get(h, header, v.step_x);
         info.step_y_um = num.get(h, header, v.step_y);
         info.sample_tilt_deg = num.get(h, header, v.tilt);
@@ -460,6 +517,8 @@ pub const Scan = struct {
             info.rows = hints.rows;
             info.cols = hints.cols;
         }
+        // EMsoft keeps optional per-pattern scalars beside EBSDPatterns.
+        self.discoverOverview((try h.find("EMData/EBSD")).?);
         const nml = (try h.find("NMLparameters/EBSDNameList")) orelse return;
         const get = struct {
             fn f(hh: *hdf5.Hdf5, group: u64, name: []const u8) f64 {

@@ -27,7 +27,12 @@ const st = {
   settings: {},
   cell: -1,            // selected map cell
   mapKind: "overview",
-  overview: null,      // Float32Array(rows · cols): pattern contrast, NaN where not read yet
+  overview: null,      // Current scalar background, in row-major pixel order.
+  storedOverview: null,
+  calculatedOverview: null,
+  overviewSource: null,
+  overviewLoading: false,
+  overviewCalculating: false,
   overviewRun: 0,
   results: null,       // engine results after indexing
   resultsGeo: "",      // the geometry they were indexed under
@@ -362,6 +367,7 @@ async function openScan(files) {
   files = sortScanFiles(files);
   if (!files.length) return;
   await busy(`opening ${files[0].name}…`, async () => {
+    invalidateOverview();
     await st.ze.openScan(files);
     st.scanName = files[0].name;
     afterOpen();
@@ -369,6 +375,8 @@ async function openScan(files) {
 }
 
 function afterOpen() {
+  invalidateOverview();
+  ++st.showRun;
   const s = st.ze.scan;
   st.scan = s;
   st.truth = null;
@@ -385,6 +393,11 @@ function afterOpen() {
   st.chance = null;
   st.live.clear();
   st.overview = new Float32Array(s.rows * s.cols).fill(NaN);
+  st.storedOverview = st.calculatedOverview = null;
+  st.overviewSource = null;
+  st.overviewLoading = true;
+  st.stage = "stored";
+  updateOverviewControls();
   st.view = { k: 1, cx: s.cols / 2, cy: s.rows / 2, s: 1 };
   app.dataset.scan = "1";
   $("scan-hint").hidden = true;
@@ -410,55 +423,114 @@ function afterOpen() {
   showRoi();
   drawVotes();
   drawZ();
-  selectCell(Math.floor(s.rows / 2) * s.cols + Math.floor(s.cols / 2));
-  runOverview();
+  st.cell = Math.floor(s.rows / 2) * s.cols + Math.floor(s.cols / 2);
+  drawMapOverlay();
+  loadStoredOverview();
   updateEnabled();
 }
 
-/** The overview: every pattern's contrast, on a lattice of patterns when the map is large (at
- *  most about 40 000 patterns or 1.5 GiB of them). Whole lattice rows are read, each once (a
- *  file reads neighbours fastest), every fourth first and then the rows between: the whole map
- *  shows at once and sharpens. It yields to the engine's jobs between pieces. */
+function invalidateOverview() {
+  ++st.overviewRun;
+  st.overviewCalculating = false;
+  st.overviewLoading = false;
+  updateOverviewControls();
+}
+
+function updateOverviewControls() {
+  const selector = $("overview-source");
+  selector.replaceChildren();
+  if (st.storedOverview) selector.add(new Option(st.storedOverview.label, "stored"));
+  else {
+    const empty = new Option("Overview", "none");
+    empty.disabled = true;
+    selector.add(empty);
+  }
+  selector.add(new Option("Pattern contrast", "calculated"));
+  selector.disabled = !st.scan || st.overviewLoading;
+  selector.value = st.overviewSource || "none";
+  $("btn-overview").disabled = !st.scan || st.overviewLoading;
+  $("btn-overview").textContent = st.overviewCalculating ? "Stop contrast calculation" : "Calculate pattern contrast";
+}
+
+async function loadStoredOverview() {
+  const run = st.overviewRun, ze = st.ze;
+  try {
+    const stored = await ze.storedOverview();
+    if (run !== st.overviewRun || ze !== st.ze) return;
+    st.storedOverview = stored;
+    if (stored) {
+      st.overview = stored.values;
+      st.overviewSource = "stored";
+      drawMap();
+      log(`overview: stored ${stored.label.toLowerCase()}, ${stored.values.length.toLocaleString()} pixels`);
+    }
+  } catch (e) {
+    if (run === st.overviewRun && ze === st.ze) log(String(e.message || e), true);
+  } finally {
+    if (run === st.overviewRun && ze === st.ze) {
+      // Paint the stored map before preview or automatic indexing can enqueue
+      // pattern preparation. A scan switch may invalidate this yield.
+      await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+      if (run === st.overviewRun && ze === st.ze) {
+        st.overviewLoading = false;
+        updateOverviewControls();
+        if (!st.busy) showCell();
+      }
+    }
+  }
+}
+
+/** Explicit progressive contrast calculation. Each batch yields to other engine jobs. */
 async function runOverview() {
-  const run = ++st.overviewRun;
+  const run = ++st.overviewRun, ze = st.ze;
   const { rows, cols, patH, patW, pixel } = st.scan;
+  const values = new Float32Array(rows * cols).fill(NaN);
+  st.calculatedOverview = { label: "Pattern contrast (standard deviation)", values };
+  st.overview = values;
+  st.overviewSource = "calculated";
+  st.overviewCalculating = true;
+  updateOverviewControls();
+  setMapKind("overview");
+  const current = () => run === st.overviewRun && ze === st.ze;
+  const redraw = () => { if (st.overview === values && (st.mapKind === "overview" || !st.results)) drawMap(); };
   const budget = Math.max(1000, Math.min(40000, Math.floor((1.5 * 2 ** 30) / (patH * patW * [1, 2, 4][pixel]))));
   const stride = Math.max(1, Math.ceil(Math.sqrt((rows * cols) / budget)));
   const nr = Math.ceil(rows / stride);
-  // passes over the lattice rows at steps 2^top … 1, the first of about a dozen rows
   let top = 0;
   while (nr >> (top + 1) >= 12) top++;
   const t0 = performance.now();
   let read = 0, lastDraw = 0;
-  for (let p = top; p >= 0; p--) {
-    const step = 1 << p;
-    const todo = [];
-    for (let j = 0; j < nr; j += step) if (p === top || j % (2 * step) !== 0) todo.push(j);
-    for (let i = 0; i < todo.length;) {
-      // as many lattice rows as make a batch of about 256 patterns
-      const part = [];
-      do {
-        const r = todo[i++] * stride;
-        for (let c = 0; c < cols; c += stride) part.push(r * cols + c);
-      } while (i < todo.length && part.length < 256);
-      while (st.busy) await sleep(150);
-      if (run !== st.overviewRun) return;
-      let res;
-      try { res = await st.ze.patternStats(part); } catch (e) { log(String(e.message || e), true); return; }
-      if (run !== st.overviewRun) return;
-      read += part.length;
-      // each value fills its lattice cell, and the rows below it no finer pass has read yet
-      for (let k = 0; k < part.length; k++) {
-        const r0 = Math.floor(part[k] / cols), c0 = part[k] % cols;
-        const r1 = Math.min(rows, r0 + stride * step), c1 = Math.min(cols, c0 + stride);
-        for (let r = r0; r < r1; r++) st.overview.fill(res.std[k], r * cols + c0, r * cols + c1);
+  try {
+    for (let p = top; p >= 0; p--) {
+      const step = 1 << p, todo = [];
+      for (let j = 0; j < nr; j += step) if (p === top || j % (2 * step) !== 0) todo.push(j);
+      for (let i = 0; i < todo.length;) {
+        const part = [];
+        do {
+          const r = todo[i++] * stride;
+          for (let c = 0; c < cols; c += stride) part.push(r * cols + c);
+        } while (i < todo.length && part.length < 256);
+        while (st.busy && current()) await sleep(150);
+        if (!current()) return;
+        const res = await ze.patternStats(part);
+        if (!current()) return;
+        read += part.length;
+        for (let k = 0; k < part.length; k++) {
+          const r0 = Math.floor(part[k] / cols), c0 = part[k] % cols;
+          const r1 = Math.min(rows, r0 + stride * step), c1 = Math.min(cols, c0 + stride);
+          for (let r = r0; r < r1; r++) values.fill(res.std[k], r * cols + c0, r * cols + c1);
+        }
+        if (performance.now() - lastDraw > 100) { redraw(); lastDraw = performance.now(); }
       }
-      if (performance.now() - lastDraw > 100 && (st.mapKind === "overview" || !st.results)) { drawMap(); lastDraw = performance.now(); }
     }
+    if (!current()) return;
+    redraw();
+    log(`overview: ${read.toLocaleString()} patterns${stride > 1 ? ` (every ${stride}${stride === 2 ? "nd" : stride === 3 ? "rd" : "th"} each way)` : ""} in ${((performance.now() - t0) / 1000).toFixed(2)} s`);
+  } catch (e) {
+    if (current()) log(String(e.message || e), true);
+  } finally {
+    if (current()) { st.overviewCalculating = false; updateOverviewControls(); }
   }
-  if (st.mapKind === "overview" || !st.results) drawMap();
-  const io = st.ze.stats();
-  log(`overview: ${read.toLocaleString()} patterns${stride > 1 ? ` (every ${stride}${stride === 2 ? "nd" : stride === 3 ? "rd" : "th"} each way)` : ""} in ${((performance.now() - t0) / 1000).toFixed(2)} s, ${(io.fileBytes / 2 ** 20).toFixed(0)} MiB in ${io.fileReads.toLocaleString()} reads`);
 }
 
 // ── phases ──
@@ -905,7 +977,9 @@ function drawLegend() {
   const bar = () => { const b = document.createElement("span"); b.className = "bar"; return b; };
   if (!st.scan) { box.hidden = true; return; }
   if (kind === "overview" || !R) {
-    box.append(text("pattern contrast"), bar());
+    const source = st.overviewSource === "stored" ? st.storedOverview : st.calculatedOverview;
+    if (!source) { box.hidden = true; return; }
+    box.append(text(source.label), bar());
   } else if (kind === "ncc" || kind === "nmi" || kind === "z") {
     // gray between the indexed cells' extremes, as the engine draws it
     let lo = Infinity, hi = -Infinity;
@@ -1182,7 +1256,7 @@ function showNlpar(a) {
 }
 
 async function showCell() {
-  if (!st.scan || st.cell < 0) return;
+  if (!st.scan || st.cell < 0 || st.overviewLoading) return;
   const run = ++st.showRun;
   const cell = st.cell;
   const { cols } = st.scan;
@@ -1687,6 +1761,7 @@ async function loadExample() {
       return new File([await r.blob()], name);
     };
     const [scan, master] = await Promise.all([get("patterns_v2.h5"), get("Ni_master_20kV.npz")]);
+    invalidateOverview();
     await st.ze.openScan([scan]);
     st.scanName = scan.name;
     forgetPhases();
@@ -1860,6 +1935,22 @@ function updateWiring() {
   $("btn-stop").addEventListener("click", () => { st.stop = true; st.ze.cancel(); status("stopping…"); });
   $("btn-ang").addEventListener("click", () => download(st.scanName.replace(/\.[^.]+$/, "") + ".ang", st.ze.exportText("ang"), "text/plain"));
   $("btn-ctf").addEventListener("click", () => download(st.scanName.replace(/\.[^.]+$/, "") + ".ctf", st.ze.exportText("ctf"), "text/plain"));
+  $("btn-overview").addEventListener("click", () => {
+    if (st.overviewCalculating) { invalidateOverview(); updateOverviewControls(); }
+    else if (st.scan && !st.overviewLoading) runOverview();
+  });
+  $("overview-source").addEventListener("change", (event) => {
+    if (event.target.value === "none") return;
+    if (event.target.value === "calculated" && !st.calculatedOverview) {
+      if (st.scan && !st.overviewLoading) runOverview();
+      return;
+    }
+    const source = event.target.value === "stored" ? st.storedOverview : st.calculatedOverview;
+    if (!source) return;
+    st.overviewSource = event.target.value;
+    st.overview = source.values;
+    setMapKind("overview");
+  });
   $("btn-json").addEventListener("click", () => download(st.scanName.replace(/\.[^.]+$/, "") + ".zebsdsolve.json", projectJson(), "application/json"));
   $("map-kind").addEventListener("click", (e) => { const b = e.target.closest("button"); if (b && !b.disabled) setMapKind(b.dataset.kind); });
   $("dock-kind").addEventListener("click", (e) => { const b = e.target.closest("button"); if (b) selectDock(b.dataset.dock); });
