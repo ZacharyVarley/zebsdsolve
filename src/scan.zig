@@ -72,6 +72,12 @@ pub const Scan = struct {
     background: []f32 = &.{},
     why: []const u8 = "",
 
+    /// Advance only the pattern dataset's chunk lookup, without reading patterns.
+    pub fn prepareIndexStep(self: *Scan, max_nodes: usize, max_bytes: usize) !bool {
+        if (self.h5) |*h| return h.prepareIndexStep(&self.ds, max_nodes, max_bytes);
+        return true;
+    }
+
     pub fn count(self: *const Scan) u64 {
         return @as(u64, self.info.rows) * self.info.cols;
     }

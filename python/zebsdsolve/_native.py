@@ -106,6 +106,8 @@ _SIGS = {
     "ze_open_scan": ([P, ctypes.c_char_p, SZ], I32),
     "ze_set_patterns": ([P, P, SZ, U32, U32, U32, U32, U32], I32),
     "ze_synthesize": ([P, f32p, ctypes.POINTER(ctypes.c_int32), ctypes.POINTER(ctypes.c_int32), SZ], I32),
+    "ze_chunk_index_status": ([P, ctypes.POINTER(U64)], None),
+    "ze_prepare_index_step": ([P, U32, U32], I32),
     "ze_close_scan": ([P], None),
     "ze_scan_info": ([P, ctypes.POINTER(ScanInfo)], None),
     "ze_scan_format": ([P, ctypes.c_char_p, SZ], SZ),

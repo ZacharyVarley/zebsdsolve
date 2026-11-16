@@ -387,7 +387,7 @@ function ioImports(state) {
 // Exports that never wait (plain calls); every other function export may suspend (on the GPU
 // or on a file read) and is called through WebAssembly.promising.
 const SYNC_EXPORTS = new Set(["ze_alloc", "ze_free", "ze_version", "ze_create", "ze_destroy", "ze_adapter", "ze_error",
-  "ze_configure", "ze_settings", "ze_events", "ze_cancel", "ze_close_scan", "ze_scan_info", "ze_scan_format",
+  "ze_configure", "ze_settings", "ze_events", "ze_cancel", "ze_close_scan", "ze_scan_info", "ze_scan_format", "ze_chunk_index_status",
   "ze_get_geometry", "ze_set_geometry", "ze_clear_phases", "ze_phase_count", "ze_phase_info", "ze_pattern_shape", "ze_nlpar_view",
   "ze_pc_scores", "ze_fit_patterns", "ze_results", "ze_map", "ze_ipf_key", "ze_export", "ze_reduce", "ze_disorientation", "ze_shader",
   "ze_index_status", "ze_tune_begin", "ze_tune_report", "ze_pixel_angle", "ze_lattice", "ze_sweep", "ze_pc_level_count", "ze_pc_level", "ze_pc_level_ballots",
@@ -483,6 +483,13 @@ export class Zebsdsolve {
     this.x = x;
     this.state = state;
     this._queue = Promise.resolve();
+    this._foreground = 0;
+    this._disposed = false;
+    this._indexBudget = 65536;
+    this._scanGeneration = 0;
+    this._indexTimer = null;
+    this._indexQueued = false;
+    this.chunkIndexWarmup = { state: "idle" };
     this.e = x.ze_create();
     if (!this.e) throw new Error("zebsdsolve: engine creation failed");
   }
@@ -523,6 +530,7 @@ export class Zebsdsolve {
 
   /** Temporary wasm allocations for one call, freed afterwards (each at least 8 bytes, so 8-aligned). */
   _frame(fn) {
+    if (this._disposed) throw new Error("zebsdsolve: engine disposed");
     const held = [];
     const f = {
       alloc: (n) => { const p = this.x.ze_alloc(Math.max(n, 8)); if (!p) throw new Error("zebsdsolve: out of memory"); held.push([p, Math.max(n, 8)]); return p; },
@@ -569,10 +577,85 @@ export class Zebsdsolve {
   }
 
   /** Calls are serialized: one operation on the module at a time (only cancel() may interleave). */
-  _serial(fn) {
-    const run = this._queue.then(fn, fn);
-    this._queue = run.catch(() => {});
-    return run;
+  _serial(fn, background = false, allowDisposed = false) {
+    if (!background) this._foreground++;
+    const guarded = () => { if (this._disposed && !allowDisposed) throw new Error("zebsdsolve: engine disposed"); return fn(); };
+    const run = this._queue.then(guarded, guarded);
+    const settled = background ? run : run.finally(() => { this._foreground--; });
+    this._queue = settled.catch(() => {});
+    return settled;
+  }
+
+  _invalidateIndexPreparation() {
+    this._scanGeneration++;
+    if (this._indexTimer !== null) clearTimeout(this._indexTimer);
+    this._indexTimer = null;
+    this.chunkIndexWarmup = { state: "idle" };
+    this._indexBudget = 65536;
+  }
+
+  /** Drain in-flight work before freeing the engine; also stops background preparation. */
+  dispose() {
+    if (this._disposed) return this._queue;
+    this._invalidateIndexPreparation();
+    this._disposed = true;
+    return this._serial(() => { if (this.e) { this.x.ze_destroy(this.e); this.e = 0; } }, false, true);
+  }
+
+  /** Native readiness; an allocated or partly filled lookup is never reported ready. */
+  get indexPreparation() {
+    return this._frame((f) => {
+      const p = f.alloc(48);
+      this.x.ze_chunk_index_status(this.e, p);
+      const values = Array.from(new BigUint64Array(this.mem, p, 6), Number);
+      return Object.fromEntries(["ready", "failed", "visited", "pending", "reads", "bytes"].map((key, i) => [key, values[i]]));
+    });
+  }
+
+  /** One bounded preparation batch. Foreground reads use targeted lookup meanwhile. */
+  prepareIndexStep(maxNodes = 8, maxBytes = 65536) {
+    if (![maxNodes, maxBytes].every(n => Number.isInteger(n) && n > 0 && n <= 0xffffffff)) throw new RangeError("Chunk index budgets must be positive uint32 integers");
+    return this._serial(() => this._prepareIndexStep(maxNodes, maxBytes));
+  }
+
+  async _prepareIndexStep(maxNodes, maxBytes) {
+    const rc = await this.x.ze_prepare_index_step(this.e, maxNodes, maxBytes);
+    // Successful metadata work must not consume unrelated asynchronous GPU errors.
+    if (rc < 0) this._check(rc, "prepare_index");
+    return rc === 1;
+  }
+
+  _scheduleIndexPreparation(generation = this._scanGeneration) {
+    if (generation !== this._scanGeneration || this._disposed || this._indexTimer !== null || this._indexQueued || ["ready", "failed"].includes(this.chunkIndexWarmup.state)) return;
+    this.chunkIndexWarmup = { state: "pending" };
+    this._indexTimer = setTimeout(() => {
+      this._indexTimer = null;
+      if (generation !== this._scanGeneration || this._disposed) return;
+      if (this._foreground) { this._scheduleIndexPreparation(generation); return; }
+      this._indexQueued = true;
+      this._serial(async () => {
+        if (generation !== this._scanGeneration || this._foreground) return;
+        const ready = await this._prepareIndexStep(8, this._indexBudget);
+        if (generation === this._scanGeneration) this.chunkIndexWarmup = { state: ready ? "ready" : "pending" };
+      }, true).catch((error) => {
+        if (generation !== this._scanGeneration) return;
+        // Valid nondefault fan-outs can exceed a normal batch. Grow the explicit
+        // per-turn byte cap, up to the largest version-1 node (rank <= 8).
+        if (/ChunkIndexBudgetTooSmall/.test(error.message) && this._indexBudget < 8 * 1024 * 1024) {
+          this._indexBudget *= 2;
+          this.chunkIndexWarmup = { state: "pending" };
+          return;
+        }
+        this.chunkIndexWarmup = { state: "failed", error };
+        const event = { kind: "chunkIndexError", message: error.message };
+        for (const listener of this.state.listeners) listener(event);
+      }).finally(() => {
+        this._indexQueued = false;
+        // If a new scan's preview finished while the old batch drained, resume
+        // only its requested generation, never revive the superseded scan.
+        if (this.chunkIndexWarmup.state === "pending") this._scheduleIndexPreparation(this._scanGeneration);
+      });
+    }, 10);
   }
 
   _text(call, cap = 256) {
@@ -585,7 +668,7 @@ export class Zebsdsolve {
   get adapter() { return this._text((p, cap) => this.x.ze_adapter(this.e, p, cap)); }
 
   /** Ask the running fit or indexing to stop at its next step (it keeps what it has). */
-  cancel() { this.x.ze_cancel(this.e); }
+  cancel() { if (!this._disposed) this.x.ze_cancel(this.e); }
 
   // ── settings and geometry ──
 
@@ -649,6 +732,7 @@ export class Zebsdsolve {
       const tokens = [].concat(blobs).map((b) => this.addFile(b));
       const [p, n] = f.str(tokens.join("\n"));
       this._check(await this.x.ze_open_scan(this.e, p, n), "open");
+      this._invalidateIndexPreparation();
       return this.scan;
     }));
   }
@@ -663,6 +747,7 @@ export class Zebsdsolve {
       const qp = f.alloc(16 * n), pp = f.alloc(4 * n), gp = f.alloc(4 * n);
       const geometry = this.geometry;
       this._check(await this.x.ze_synthesize(this.e, qp, pp, gp, n), "synthesize");
+      this._invalidateIndexPreparation();
       return { quaternions: new Float32Array(this.mem, qp, 4 * n).slice(), phase: new Int32Array(this.mem, pp, n).slice(), grain: new Int32Array(this.mem, gp, n).slice(), geometry };
     }));
   }
@@ -675,10 +760,13 @@ export class Zebsdsolve {
       const p = f.alloc(bytes.length);
       new Uint8Array(this.mem, p, bytes.length).set(bytes);
       this._check(await this.x.ze_set_patterns(this.e, p, bytes.length, pixel, rows, cols, h, w), "set_patterns");
+      this._invalidateIndexPreparation();
     }));
   }
 
-  closeScan() { this.x.ze_close_scan(this.e); }
+  closeScan() {
+    return this._serial(() => { this.x.ze_close_scan(this.e); this._invalidateIndexPreparation(); });
+  }
 
   /** What the scan is: { rows, cols, patH, patW, pixel, format, hasBackground, hasPc, voltageKv, bytes }. */
   get scan() {
@@ -711,16 +799,20 @@ export class Zebsdsolve {
    *  pattern but the static background subtracted from every pattern (an error when the
    *  static_background setting subtracts none). */
   pattern(cell, stage = true, full = false) {
-    return this._serial(() => this._frame(async (f) => {
-      const [h, w] = this.shape(full);
-      const p = f.alloc(h * w * 4);
-      const k = stage === "background" ? 3 : stage === "averaged" ? 2 : stage === "stored" || !stage ? 0 : 1;
-      this._check(await this.x.ze_pattern(this.e, BigInt(cell), k, full ? 1 : 0, p, h * w), "pattern");
-      const out = new Float32Array(this.mem, p, h * w).slice();
-      // what the averaging did to it, kept with it (another pattern() replaces the engine's)
-      out.nlpar = this._nlparView();
-      return out;
-    }));
+    let generation;
+    return this._serial(() => {
+      generation = this._scanGeneration;
+      return this._frame(async (f) => {
+        const [h, w] = this.shape(full);
+        const p = f.alloc(h * w * 4);
+        const k = stage === "background" ? 3 : stage === "averaged" ? 2 : stage === "stored" || !stage ? 0 : 1;
+        this._check(await this.x.ze_pattern(this.e, BigInt(cell), k, full ? 1 : 0, p, h * w), "pattern");
+        const out = new Float32Array(this.mem, p, h * w).slice();
+        // what the averaging did to it, kept with it (another pattern() replaces the engine's)
+        out.nlpar = this._nlparView();
+        return out;
+      });
+    }).then((out) => { this._scheduleIndexPreparation(generation); return out; });
   }
 
   /** What averaging with its neighbours did to the pattern last read: { noise (as stored,
@@ -750,7 +842,7 @@ export class Zebsdsolve {
   }
 
   /** Angular width of one stored detector pixel as the master filters take it, degrees. */
-  get pixelAngle() { return this.x.ze_pixel_angle(this.e); }
+  get pixelAngle() { return this._frame(() => this.x.ze_pixel_angle(this.e)); }
 
   /** Mean and standard deviation of the stored patterns of the given cells: { mean, std }. */
   patternStats(cells) {
@@ -775,7 +867,7 @@ export class Zebsdsolve {
     }));
   }
 
-  clearPhases() { this.x.ze_clear_phases(this.e); }
+  clearPhases() { this._frame(() => this.x.ze_clear_phases(this.e)); }
 
   // ── master patterns simulated (src/simulate.zig) ──
 

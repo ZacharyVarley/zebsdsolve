@@ -112,6 +112,8 @@ From a checkout, `node scripts/serve.mjs` serves `web/app` with the freshly buil
 .deps/zig-0.16.0/zig build test               # sh, rot, sym, lambert, master, scan, HDF5, NPZ, files, geometry, settings, reduce
 python tests/check_shaders.py                 # every shader kernel builds on this GPU (the compiler's message if not)
 python tests/test_api.py                      # the Python API on the GPU, against ground truth
+python tests/test_chunk_index.py              # generated chunk-lookup fixtures (development dependency: h5py)
+node tests/test_chunk_queue.mjs               # adapter queue lifecycle; no GPU
 python tests/test_app.py                      # the `zebsdsolve` launcher serves every file of the app
 node tests/test_web.mjs                       # the app in headless Chrome (WebGPU); --dir dist/web for a built site
 python scripts/run_tutorials.py out/          # examples/*.py executed as notebooks → out/*.ipynb, out/*.html
@@ -122,6 +124,8 @@ python scripts/check_formats.py FILE …        # a scan reader against kikuchip
 - **`test_api`** simulates scans with known geometry, orientations and phases and checks that indexing (at the stored size, reduced, in sweeps), the vote and the plane fit recover them (a detector turned in a way the fit is not told, and a pixel size given 30 % off, included), and that cells of pure noise are not accepted; then indexes the nickel scan against the orientations and the pattern centre kikuchipy refined for it, and checks the filters against their definitions (CLAHE against the same algorithm written out in NumPy).
 - **`test_web`** runs the example in the app from a wrong pattern centre: fit, fit, index, and the same comparison with kikuchipy; then again in two sweeps and on binned patterns, and the page's own moving parts: the tabs, the pattern indexed on the spot, the search's volume (its slices, and that they follow the pattern centre a fit moves), a toy scan made from the master and indexed against its own answer, the averaging's preview following its settings, the map's key (and that it follows the colours chosen) and zoom, a project file dropped on the window.
 - **The tutorials** end with checks against the same truths, so they fail like tests.
+
+Chunked HDF5 previews resolve the requested chunks before the complete lookup is ready. Python's `index_preparation` and `prepare_index_step(max_nodes=8, max_bytes=65536)` expose readiness and bounded preparation; serialize calls on each Solver. JavaScript has `indexPreparation` and asynchronous `prepareIndexStep()`, and warms the lookup between foreground jobs after a preview. Await `closeScan()` and `dispose()` so suspended reads finish before their scan or engine is freed. Preparation budgets limit tree metadata reads, not pattern payloads or total cache size.
 
 Changes to a fit, to the indexing or to a default should keep these passing, and should come with numbers: before and after, on the nickel scan and on a synthetic one. Report accuracy against ground truth, not only against a previous run. Several defaults here were chosen that way ([docs/how-it-works.md](docs/how-it-works.md) lists them), and some plausible ones lost.
 

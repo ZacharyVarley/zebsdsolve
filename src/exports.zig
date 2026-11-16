@@ -100,6 +100,31 @@ export fn ze_synthesize(e: *Engine, quats: [*]f32, phase: [*]i32, grain: [*]i32,
     return 0;
 }
 
+/// One bounded full chunk-index batch (0 pending, 1 complete, negative on error).
+/// Preview reads use targeted lookups until the full index is complete.
+export fn ze_prepare_index_step(e: *Engine, max_nodes: u32, max_bytes: u32) i32 {
+    return switch (e.source) {
+        .file => |s| @intFromBool(s.prepareIndexStep(max_nodes, max_bytes) catch |err| return failed(e, "prepare_index", err)),
+        else => 1,
+    };
+}
+
+/// ready, failed, visited nodes, pending nodes, file reads, file bytes.
+export fn ze_chunk_index_status(e: *Engine, out: *[6]u64) void {
+    out.* = .{ 1, 0, 0, 0, 0, 0 };
+    switch (e.source) {
+        .file => |s| {
+            out[4] = s.files[0].reads;
+            out[5] = s.files[0].bytes_read;
+            if (s.h5 != null) {
+                const ds = &s.ds;
+                out.* = .{ @intFromBool(ds.index_ready), @intFromBool(ds.index_failed), ds.warmed_nodes, ds.frontier.items.len - ds.frontier_at, s.files[0].reads, s.files[0].bytes_read };
+            }
+        },
+        else => {},
+    }
+}
+
 export fn ze_close_scan(e: *Engine) void {
     e.closeScan();
 }

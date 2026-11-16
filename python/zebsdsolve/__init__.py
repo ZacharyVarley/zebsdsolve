@@ -191,6 +191,23 @@ class Solver:
 
     # ── scan ──
 
+    @property
+    def index_preparation(self):
+        """Chunk lookup readiness and cumulative pattern-file IO counters."""
+        out = (ctypes.c_uint64 * 6)()
+        self._lib.ze_chunk_index_status(self._e, out)
+        return dict(zip(('ready', 'failed', 'visited', 'pending', 'reads', 'bytes'), map(int, out)))
+
+    def prepare_index_step(self, max_nodes=8, max_bytes=65536):
+        """Prepare one bounded chunk-lookup batch; return True only when complete.
+
+        Pattern previews work immediately using targeted lookups. Call this between
+        foreground operations; a Solver must not be used concurrently from threads.
+        """
+        if not 0 < max_nodes <= 0xffffffff or not 0 < max_bytes <= 0xffffffff:
+            raise ValueError("Chunk index budgets must be positive uint32 values")
+        return bool(self._check(self._lib.ze_prepare_index_step(self._e, max_nodes, max_bytes), "prepare_index"))
+
     def open(self, *paths):
         """Open a scan file, and any side files it needs after it. NORDIF's Pattern.dat needs its
         Setting.txt, which is picked up from beside it when not given."""
