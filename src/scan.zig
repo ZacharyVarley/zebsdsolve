@@ -74,6 +74,8 @@ pub const Scan = struct {
     background: []f32 = &.{},
     /// Optional quality map in the acquisition Data group; discovery reads metadata only.
     overview_addr: ?u64 = null,
+    /// Owned scalar values from a non-HDF5 companion, in verified pattern order.
+    overview_values: []f32 = &.{},
     overview_kind: OverviewKind = .none,
     why: []const u8 = "",
 
@@ -96,6 +98,10 @@ pub const Scan = struct {
     pub fn readStoredOverview(self: *Scan, out: []f32) !void {
         const n: usize = @intCast(self.count());
         if (out.len != n) return error.BadLength;
+        if (self.overview_values.len != 0) {
+            @memcpy(out, self.overview_values);
+            return;
+        }
         const address = self.overview_addr orelse return error.NoStoredOverview;
         const values = try self.gpa.alloc(f64, n);
         defer self.gpa.free(values);
@@ -177,6 +183,7 @@ pub const Scan = struct {
             self.ds.deinit(gpa);
             gpa.free(self.offsets);
             gpa.free(self.background);
+            gpa.free(self.overview_values);
         }
         const f = &self.files[0];
         var head: [8]u8 = @splat(0);
@@ -185,7 +192,7 @@ pub const Scan = struct {
         if (std.mem.eql(u8, &head, "\x89HDF\r\n\x1a\n")) {
             try self.openHdf5(hints);
         } else if (eqlIgnoreCase(ext, "up1") or eqlIgnoreCase(ext, "up2")) {
-            try self.openUp(eqlIgnoreCase(ext, "up2"), hints);
+            try self.openUp(eqlIgnoreCase(ext, "up2"), paths, hints);
         } else if (eqlIgnoreCase(ext, "ebsp")) {
             try self.openEbsp(hints);
         } else if (eqlIgnoreCase(ext, "dat")) {
@@ -203,6 +210,7 @@ pub const Scan = struct {
         self.ds.deinit(gpa);
         gpa.free(self.offsets);
         gpa.free(self.background);
+        gpa.free(self.overview_values);
         for (self.files) |*f| f.close();
         gpa.free(self.files);
         gpa.destroy(self);
@@ -545,7 +553,14 @@ pub const Scan = struct {
 
     // ── EDAX .up1 / .up2 ──
 
-    fn openUp(self: *Scan, is16: bool, hints: Hints) !void {
+    fn openUp(self: *Scan, is16: bool, paths: []const []const u8, hints: Hints) !void {
+        var sidecar: ?usize = null;
+        for (paths[1..], 1..) |path, k| {
+            if (eqlIgnoreCase(extension(path), "ang")) {
+                if (sidecar != null) return error.DuplicateANGSidecar;
+                sidecar = k;
+            }
+        }
         const f = &self.files[0];
         if (f.size < 16) return error.BadScanFile;
         const version = try f.int(u32, 0);
@@ -563,17 +578,46 @@ pub const Scan = struct {
         if ((f.size - off) % pb != 0) return error.UPIncompletePattern;
         const n = (f.size - off) / pb;
         if (n == 0 or n > std.math.maxInt(u32)) return error.ScanShapeMismatch;
+        var nx: u32 = 0;
+        var ny: u32 = 0;
+        var dx: f64 = std.math.nan(f64);
+        var dy = dx;
+        var hex: u8 = 0;
+        var extra: u8 = 0;
         if (version >= 3) {
             if (off < 42) return error.BadScanFile;
             // Packed v3+ header: extra-pattern flag, dimensions, hex flag, steps.
-            const nx = try f.int(u32, 17);
-            const ny = try f.int(u32, 21);
-            if (try f.int(u8, 25) == 0 and @as(u64, nx) * ny == n) {
+            extra = try f.int(u8, 16);
+            nx = try f.int(u32, 17);
+            ny = try f.int(u32, 21);
+            hex = try f.int(u8, 25);
+            dx = @bitCast(try f.int(u64, 26));
+            dy = @bitCast(try f.int(u64, 34));
+            if (hex == 0 and @as(u64, nx) * ny == n) {
                 info.cols = nx;
                 info.rows = ny;
-                info.step_x_um = @bitCast(try f.int(u64, 26));
-                info.step_y_um = @bitCast(try f.int(u64, 34));
+                info.step_x_um = dx;
+                info.step_y_um = dy;
             }
+        }
+        if (sidecar) |k| {
+            if (hex != 0) return error.UnsupportedUPHexGrid;
+            if (version >= 3) {
+                if (nx == 0 or ny == 0 or @as(u64, nx) * ny != n) return if (extra != 0) error.AmbiguousUPExtraPatterns else error.UPPatternCountMismatch;
+                if (!validStep(dx) or !validStep(dy)) return error.InvalidUPStep;
+            }
+            const ang = try @import("ang.zig").load(self.gpa, &self.files[k], n, if (version >= 3) .{ dx, dy } else null);
+            errdefer self.gpa.free(ang.iq);
+            if (version >= 3 and (nx != ang.cols or ny != ang.rows)) return error.ScanShapeMismatch;
+            if (version >= 3 and (!sameStep(dx, ang.step_x_um) or !sameStep(dy, ang.step_y_um))) return error.UPANGStepMismatch;
+            if ((hints.rows != 0 and hints.rows != ang.rows) or (hints.cols != 0 and hints.cols != ang.cols)) return error.ScanShapeMismatch;
+            info.rows = ang.rows;
+            info.cols = ang.cols;
+            info.step_x_um = ang.step_x_um;
+            info.step_y_um = ang.step_y_um;
+            self.overview_values = ang.iq;
+            self.overview_kind = .image_quality;
+            return;
         }
         if (hints.rows != 0 and hints.cols != 0) {
             info.rows = hints.rows;
@@ -729,6 +773,14 @@ pub const Scan = struct {
         if (self.count() * self.patternBytes() > self.files[0].size) return error.ScanShapeMismatch;
     }
 };
+
+fn validStep(x: f64) bool {
+    return std.math.isFinite(x) and x > 0;
+}
+
+fn sameStep(a: f64, b: f64) bool {
+    return @abs(a - b) <= @max(@max(a, b) * 1e-6, @min(5e-6, @min(a, b) * 0.01));
+}
 
 fn splitX(val: []const u8) ?[2]u32 {
     const x = std.mem.indexOfScalar(u8, val, 'x') orelse return null;
