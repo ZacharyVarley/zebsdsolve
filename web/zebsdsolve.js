@@ -387,10 +387,10 @@ function ioImports(state) {
 // Exports that never wait (plain calls); every other function export may suspend (on the GPU
 // or on a file read) and is called through WebAssembly.promising.
 const SYNC_EXPORTS = new Set(["ze_alloc", "ze_free", "ze_version", "ze_create", "ze_destroy", "ze_adapter", "ze_error",
-  "ze_configure", "ze_settings", "ze_events", "ze_cancel", "ze_close_scan", "ze_scan_info", "ze_scan_format", "ze_chunk_index_status",
+  "ze_configure", "ze_settings", "ze_events", "ze_cancel", "ze_close_scan", "ze_scan_info", "ze_scan_format",
   "ze_get_geometry", "ze_set_geometry", "ze_clear_phases", "ze_phase_count", "ze_phase_info", "ze_pattern_shape", "ze_nlpar_view",
   "ze_pc_scores", "ze_fit_patterns", "ze_results", "ze_map", "ze_ipf_key", "ze_export", "ze_reduce", "ze_disorientation", "ze_shader",
-  "ze_index_status", "ze_tune_begin", "ze_tune_report", "ze_pixel_angle", "ze_lattice", "ze_sweep", "ze_pc_level_count", "ze_pc_level", "ze_pc_level_ballots",
+  "ze_chunk_index_status", "ze_index_status", "ze_tune_begin", "ze_tune_report", "ze_pixel_angle", "ze_lattice", "ze_sweep", "ze_pc_level_count", "ze_pc_level", "ze_pc_level_ballots",
   "ze_gpu_counts", "ze_profile", "ze_profile_report", "ze_compile_wgsl", "ze_plane_points",
   "ze_sim_read_cif", "ze_sim_set_crystal", "ze_sim_edit_crystal", "ze_sim_crystal", "ze_sim_sheets", "ze_sim_add_phase", "ze_sim_npz",
   "ze_cell_info", "ze_sim_energy"]);
