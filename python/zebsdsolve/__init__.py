@@ -215,7 +215,9 @@ class Solver:
 
     def open(self, *paths):
         """Open a scan file, and any side files it needs after it. NORDIF's Pattern.dat needs its
-        Setting.txt, which is picked up from beside it when not given."""
+        Setting.txt, which is picked up from beside it when not given; an EDAX .up1 / .up2 can take
+        its scan's .ang (the map's shape, the steps, image quality and the pattern centre). The
+        region of interest goes back to the whole map."""
         paths = [str(p) for p in paths]
         if len(paths) == 1 and paths[0].lower().endswith(".dat"):
             side = os.path.join(os.path.dirname(paths[0]), "Setting.txt")

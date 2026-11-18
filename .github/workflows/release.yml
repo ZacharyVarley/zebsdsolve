@@ -139,8 +139,8 @@ jobs:
         shell: bash
         run: |
           "$PY" -m pip install --quiet h5py
-          cp tests/test_up_header.py tests/test_stored_overview.py tests/test_chunk_tree.py "$RUNNER_TEMP/" && cd "$RUNNER_TEMP"
-          "$PY" test_up_header.py && "$PY" test_stored_overview.py && "$PY" test_chunk_tree.py
+          cp tests/test_up_header.py tests/test_up_ang.py tests/test_stored_overview.py tests/test_chunk_tree.py "$RUNNER_TEMP/" && cd "$RUNNER_TEMP"
+          "$PY" test_up_header.py && "$PY" test_up_ang.py && "$PY" test_stored_overview.py && "$PY" test_chunk_tree.py
 
       - name: Web app in headless Chrome (WebGPU), recording the pipelines it compiles
         if: matrix.os == 'macos-15'

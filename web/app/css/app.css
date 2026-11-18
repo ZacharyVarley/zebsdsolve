@@ -188,6 +188,7 @@ input.slide:disabled { visibility: hidden; }
 .facts.tall { gap: 2px 12px; }
 .facts.tall dd { white-space: normal; overflow-wrap: anywhere; }
 .panel > .facts { padding: 6px 8px; background: var(--field); border: 1px solid var(--line-soft); border-radius: var(--rad-s); }
+.facts dd button { font-family: var(--font); }
 
 /* what a run made, and what to do with it */
 .result { display: flex; flex-direction: column; gap: 7px; padding: 8px; background: var(--card); border: 1px solid var(--line); border-left: 2px solid var(--good); border-radius: var(--rad-s); }
@@ -506,11 +507,3 @@ label.check[data-off="1"] { opacity: .4; }
 .panel h4[title] { cursor: help; }
 
 #overview-source { width: auto; height: 22px; padding: 0 22px 0 6px; font-size: 11.5px; }
-
-.up-scan-dialog { margin: auto; padding: 20px; max-width: min(90vw, 520px); background: var(--panel); color: var(--text); border: 1px solid var(--line); border-radius: var(--rad); }
-.up-scan-dialog::backdrop { background: rgba(0, 0, 0, .65); }
-.up-scan-dialog h2 { font-size: 15px; overflow-wrap: anywhere; margin-bottom: 8px; }
-.up-scan-dialog p { margin-bottom: 16px; }
-.up-scan-dialog .up-scan-error:not(:empty) { color: var(--bad); margin-bottom: 12px; }
-.up-scan-dialog div:last-child { display: flex; flex-wrap: wrap; gap: 8px; }
-.up-scan-dialog button { padding: 6px 10px; }

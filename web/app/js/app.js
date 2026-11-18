@@ -8,7 +8,6 @@ import { createPlaneView } from "./planeview.js";
 import { MasterView, PROJECTIONS } from "./masterview.js";
 import { CellView } from "./cellview.js";
 import { drawEnergy } from "./energy.js";
-import { createUpScanPrompt } from "./up-scan-files.js";
 
 const $ = (id) => document.getElementById(id);
 const app = $("app");
@@ -439,13 +438,16 @@ async function openScan(files, roi) {
   return busy(`opening ${files[0].name}…`, async () => {
     invalidateOverview();
     await st.ze.openScan(files);
+    st.scanFiles = files;
     st.scanName = files[0].name;
     afterOpen(roi);
   });
 }
 
-function afterOpen(roi = FULL_ROI) {
-  st.ze.configure(roi);
+/** A scan is open: everything drawn from the last one goes. `roi`: a project's region of interest
+ *  for it (the engine opens a scan on the whole map). */
+function afterOpen(roi = null) {
+  if (roi) st.ze.configure(roi);
   invalidateOverview();
   ++st.showRun;
   const s = st.ze.scan;
@@ -487,6 +489,25 @@ function afterOpen(roi = FULL_ROI) {
   ];
   if (s.voltageKv) facts.push(["voltage", `${s.voltageKv} kV`]);
   $("scan-facts").replaceChildren(...factRows(facts));
+  // an EDAX .up1 / .up2 can take its scan's .ang (OIM's export of the same map)
+  if (/up1\/up2/.test(s.format)) {
+    const ang = (st.scanFiles || []).find((f) => /\.ang$/i.test(f.name));
+    const dt = document.createElement("dt");
+    dt.textContent = "ANG";
+    const dd = document.createElement("dd");
+    if (ang) dd.textContent = ang.name;
+    else {
+      const b = document.createElement("button");
+      b.type = "button";
+      b.className = "mini";
+      b.id = "btn-add-ang";
+      b.textContent = "add .ang…";
+      b.title = "The scan's .ang (OIM's export of the same map): the map's shape, the steps, image quality and the pattern centre. Or open the two files together.";
+      b.addEventListener("click", () => $("file-ang").click());
+      dd.append(b);
+    }
+    $("scan-facts").append(dt, dd);
+  }
   st.settings = st.ze.settings;
   fields.show(st.settings);
   showResolution();
@@ -1707,15 +1728,12 @@ async function runIndex() {
       const now = performance.now();
       const dt = (now - t0) / 1000;
       if (s.sweep !== before.sweep) sweepStart = now;
-      if (!st.stop) {
-        if (s.left > 0 && s.done > 0) {
-          const eta = remainingTime((now - sweepStart) / 1000 * s.left / s.done);
-          status(`indexing… · ~${eta} left${s.sweeps > 1 ? " this sweep" : ""}`);
-        } else status("indexing…");
-      }
+      const eta = s.left > 0 && s.done > 0 ? remainingTime(((now - sweepStart) / 1000) * s.left / s.done) : "";
+      if (!st.stop) status(eta ? `indexing… · ~${eta} left${s.sweeps > 1 ? " this sweep" : ""}` : "indexing…");
       progress(s.done / Math.max(s.total, 1));
       showKv($("index-readout"), [...(s.sweeps > 1 ? [["sweep", `${s.sweep + 1} / ${s.sweeps} · ${sweepLabel(s)}`, "wide"]] : []),
         ["indexed", `${s.done.toLocaleString()} / ${s.total.toLocaleString()}`], ["rate", `${Math.round(visited / Math.max(dt, 1e-6)).toLocaleString()}/s`],
+        ...(eta ? [["left", `~${eta}${s.sweeps > 1 ? " this sweep" : ""}`, "wide"]] : []),
         ["accepted", `${s.accepted.toLocaleString()} / ${s.region.toLocaleString()} (${acceptText()})`, "wide"]]);
       if (performance.now() - last > 250 || s.left === 0) { st.results = st.ze.results(); drawMap(); last = performance.now(); await sleep(0); }
       if (s.left === 0 || st.stop) break;
@@ -1910,23 +1928,7 @@ function isMaster(f) {
 /** Files picked or dropped: a project (.json, as the Index step saves one), a scan with its
  *  side files, master patterns. The project's settings go in before the scan opens (they may
  *  say how to read it) and its geometry after (over what the scan's file gives). */
-const upScanPrompt = createUpScanPrompt((file) => {
-  const message = `${file.name}: choose an ANG file`;
-  status(message, true);
-  log(message, true);
-  return message;
-});
-let fileRequest = 0;
 async function takeFiles(files) {
-  const request = ++fileRequest;
-  upScanPrompt.retire();
-  const up = files.find((f) => /\.up[12]$/i.test(f.name));
-  if (up && !files.some((f) => /\.ang$/i.test(f.name))) {
-    if (st.busy) return;
-    const companion = await upScanPrompt.choose(up);
-    if (request !== fileRequest || companion === null) return;
-    files = [up, ...files.filter((f) => f !== up), ...companion];
-  }
   const cifs = files.filter((f) => /\.cif$/i.test(f.name));
   if (cifs.length) {
     loadCif(await cifs[0].text(), cifs[0].name);
@@ -2165,6 +2167,13 @@ function updateWiring() {
   wireSplits();
   $("btn-open").addEventListener("click", () => $("file-scan").click());
   $("file-scan").addEventListener("change", (e) => { const f = [...e.target.files]; e.target.value = ""; takeFiles(f); });
+  // a UP scan's .ang, after the scan: the two open again together
+  $("file-ang").addEventListener("change", (e) => {
+    const ang = e.target.files[0];
+    e.target.value = "";
+    const up = (st.scanFiles || []).find((f) => /\.up[12]$/i.test(f.name));
+    if (ang && up) openScan([up, ang]);
+  });
   $("btn-example").addEventListener("click", loadExample);
   $("btn-toy").addEventListener("click", makeToy);
   $("bin-choices").addEventListener("change", (e) => applySetting("binning", +e.target.value));

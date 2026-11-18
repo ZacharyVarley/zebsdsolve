@@ -773,6 +773,7 @@ pub const Engine = struct {
         };
         self.closeScan();
         self.source = .{ .file = s };
+        self.wholeMap();
         try self.adoptInfo(s.info);
         self.events.log("opened {s}: {d} × {d} patterns of {d} × {d}", .{ s.formatName(), s.info.rows, s.info.cols, s.info.pat_h, s.info.pat_w });
         if (s.info.pc_note.len != 0) self.events.log("{s}", .{s.info.pc_note});
@@ -790,9 +791,19 @@ pub const Engine = struct {
         const copy = try self.gpa.dupe(u8, data);
         self.closeScan();
         self.source = .{ .memory = .{ .data = copy, .info = .{ .rows = rows, .cols = cols, .pat_h = h, .pat_w = w, .pixel = pixel } } };
+        self.wholeMap();
         try self.res.resize(self.gpa, @as(usize, rows) * cols);
         // (patterns from memory come with no geometry: a pixel size set by hand stays)
         if (!(self.geo.px_um > 0)) self.geo.px_um = self.defaultPx();
+    }
+
+    /// A new scan (or new patterns) starts at the whole map: a region drawn on another scan
+    /// says nothing of this one, and would silently keep the fits and indexing to it.
+    fn wholeMap(self: *Engine) void {
+        self.set.roi_x = 0;
+        self.set.roi_y = 0;
+        self.set.roi_w = 0;
+        self.set.roi_h = 0;
     }
 
     fn adoptInfo(self: *Engine, si: scan_mod.Info) !void {

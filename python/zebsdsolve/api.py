@@ -49,6 +49,8 @@ class Result:
 
 def _open(solver, scan, phases, kwargs):
     geo = {k: kwargs.pop(k) for k in list(kwargs) if k in GEOMETRY_FIELDS}
+    # (a scan opens on the whole map: the region of interest goes in after it)
+    roi = {k: kwargs.pop(k) for k in list(kwargs) if k in ("roi_x", "roi_y", "roi_w", "roi_h")}
     # options that decide how a file is read must be set before it is opened
     solver.configure(**kwargs)
     if isinstance(scan, (str, Path)):
@@ -57,6 +59,8 @@ def _open(solver, scan, phases, kwargs):
         solver.open(*scan)
     else:
         solver.set_patterns(scan)
+    if roi:
+        solver.configure(**roi)
     if geo:
         solver.set_geometry(**geo)
     for p in [phases] if isinstance(phases, (str, Path)) else phases:

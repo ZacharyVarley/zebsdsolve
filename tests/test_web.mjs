@@ -789,7 +789,7 @@ try {
   check("the crystal's cell is drawn and named, with its electrons' energy and depth", sim.cell.drawn && /Ga/.test(sim.cell.legend) && /N/.test(sim.cell.legend) && sim.cell.labels === "abc" && /mean depth/.test(sim.cell.energy) && sim.cell.bars > 0,
     `legend ${sim.cell.legend}; ${sim.cell.energy}`);
 
-  // Pair UP and ANG files in one selection or through the companion prompt.
+  // UP and ANG files: selected together, or the ANG added from the scan facts after the UP opened alone
   const upGuide = await evaluate(`
     const wait = (ms) => new Promise((r) => setTimeout(r, ms));
     const live = document.getElementById("pat-live");
@@ -810,40 +810,32 @@ try {
       input.dispatchEvent(new Event("change"));
     };
     const scanInput = document.getElementById("file-scan");
-    const before = JSON.stringify(window.ze.scan);
+    const idle = () => document.getElementById("app").dataset.busy !== "1";
+    // a UP file alone opens by itself, and its scan facts offer its ANG
     select(scanInput, up);
-    let dialog = document.querySelector(".up-scan-dialog");
-    const prompted = !!dialog?.open && dialog.textContent.includes("guided.up1") && dialog.textContent.includes("Optional.");
-    [...dialog.querySelectorAll("button")].find((b) => b.textContent === "Cancel").click();
-    await wait(100);
-    const canceled = JSON.stringify(window.ze.scan) === before;
-    select(scanInput, up);
-    dialog = document.querySelector(".up-scan-dialog");
-    select(dialog.querySelector('input[accept=".ang"]'), ang);
-    for (let i = 0; i < 300 && window.ze.scan?.rows !== 2; i++) await wait(100);
+    for (let i = 0; i < 300 && !(window.ze.scan?.rows === 1 && idle()); i++) await wait(100);
+    const raw = window.ze.scan;
+    const offered = !!document.getElementById("btn-add-ang") && !document.querySelector("dialog");
+    select(document.getElementById("file-ang"), ang);
+    for (let i = 0; i < 300 && !(window.ze.scan?.rows === 2 && idle()); i++) await wait(100);
     const paired = { scan: window.ze.scan, overview: await window.ze.storedOverview() };
     const filePc = paired.scan.hasPc && window.ze.geometry.pc.every((v, i) => Math.abs(v - [.43, .73, .61 * 128 / 156][i]) < 1e-12);
-    select(scanInput, up);
-    dialog = document.querySelector(".up-scan-dialog");
-    [...dialog.querySelectorAll("button")].find((b) => b.textContent === "Open without ANG").click();
-    for (let i = 0; i < 300 && window.ze.scan?.rows !== 1; i++) await wait(100);
-    const raw = window.ze.scan;
+    const named = document.getElementById("scan-facts").textContent.includes("guided.ang") && !document.getElementById("btn-add-ang");
 
     const wide = new Uint8Array(16 + 2 * (bytes.length - 16));
     wide.set(bytes.subarray(0, 16));
     const up2 = new File([wide], "together.up2");
     select(scanInput, ang, up2);
-    const directPrompt = !!document.querySelector(".up-scan-dialog");
-    for (let i = 0; i < 300 && window.ze.scan?.rows !== 2 && !directPrompt; i++) await wait(100);
+    for (let i = 0; i < 300 && !(window.ze.scan?.dtype === "uint16" && idle()); i++) await wait(100);
     const direct = { scan: window.ze.scan, overview: await window.ze.storedOverview() };
     const summary = ({ scan, overview }) => ({
       rows: scan.rows, cols: scan.cols, dtype: scan.dtype, values: Array.from(overview?.values || []),
     });
-    return { prompted, canceled, filePc, paired: summary(paired), raw, directPrompt, direct: summary(direct) };
+    return { offered, filePc, named, paired: summary(paired), raw, direct: summary(direct) };
   `);
-  check("UP selection offers ANG, cancellation and opening without it", upGuide.prompted && upGuide.canceled && upGuide.filePc && upGuide.paired.rows === 2 && upGuide.paired.cols === 3 && upGuide.paired.values.join() === "0,1,2,3,4,5" && upGuide.raw.rows === 1 && upGuide.raw.cols === 6, JSON.stringify(upGuide));
-
-  check("selecting UP2 and ANG together opens the pair without a prompt", !upGuide.directPrompt && upGuide.direct.rows === 2
+  check("a UP file opened alone takes its ANG from the scan facts", upGuide.offered && upGuide.raw.rows === 1 && upGuide.raw.cols === 6 && upGuide.filePc && upGuide.named
+    && upGuide.paired.rows === 2 && upGuide.paired.cols === 3 && upGuide.paired.values.join() === "0,1,2,3,4,5", JSON.stringify(upGuide));
+  check("selecting UP2 and ANG together opens the pair", upGuide.direct.rows === 2
     && upGuide.direct.cols === 3 && upGuide.direct.dtype === "uint16" && upGuide.direct.values.join() === "0,1,2,3,4,5", JSON.stringify(upGuide.direct));
 
   const errs = await evaluate(`return [...document.querySelectorAll("#log .err")].map((e) => e.textContent).slice(0, 5);`);

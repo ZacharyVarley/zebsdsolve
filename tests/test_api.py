@@ -979,6 +979,13 @@ def main():
           f"the vote's poses against the search's: at least {vote:.4f}; the plane fit's against the patterns: at least {plane:.4f}")
     s.close()
 
+    # a region of interest belongs to its scan: the next one opens on the whole map
+    with ze.Solver() as s2:
+        s2.configure(roi_x=3, roi_y=2, roi_w=5, roi_h=4)
+        s2.open(SCAN)
+        roi = [s2.settings[k] for k in ("roi_x", "roi_y", "roi_w", "roi_h")]
+    check("a scan opens on the whole map", roi == [0, 0, 0, 0], f"region after opening: {roi}")
+
     # ── the plain functions ──
     res = ze.index(SCAN, [NI], roi_x=0, roi_y=0, roi_w=30, roi_h=10, batch=128)
     check("ze.index returns a Result", res.quaternions.shape == (55, 75, 4) and int((res.phase >= 0).sum()) == 300 and res.z.shape == (55, 75) and res.phases[0]["name"] == "Ni_master_20kV")
