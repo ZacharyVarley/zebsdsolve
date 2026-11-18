@@ -439,6 +439,22 @@ export fn ze_pattern_stats(e: *Engine, cells: [*]const u64, n: usize, out: [*]f3
     return 0;
 }
 
+/// Stored scalar quality kind: 0 absent, 1 BC, 2 IQ, 3 Radon quality, 4 pattern quality.
+export fn ze_scan_overview_kind(e: *Engine) u32 {
+    return @intFromEnum(e.storedOverviewKind());
+}
+
+/// Query the stored scalar map size without reading values; fill returns the
+/// same count. No pattern pixels are read and no quality map means zero.
+export fn ze_scan_overview(e: *Engine, out: ?[*]f32, cap: usize) i64 {
+    const n = e.storedOverviewCount();
+    if (out) |p| {
+        if (cap < n) return failed(e, "scan_overview", error.BufferTooSmall);
+        if (n != 0) e.readStoredOverview(p[0..n]) catch |err| return failed(e, "scan_overview", err);
+    }
+    return @intCast(n);
+}
+
 /// Simulated patterns of a phase: n cells with n orientations (4 f32 each: w, x, y, z), at the
 /// reduced size or (`full`) the stored one.
 export fn ze_simulate(e: *Engine, phase: u32, cells: [*]const u64, quats: [*]const f32, n: usize, full: u32, out: [*]f32, len: usize) i32 {

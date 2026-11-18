@@ -471,3 +471,6 @@ label.check[data-off="1"] { opacity: .4; }
 .fields.pstep .field.wide { grid-column: 1 / -1; }
 .panel .pstep + .pstep { margin-top: -2px; }
 .panel h4[title] { cursor: help; }
+
+.overview-bar { flex-wrap: wrap; padding-top: 4px; padding-bottom: 4px; }
+#overview-source { width: auto; min-width: 155px; height: 24px; }

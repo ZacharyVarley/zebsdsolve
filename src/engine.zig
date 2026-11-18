@@ -2485,6 +2485,27 @@ pub const Engine = struct {
         }
     }
 
+    pub fn storedOverviewKind(self: *const Engine) scan_mod.OverviewKind {
+        return switch (self.source) {
+            .file => |s| s.overview_kind,
+            else => .none,
+        };
+    }
+
+    pub fn storedOverviewCount(self: *const Engine) usize {
+        return switch (self.source) {
+            .file => |s| if (s.overview_kind != .none) @intCast(s.count()) else 0,
+            else => 0,
+        };
+    }
+
+    pub fn readStoredOverview(self: *Engine, out: []f32) !void {
+        switch (self.source) {
+            .file => |s| try s.readStoredOverview(out),
+            else => return error.NoStoredOverview,
+        }
+    }
+
     /// Simulated patterns of a phase at the given orientations, each as cell `cells[k]` would
     /// record it at a level, from the master as filtered for that level.
     pub fn simulate(self: *Engine, phase: u32, cells: []const u64, quats: []const f32, lv: Level, out: []f32) !void {

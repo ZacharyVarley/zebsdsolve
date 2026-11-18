@@ -108,6 +108,8 @@ _SIGS = {
     "ze_synthesize": ([P, f32p, ctypes.POINTER(ctypes.c_int32), ctypes.POINTER(ctypes.c_int32), SZ], I32),
     "ze_close_scan": ([P], None),
     "ze_scan_info": ([P, ctypes.POINTER(ScanInfo)], None),
+    "ze_scan_overview_kind": ([P], U32),
+    "ze_scan_overview": ([P, f32p, SZ], I64),
     "ze_scan_format": ([P, ctypes.c_char_p, SZ], SZ),
     "ze_get_geometry": ([P, ctypes.POINTER(Geometry)], None),
     "ze_set_geometry": ([P, ctypes.POINTER(Geometry)], None),
