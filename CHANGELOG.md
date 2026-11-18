@@ -6,13 +6,50 @@ notes.
 
 ## Unreleased
 
+## 0.2.2 — 2026-11-18
+
 ### Added
 
+- **Auto fit geometry** takes the simplest model of how the source moves over the scan that the
+  map supports: one pattern centre, a tilt line (PCx the same everywhere, PCy and PCz along the
+  rows) or the plane, compared by their error on 6 × 6 blocks of the map left out of the fit,
+  the simplest within one standard error of the best. On the nickel example the whole map takes
+  the plane and a strip six columns wide the tilt line. `fit_geometry()` reports the model and
+  each one's error (`model`, `models`).
+- The plane can be fitted to all the fit patterns at once, each pattern's orientation
+  following, instead of through each pattern's own source point (`plane_method` `joint`; the
+  per-pattern fit stays the default: on simulated scans the two are equally accurate, and the
+  joint fit's points lean the comparison of models toward the full plane).
+- An EDAX `.up1` / `.up2` can be opened with its scan's `.ang`, which gives the map's shape, the
+  steps, the image quality map and the pattern centre: select or drop the two together, add the
+  `.ang` from the scan facts after the `.up1` / `.up2`, or `Solver.open("scan.up1", "scan.ang")`.
+  The `.ang` must match the patterns cell for cell (#8, by
+  [Tijmenvermeij](https://github.com/Tijmenvermeij)).
 - The map shows the quality the scan file stores for each pattern (Oxford's band contrast,
   EDAX's image quality, Bruker's Radon quality) the moment the file opens, read without reading
   a pattern; a file that stores none shows the patterns' contrast as before, and
-  **Calculate pattern contrast** gives it for any file. `Solver.stored_overview()` in Python
+  **calculate contrast** gives it for any file. `Solver.stored_overview()` in Python
   (#5, by [Tijmenvermeij](https://github.com/Tijmenvermeij)).
+- Indexing says how long it has left (#9, by [Tijmenvermeij](https://github.com/Tijmenvermeij)).
+- A cell can be indexed and simulated under another geometry than the one in use, which stays
+  as it is: `Solver.cell_under(cell, pc=…)` in Python, `cellUnder` in JavaScript.
+
+### App
+
+- The settings are short names beside their values, two to a row, under plain section names,
+  with what is rarely changed folded under **Advanced**; a fit's or indexing's results are a
+  small table of names and values.
+- Geometry: the pattern centre the file gave, the one in use (typed in to set it) and their
+  difference in one table; the search's range, slices and tiers first. The dock shows the
+  selected pattern beside its simulations under the two centres in turn, each with its own
+  refined orientation, and the search's tiers as a volume and as every slice along one axis.
+  The plane's view shows each coordinate's trend along the rows and the columns, or the three
+  as one colour over the map (x and y as hue, z as lightness) for the fit, the patterns' own
+  values and their difference.
+- The map's IPF colours are chosen beside it once a map is indexed (the axis, and the key), with
+  a key to show or hide; the key is Nolze and Hielscher's by default.
+- The dock follows the step: the search and the plane on Geometry, the master on Data and
+  Patterns, the matches above chance on Index.
 
 ### Changed
 
@@ -22,9 +59,18 @@ notes.
   first pattern reads 40 KB in 9 reads instead of 16 MB in 5,384, which over a network share or
   from a server is the difference between at once and a wait. Found by
   [Tijmenvermeij](https://github.com/Tijmenvermeij) (#6).
+- `ipf_colors` defaults to `perfect` (Nolze and Hielscher's key) instead of `classic`.
 
 ### Fixed
 
+- EDAX's pattern centre, read from an EDAX h5ebsd file and written to `.ang`, scaled y and z by
+  the pattern's width; EDAX measures y in fractions of its height and z of its smaller side.
+  Square patterns were unaffected; on rectangular ones the pattern centre was wrong. An `.ang`
+  written by 0.2.1 or earlier is read as it was written (found through #8).
+- A region of interest drawn on one scan stayed in force on the next, which could quietly limit
+  its fits and indexing; a scan now opens on the whole map, in Python as in the app, and a
+  project opened with its scan keeps its own region (#9, by
+  [Tijmenvermeij](https://github.com/Tijmenvermeij)).
 - EDAX `.up1` / `.up2` files of version 3 and later had their map size and steps read one byte
   early, so a rectangular scan could open as one row with wrong steps; a file that ends partway
   through a pattern, or whose header is cut short, is refused (#7, by

@@ -45,7 +45,7 @@ class UpAng(unittest.TestCase):
         for version, bits, producer_header, expected_pc in (
             (1, 8, ["# HEADER: Start", "# VERSION 7"], [.43, .73, .61]),
             (3, 16, ["# SOFTWARE: zebsdsolve 0.2.1"], [.43, .6625, .7625]),
-            (1, 16, ["# SOFTWARE: zebsdsolve 0.3.0 (EDAX pattern centre)"], [.43, .73, .61]),
+            (1, 16, ["# SOFTWARE: zebsdsolve 0.2.2 (EDAX pattern centre)"], [.43, .73, .61]),
         ):
             with self.subTest(version=version, bits=bits):
                 up, patterns = self.up(version, bits)

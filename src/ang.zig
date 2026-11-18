@@ -105,7 +105,7 @@ const PcHeader = struct {
             const producer = words.next() orelse return;
             if (eq(producer, "EDAX") or eq(producer, "OIM")) self.edax_producer = true;
             if (eq(producer, "EMSphInx")) self.width_producer = true;
-            // (zebsdsolve names EDAX's convention after its version from 0.3; before, it scaled by the width)
+            // (zebsdsolve names EDAX's convention after its version from 0.2.2; before, it scaled by the width)
             if (eq(producer, "zebsdsolve")) {
                 if (std.mem.indexOf(u8, value, "EDAX") != null) self.edax_producer = true else self.width_producer = true;
             }
