@@ -1,17 +1,14 @@
-// The pattern-centre search, laid open. Every grid it scored is a small volume of votes over
+// The pattern-centre search, laid open. Every tier it scored is a small volume of votes over
 // (x, y, z). The view shows the volume whole, as a cloud to turn about (each candidate a
-// glow as bright as its vote, the grids the search went through nested in it, and the way it
-// went), and cuts it three ways through the cross-hair, or lays every slice along one axis
-// side by side, with what led the search (each grid's winner and the next grid's extent) and
-// what the fit patterns each preferred on their own. The cross-hair starts on the pattern centre and returns to it whenever the pattern
-// centre changes (a fit, a typed value), so the cuts always go through the geometry in use
-// until the cross-hair is moved by hand.
+// glow as bright as its vote, the tiers the search went through nested in it, and the way it
+// went), and lays every slice along one axis side by side under it, with what led the search
+// (each tier's winner and the next tier's extent) and what the fit patterns each preferred on
+// their own. The cross-hair starts on the pattern centre and returns to it whenever the
+// pattern centre changes (a fit, a typed value), until it is moved by hand.
 import { fit, svg, viridis } from "./draw.js";
 
 const $ = (id) => document.getElementById(id);
 const NAMES = ["x", "y", "z"];
-// the three planes: [canvas id, horizontal axis, vertical axis, the axis held fixed]
-const PLANES = [["votes", 0, 1, 2], ["votes-xz", 0, 2, 1], ["votes-yz", 1, 2, 0]];
 // the volume turned about: the angles it starts at, and how far away the eye is (in half-widths)
 const TURN = { yaw: -0.62, pitch: 0.42 };
 const EYE = 5;
@@ -31,7 +28,7 @@ const beyond = (v, a) => {
 };
 
 export function createVotes({ geometry, setPc }) {
-  const view = { levels: null, level: 0, at: [0, 0, 0], start: null, file: null, mode: "planes", what: "ballots", following: true, tiles: null, yaw: TURN.yaw, pitch: TURN.pitch, shots: null };
+  const view = { levels: null, level: 0, at: [0, 0, 0], start: null, file: null, mode: "z", what: "ballots", following: true, tiles: null, yaw: TURN.yaw, pitch: TURN.pitch, shots: null };
 
   const axesOf = (l) => [l.x, l.y, l.z];
   const sizes = (l) => [l.x.length, l.y.length, l.z.length];
@@ -162,25 +159,6 @@ export function createVotes({ geometry, setPc }) {
     s.title = `Slide through the ${n} slices along ${name} (or scroll over the slice)`;
   }
 
-  function drawPlanes(l, next, lo, hi) {
-    const ax = axesOf(l), n = sizes(l);
-    for (const [id, h, v, f] of PLANES) {
-      const canvas = $(id), over = $(`${id}-over`);
-      canvas.width = n[h];
-      canvas.height = n[v];
-      const ctx = canvas.getContext("2d");
-      const img = ctx.createImageData(n[h], n[v]);
-      paint(img, n[h], l, h, v, f, view.at[f], 0, 0, lo, hi);
-      ctx.putImageData(img, 0, 0);
-      over.replaceChildren();
-      fit(canvas, over);
-      const u = n[h] / Math.max(parseFloat(canvas.style.width) || 1, 1);
-      marks(over, l, next, h, v, f, view.at[f], 0, 0, u, true);
-      $(`${id}-cap`).textContent = `${NAMES[h]} →  ${NAMES[v]} ↓   ${NAMES[f]} = ${ax[f][view.at[f]].toFixed(4)}  (${view.at[f] + 1}/${n[f]})`;
-      slider(`${id}-slide`, n[f], view.at[f], NAMES[f]);
-    }
-  }
-
   /** Every slice along one axis as tiles of one image, as many across as fills the well best. */
   function drawEvery(l, next, lo, hi) {
     const [h, v, f] = ALONG[view.mode];
@@ -211,7 +189,8 @@ export function createVotes({ geometry, setPc }) {
       if (k === view.at[f]) over.append(svg("rect", { x: ox, y: oy, width: n[h], height: n[v], fill: "none", stroke: "#e6e6e8", "stroke-width": 1.5 * u }));
     }
     view.tiles = { h, v, f, cols, tw, th };
-    $("votes-all-cap").textContent = `${NAMES[h]} →  ${NAMES[v]} ↓  in each;  ${NAMES[f]} from ${ax[f][0].toFixed(4)} to ${ax[f][n[f] - 1].toFixed(4)},  outlined: ${ax[f][view.at[f]].toFixed(4)}  (${view.at[f] + 1}/${n[f]})`;
+    $("votes-all-cap").textContent = `${NAMES[f]} = ${ax[f][view.at[f]].toFixed(4)} (${view.at[f] + 1}/${n[f]})`;
+    $("votes-all-cap").title = `Slices along ${NAMES[f]}, ${NAMES[h]} across and ${NAMES[v]} down; the outlined one`;
     slider("votes-all-slide", n[f], view.at[f], NAMES[f]);
   }
 
@@ -347,14 +326,16 @@ export function createVotes({ geometry, setPc }) {
       ctx.fillStyle = "#9d9da4";
       ctx.fillText(`${NAMES[a]} ${ax[a][0].toFixed(3)} … ${ax[a][n[a] - 1].toFixed(3)}`, Math.max(52, Math.min(W - 52, best.p[0] + (dx / d) * 16)), Math.max(8, Math.min(H - 8, best.p[1] + (dy / d) * 12)));
     }
-    $("votes-3d-cap").textContent = `the whole grid: ${n[0]} × ${n[1]} × ${n[2]} candidates  ·  drag to turn, click a candidate, double-click to turn back`;
+    const [slo, shi] = range(l.scores);
+    $("votes-3d-cap").textContent = `${n[0]} × ${n[1]} × ${n[2]} · NCC ${slo.toFixed(4)} – ${shi.toFixed(4)}`;
+    $("votes-3d-cap").title = "The tier's candidates; drag to turn the volume, click a candidate to put the cross-hair on it";
   }
 
   function draw() {
     const L = view.levels;
     const empty = !L || !L.length;
-    $("votes-body").hidden = empty;
-    $("votes-hint").hidden = !empty;
+    // (the comparison beside stands either way; the search's own parts wait for a fit)
+    $("votes-body").dataset.empty = empty ? "1" : "0";
     $("votes-meta").textContent = "";
     if (empty || $("dock-votes").hidden) return;
     const l = L[view.level], next = L[view.level + 1];
@@ -369,7 +350,7 @@ export function createVotes({ geometry, setPc }) {
     for (const b of $("votes-mode").children) b.setAttribute("aria-pressed", String(b.dataset.mode === view.mode));
     $("votes-grid").dataset.mode = view.mode;
     $("votes-follow").disabled = view.following;
-    if (view.mode === "planes") drawPlanes(l, next, lo, hi); else drawEvery(l, next, lo, hi);
+    drawEvery(l, next, lo, hi);
     drawSpace(l, next, lo, hi);
 
     const here = view.at.map((i, k) => ax[k][i]);
@@ -377,25 +358,24 @@ export function createVotes({ geometry, setPc }) {
     const f4 = (v) => v.map((x) => x.toFixed(4)).join(" ");
     const out = ax.map((a, k) => beyond(pc[k], a));
     const outside = out.some((d) => d !== 0);
-    const near = ax.map((a, k) => nearest(pc[k], a));
+    // the cross-hair and the winner, and how the tier went (the centre in use stands under the
+    // comparison beside)
     $("votes-readout").textContent = [
-      "             x      y      z     NCC",
-      `cross-hair ${f4(here)} ${scoreAt(l, view.at).toFixed(4)}`,
-      `winner     ${f4(win.map((i, k) => ax[k][i]))} ${l.scores[l.winner].toFixed(4)}`,
-      `centre now ${f4(pc)} ${outside ? "outside" : scoreAt(l, near).toFixed(4)}`,
-      ...(outside ? [`  beyond this grid by ${out.map((d, k) => (d ? `${NAMES[k]} ${d > 0 ? "+" : "−"}${Math.abs(d).toFixed(4)}` : "")).filter(Boolean).join(", ")}`] : []),
-      ...(l.walked ? ["  the winner is on the border: the grid moved"] : []),
-      `this grid  ${slo.toFixed(4)} … ${shi.toFixed(4)} over ${l.scores.length}`,
-      l.density ? `${l.inliers} of ${l.ballots} ballots lie by the winner` : `${agree} of ${l.patBest.length} patterns prefer the winner`,
+      `cross-hair ${f4(here)}  NCC ${scoreAt(l, view.at).toFixed(4)}`,
+      `winner     ${f4(win.map((i, k) => ax[k][i]))}  NCC ${l.scores[l.winner].toFixed(4)}`,
+      ...(outside ? [`current PC outside: ${out.map((d, k) => (d ? `${NAMES[k]} ${d > 0 ? "+" : "−"}${Math.abs(d).toFixed(4)}` : "")).filter(Boolean).join(", ")}`] : []),
+      ...(l.walked ? ["winner on the edge: next tier moved"] : []),
+      l.density ? `ballots    ${l.inliers} / ${l.ballots} at the winner` : `patterns   ${agree} / ${l.patBest.length} prefer the winner`,
     ].join("\n");
     const span = (a) => (a.length > 1 ? `±${((a[a.length - 1] - a[0]) / 2).toFixed(4)}` : "fixed");
-    $("votes-meta").textContent = `grid ${view.level + 1} of ${L.length}: x ${span(l.x)}, y ${span(l.y)}, z ${span(l.z)}${view.following ? "  ·  cut through the pattern centre" : ""}`;
+    $("votes-meta").textContent = `x ${span(l.x)}  y ${span(l.y)}  z ${span(l.z)}`;
+    $("votes-meta").title = `Tier ${view.level + 1} of ${L.length}: its half-widths about its centre`;
   }
 
   // ── moving the cross-hair ──
 
-  // a click or a drag on a plane moves it in the plane; the wheel, the slider and Page Up /
-  // Page Down move it through the slices; the arrow keys step it in the plane
+  // a click or a drag on a slice moves it there; the wheel, the slider and Page Up / Page Down
+  // move it through the slices; the arrow keys step it within one
   const wheelStep = (() => { let acc = 0; return (e) => { acc += e.deltaMode === 1 ? e.deltaY * 30 : e.deltaY; if (Math.abs(acc) < 30) return 0; const s = Math.sign(acc); acc = 0; return s; }; })();
   const keys = (well, h, v, f) => well.addEventListener("keydown", (e) => {
     const d = { ArrowLeft: [h(), -1], ArrowRight: [h(), 1], ArrowUp: [v(), -1], ArrowDown: [v(), 1], PageUp: [f(), 1], PageDown: [f(), -1] }[e.key];
@@ -403,20 +383,6 @@ export function createVotes({ geometry, setPc }) {
     e.preventDefault();
     move({ [d[0]]: view.at[d[0]] + d[1] });
   });
-  for (const [id, h, v, f] of PLANES) {
-    const canvas = $(id);
-    const to = (e) => {
-      if (!view.levels) return;
-      const r = canvas.getBoundingClientRect();
-      const n = sizes(view.levels[view.level]);
-      move({ [h]: Math.floor(((e.clientX - r.left) / r.width) * n[h]), [v]: Math.floor(((e.clientY - r.top) / r.height) * n[v]) });
-    };
-    canvas.addEventListener("click", to);
-    canvas.addEventListener("mousemove", (e) => { if (e.buttons === 1) to(e); });
-    canvas.parentElement.addEventListener("wheel", (e) => { e.preventDefault(); const s = wheelStep(e); if (s && view.levels) move({ [f]: view.at[f] + s }); }, { passive: false });
-    $(`${id}-slide`).addEventListener("input", (e) => move({ [f]: +e.target.value }));
-    keys(canvas.parentElement, () => h, () => v, () => f);
-  }
   {
     const canvas = $("votes-all");
     const to = (e) => {
@@ -497,7 +463,7 @@ export function createVotes({ geometry, setPc }) {
         b.type = "button";
         b.dataset.level = String(i);
         b.textContent = `${i + 1}${l.walked ? " →" : ""}`;
-        b.title = l.walked ? "The winner was on this grid's border: the next grid is as wide, moved onto it." : "";
+        b.title = l.walked ? "The winner was on this tier's border: the next tier is as wide, moved onto it." : "";
         return b;
       }));
       follow();

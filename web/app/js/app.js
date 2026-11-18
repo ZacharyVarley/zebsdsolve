@@ -1,6 +1,6 @@
 // The zebsdsolve app: a thin page over the engine (zebsdsolve.wasm through zebsdsolve.js). It
 // passes files and settings in and draws what comes out; every number it shows is the engine's.
-import { Zebsdsolve } from "../zebsdsolve/zebsdsolve.js";
+import { Zebsdsolve, PLANE_MODELS } from "../zebsdsolve/zebsdsolve.js";
 import { GEOMETRY, buildFields, groupOf } from "./fields.js";
 import { drawGray, drawSigned, drawHeat, fit, svg, download, quantiles } from "./draw.js";
 import { createVotes } from "./votes.js";
@@ -12,7 +12,7 @@ import { drawEnergy } from "./energy.js";
 const $ = (id) => document.getElementById(id);
 const app = $("app");
 const PHASE_COLORS = ["#3b82f6", "#f59e0b", "#10b981", "#ef4444", "#8b5cf6", "#14b8a6", "#ec4899", "#84cc16"];
-const RESULT_KINDS = ["ipf_z", "ipf_x", "ipf_y", "ncc", "nmi", "z", "phase", "sweep"];
+const RESULT_KINDS = ["ipf", "ncc", "nmi", "phase", "sweep"];
 const TABS = ["simulate", "data", "patterns", "geometry", "index"];
 // settings outside the pattern's own groups that change what the pattern view shows of a
 // pattern indexed on the spot
@@ -146,6 +146,19 @@ async function busy(label, fn) {
 }
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+/** Fill a `.kv` list with names and values: [name, value, class] ("wide": the row to itself; "warn"). */
+function showKv(el, rows) {
+  el.replaceChildren(...rows.flatMap(([k, v, cls = ""]) => {
+    const dt = document.createElement("dt");
+    dt.textContent = k;
+    const dd = document.createElement("dd");
+    dd.textContent = v;
+    dd.title = v;
+    if (cls) { dd.className = cls; dt.className = cls; }
+    return [dt, dd];
+  }));
+}
+
 const factRows = (facts) => facts.flatMap(([k, v]) => { const dt = document.createElement("dt"); dt.textContent = k; const dd = document.createElement("dd"); dd.textContent = v; dd.title = v; return [dt, dd]; });
 
 // ── the steps ──
@@ -161,7 +174,12 @@ function selectTab(name) {
   // the Geometry step is a console for the fits: the dock takes most of the stage there, and
   // shows a fit (the pattern-centre search, unless it is already on the plane)
   app.dataset.tab = name;
-  if (name === "geometry" && votes && !["votes", "plane"].includes($("dock-kind").querySelector('[aria-pressed="true"]')?.dataset.dock)) selectDock(st.plane && !st.votes ? "plane" : "votes");
+  if (st.scan) drawMapOverlay();
+  const dockNow = $("dock-kind").querySelector('[aria-pressed="true"]')?.dataset.dock;
+  if (name === "geometry" && votes && !["votes", "plane"].includes(dockNow)) selectDock(st.plane && !st.votes ? "plane" : "votes");
+  // (elsewhere the fits' views give way: the master where the filters are set, z where matches are accepted)
+  if ((name === "patterns" || name === "data") && votes && ["votes", "plane"].includes(dockNow)) selectDock("master");
+  if (name === "index" && votes && ["votes", "plane"].includes(dockNow)) selectDock("z");
   // the Simulate step: the crystal beside the master, the simulation's when there is one
   if (name === "simulate" && votes) {
     if (st.sim) st.masterSrc = -1;
@@ -206,20 +224,33 @@ function afterSettings(keys) {
   if (groups.has("roi") || keys.includes("fit_grid")) { st.fit = null; drawMapOverlay(); showRoi(); }
   if (keys.some((k) => ["sim_voltage_kv", "sim_tilt_deg", "sim_bin_kev"].includes(k))) showEnergy();
   if (keys.includes("accept_z") || keys.includes("accept_nmi")) drawZ();
-  if (keys.some((k) => k.startsWith("ipf_"))) { st.keys.clear(); drawMap(); }
+  if (keys.some((k) => k.startsWith("ipf_"))) { st.keys.clear(); $("ipf-key").value = st.settings.ipf_colors; drawMap(); }
   drawLegend();
+  showPcPlan();
+}
+
+/** What Fit centre will search from the centre in use: each tier's ranges and steps. */
+function showPcPlan() {
+  const s = st.settings, box = $("pc-plan");
+  if (!st.scan || !s.pc_levels) { box.textContent = ""; return; }
+  const pc = st.ze.geometry.pc;
+  const n = s.pc_steps * s.pc_steps * s.pc_steps_z;
+  const step = (half, m) => (m > 1 ? (2 * half) / (m - 1) : 0);
+  const col = (v) => v.toFixed(4).padStart(8);
+  const lines = [`start ${pc.map((v) => v.toFixed(4)).join("  ")}`, "tier  ±xy     ±z      step xy step z"];
+  for (let t = 0, k = 1; t < s.pc_levels; t++, k *= s.pc_shrink) {
+    const a = s.pc_span * k, b = s.pc_span_z * k;
+    lines.push(`${String(t + 1).padEnd(4)}${col(a)}${col(b)}${col(step(a, s.pc_steps))}${col(step(b, s.pc_steps_z))}`);
+  }
+  lines.push(`${n.toLocaleString()} candidates × ${s.fit_grid * s.fit_grid} patterns a tier`);
+  box.textContent = lines.join("\n");
+  $("votes-plan").textContent = box.textContent;
+  $("pc-plan-sum").textContent = `Tiers · ${n.toLocaleString()} × ${s.fit_grid * s.fit_grid}`;
 }
 
 function buildGeometry() {
-  const box = $("geometry-fields");
-  for (const [key, label, hint, step, per, width] of GEOMETRY) {
-    const triple = key === "pc" || key === "rot";
-    const el = document.createElement("label");
-    el.className = "field" + (triple ? " wide" : "") + (width ? ` ${width}` : "");
-    if (hint) el.title = hint;
-    const span = document.createElement("span");
-    span.textContent = label;
-    el.append(span);
+  const cell = (cls, text = "", id = "") => { const e = document.createElement("span"); e.className = cls; e.textContent = text; if (id) e.id = id; return e; };
+  for (const [key, label, hint, step, per] of GEOMETRY) {
     const mk = (i) => {
       const input = document.createElement("input");
       input.type = "number";
@@ -237,31 +268,63 @@ function buildGeometry() {
       });
       return input;
     };
-    if (triple) {
-      const tri = document.createElement("div");
-      tri.className = "triple";
-      tri.append(mk(0), mk(1), mk(2));
-      el.append(tri);
-    } else el.append(mk(null));
-    box.append(el);
+    if (key === "pc") {
+      // the file's, the one in use (typed in to set it), and how far apart
+      $("pc-grid").append(cell(""), cell("h", "x"), cell("h", "y"), cell("h", "z"),
+        cell("k", "file"), ...[0, 1, 2].map((i) => cell("v", "", `pc-file-${i}`)),
+        cell("k", "current"), mk(0), mk(1), mk(2),
+        cell("k", "Δ"), ...[0, 1, 2].map((i) => cell("v d", "", `pc-d-${i}`)));
+      continue;
+    }
+    if (key === "rot") {
+      const box = $("geo-turn-fields");
+      box.title = hint;
+      box.append(cell(""), cell("h", "swing"), cell("h", "tilt"), cell("h", "twist"), cell("k", label), mk(0), mk(1), mk(2));
+      continue;
+    }
+    const el = document.createElement("label");
+    el.className = "field";
+    el.dataset.key = key;
+    if (hint) el.title = hint;
+    const span = document.createElement("span");
+    span.textContent = label;
+    // (the pixel size says where it is from: the file, an estimate, or typed in)
+    if (key === "pxUm") span.append(cell("src", "", "px-src"));
+    el.append(span, mk(null));
+    $("geometry-fields").append(el);
   }
 }
 
 function showGeometry() {
   const g = st.ze.geometry;
   const per = Object.fromEntries(GEOMETRY.map((f) => [f[0], f[4]]));
-  for (const input of $("geometry-fields").querySelectorAll("input")) {
+  for (const input of document.querySelectorAll("#geometry-fields input, #pc-grid input, #geo-turn-fields input")) {
     const v = input.dataset.i !== undefined ? g[input.dataset.geo][+input.dataset.i] : g[input.dataset.geo];
     input.value = String(+(v * per[input.dataset.geo]).toFixed(6));
   }
   $("btn-geo-undo").disabled = !st.geoBefore;
-  $("btn-geo-undo").textContent = st.geoIsBefore ? "after the last fit" : "before the last fit";
+  $("btn-geo-undo").textContent = st.geoIsBefore ? "redo fit" : "undo fit";
   $("btn-geo-file").disabled = !st.geoOpened;
-  // (with a plane, it says where the beam stood for each map cell: the steps and the pixel size do not)
-  $("geo-readout").textContent = st.scan ? (g.planeKind ? `beam positions: the fitted ${g.planeKind === 2 ? "projective" : "affine"} plane\n(the pattern centre is the plane's at the map's middle;\n the steps and the pixel size are not used)` : `pixel ${pixelText()}`) : "";
+  // (with a plane in use, it says where the beam stood for each map cell: the steps and the pixel size do not)
+  $("plane-state").textContent = g.planeKind ? planeName(g.planeKind, g.plane) : "none";
+  const [src, why] = pixelSource();
+  $("px-src").textContent = src;
+  $("px-src").title = why;
   $("btn-geo-plane").disabled = !g.planeKind;
+  showPcTable(g);
+  showPcPlan();
   showAngle();
   drawPc();
+}
+
+/** The pattern centre the file gave, beside the one in use (whose inputs show it), and how far apart. */
+function showPcTable(g) {
+  const file = st.scan ? st.pcFile : null;
+  for (let i = 0; i < 3; i++) {
+    $(`pc-file-${i}`).textContent = !st.scan ? "" : file ? file[i].toFixed(4) : "–";
+    const d = file ? g.pc[i] - file[i] : NaN;
+    $(`pc-d-${i}`).textContent = Number.isFinite(d) ? `${d >= 0 ? "+" : "−"}${Math.abs(d).toFixed(4)}` : "";
+  }
 }
 
 /** The geometry changed (a fit, a typed value, a candidate taken): everything drawn from it
@@ -282,15 +345,16 @@ function beforeFit() {
   st.geoIsBefore = false;
 }
 
-/** The detector's pixel size and where it is from: typed in, the scan's file, or the detector's
- *  width over the pattern's pixels across (an estimate). */
-function pixelText() {
+/** Where the detector's pixel size is from, in a word and in full: typed in, the scan's file, or the
+ *  detector's width over the pattern's pixels across (an estimate). */
+function pixelSource() {
   const px = st.ze.geometry.pxUm;
-  if (!(px > 0)) return "not known";
+  if (!st.scan) return ["", ""];
+  if (!(px > 0)) return ["unknown", "not known"];
   const own = st.geoOpened ? st.geoOpened.pxUm : px;
-  if (Math.abs(px - own) > 1e-9 * own) return `${px.toFixed(1)} µm, typed in`;
-  if (st.scan && !st.scan.hasPx) return `${px.toFixed(1)} µm: an estimate, ${st.settings.detector_width_mm} mm across ${st.scan.patW} px`;
-  return `${px.toFixed(1)} µm, the file's`;
+  if (Math.abs(px - own) > 1e-9 * own) return ["typed", `${px.toFixed(1)} µm, typed in`];
+  if (!st.scan.hasPx) return ["est.", `${px.toFixed(1)} µm: an estimate, ${st.settings.detector_width_mm} mm across ${st.scan.patW} px (Advanced: detector mm)`];
+  return ["file", `${px.toFixed(1)} µm, the file's`];
 }
 
 /** The sizes patterns can be reduced to, and what the current reduction gives. */
@@ -306,21 +370,20 @@ function showResolution() {
   if (!whole.includes(b)) sel.append(new Option(`reduced by ${b}`, String(b)));
   sel.value = String(b);
   sel.disabled = false;
-  let text = "";
+  let rows = [];
   try {
     const [h, w] = st.ze.shape(false);
-    if (b !== 1) text = `${s.patH} × ${s.patW} stored → ${h} × ${w}, ${whole.includes(b) ? "binned" : "resampled by area"} as it is read`;
-  } catch (e) { text = String(e.message || e); }
-  $("res-readout").textContent = text;
+    if (b !== 1) rows = [["read as", `${h} × ${w}`], ["by", whole.includes(b) ? "binning" : "area"]];
+  } catch (e) { rows = [["", String(e.message || e), "warn wide"]]; }
+  showKv($("res-readout"), rows);
 }
 
 /** The angular width the master filters take a detector pixel to have. */
 function showAngle() {
   if (!st.ze) return;
   const a = st.ze.pixelAngle;
-  $("angle-readout").textContent = a > 0 && st.scan
-    ? `a stored pixel spans ${a.toFixed(3)}° (${st.settings.pixel_angle_deg > 0 ? "as set" : "from the pattern centre"}); the pattern's height about ${(a * st.scan.patH).toFixed(0)}°`
-    : "";
+  showKv($("angle-readout"), a > 0 && st.scan ? [["pixel", `${a.toFixed(3)}°`], ["height", `${(a * st.scan.patH).toFixed(0)}°`]] : []);
+  $("angle-readout").title = st.settings.pixel_angle_deg > 0 ? "A stored pixel's angle, as set, and the pattern's height" : "A stored pixel's angle, from the pattern centre, and the pattern's height";
 }
 
 /** What each sweep will search with. */
@@ -328,10 +391,13 @@ function showSweeps() {
   if (!st.ze) return;
   const s = st.settings;
   const plan = st.ze.sweepPlan;
-  $("sweep-readout").textContent = s.sweeps > 1
-    ? `${plan.map(sweepLabel).join("  →  ")}\neach sweep takes what the ones before did not accept`
-    : `one pass, ${sweepLabel(plan[0])}; settled matches with ${acceptText()} are marked accepted`;
-  if (st.chance) $("sweep-readout").textContent += `\nchance on this scan: NMI ${st.chance.median.toFixed(4)} ± ${st.chance.spread.toFixed(4)}${s.accept_nmi > 0 ? "" : `; z ${s.accept_z} is NMI ${(st.chance.median + s.accept_z * st.chance.spread).toFixed(4)}`}`;
+  const rows = [["search", plan.map(sweepLabel).join(" → "), "wide"]];
+  if (st.chance) {
+    rows.push(["chance", `NMI ${st.chance.median.toFixed(4)} ± ${st.chance.spread.toFixed(4)}`, "wide"]);
+    if (!(s.accept_nmi > 0)) rows.push([`z ${s.accept_z}`, `NMI ${(st.chance.median + s.accept_z * st.chance.spread).toFixed(4)}`, "wide"]);
+  }
+  showKv($("sweep-readout"), rows);
+  $("sweep-readout").title = "What each sweep searches with (each later one takes what the ones before did not accept); what NMI chance gives on this scan, and the NMI the z threshold stands for";
 }
 
 /** The acceptance threshold in words: an absolute NMI, or the calibration's z. */
@@ -352,7 +418,7 @@ function showStage() {
   avg.textContent = s.nlpar ? "averaged" : "averaged (off)";
   if ((st.stage === "averaged" && !s.nlpar) || (st.stage === "background" && s.static_background === "none")) st.stage = "filtered";
   sel.value = st.stage;
-  if (!s.nlpar) $("nlpar-readout").textContent = "";
+  if (!s.nlpar) showKv($("nlpar-readout"), []);
 }
 
 // ── scan ──
@@ -384,6 +450,9 @@ function afterOpen() {
   st.fit = null;
   st.votes = null;
   st.plane = null;
+  // (an earlier scan's fit says nothing of this one)
+  showKv($("fit-readout"), []);
+  showPlaneSaid([]);
   if (planeView) planeView.show(null, null, null);
   st.pcStart = null;
   st.pcFile = s.hasPc ? st.ze.geometry.pc : null;
@@ -408,8 +477,8 @@ function afterOpen() {
   const facts = [
     ["format", s.format], ["map", `${s.rows} × ${s.cols} (${(s.rows * s.cols).toLocaleString()} patterns)`],
     ["pattern", `${s.patH} × ${s.patW} ${s.dtype}`], ["size", gb >= 1 ? `${gb.toFixed(2)} GiB` : `${(s.bytes / 2 ** 20).toFixed(1)} MiB`],
-    ["static background", s.hasBackground ? "one in the file" : "none in the file"], ["pattern centre", s.hasPc ? "from the file" : "not in the file"],
-    ["detector pixel", s.hasPx ? `${st.ze.geometry.pxUm.toFixed(1)} µm, from the file` : "not in the file"],
+    ["background", s.hasBackground ? "stored" : "none"], ["PC", s.hasPc ? st.pcFile.map((v) => v.toFixed(4)).join("  ") : "none"],
+    ["pixel", s.hasPx ? `${st.ze.geometry.pxUm.toFixed(1)} µm` : "none"],
   ];
   if (s.voltageKv) facts.push(["voltage", `${s.voltageKv} kV`]);
   $("scan-facts").replaceChildren(...factRows(facts));
@@ -440,15 +509,15 @@ function updateOverviewControls() {
   selector.replaceChildren();
   if (st.storedOverview) selector.add(new Option(st.storedOverview.label, "stored"));
   else {
-    const empty = new Option("Overview", "none");
+    const empty = new Option("overview", "none");
     empty.disabled = true;
     selector.add(empty);
   }
-  selector.add(new Option("Pattern contrast", "calculated"));
+  selector.add(new Option("pattern contrast", "calculated"));
   selector.disabled = !st.scan || st.overviewLoading;
   selector.value = st.overviewSource || "none";
   $("btn-overview").disabled = !st.scan || st.overviewLoading;
-  $("btn-overview").textContent = st.overviewCalculating ? "Stop contrast calculation" : "Calculate pattern contrast";
+  $("btn-overview").textContent = st.overviewCalculating ? "stop" : "calculate contrast";
 }
 
 async function loadStoredOverview() {
@@ -490,7 +559,7 @@ async function runOverview() {
   const run = ++st.overviewRun, ze = st.ze;
   const { rows, cols, patH, patW, pixel } = st.scan;
   const values = new Float32Array(rows * cols).fill(NaN);
-  st.calculatedOverview = { label: "Pattern contrast (standard deviation)", values };
+  st.calculatedOverview = { label: "contrast (σ)", values };
   st.overview = values;
   st.overviewSource = "calculated";
   st.overviewCalculating = true;
@@ -684,8 +753,8 @@ function showMaster() {
   $("dock-master").dataset.empty = src === null ? "1" : "0";
   if (!$("dock-master").hidden) {
     const meta = src === null ? "" : src >= 0
-      ? `${phases[src].side} × ${phases[src].side} a hemisphere${phases[src].voltageKv ? ` · ${phases[src].voltageKv} kV` : ""}`
-      : `${2 * sim.halfw + 1} × ${2 * sim.halfw + 1} a hemisphere · ${st.simBin === null ? `${sim.voltageKv} kV beam` : `${bins[st.simBin]} kV bin`}${st.simSite === null ? "" : ` · site ${st.simSite + 1} alone`}`;
+      ? `${phases[src].side} × ${phases[src].side} / hemisphere${phases[src].voltageKv ? ` · ${phases[src].voltageKv} kV` : ""}`
+      : `${2 * sim.halfw + 1} × ${2 * sim.halfw + 1} / hemisphere · ${st.simBin === null ? `${sim.voltageKv} kV beam` : `${bins[st.simBin]} kV bin`}${st.simSite === null ? "" : ` · site ${st.simSite + 1} alone`}`;
     $("dock-meta").textContent = meta;
     sel.title = meta ? `${meta}. Which master pattern: a candidate phase's, or the last simulated one` : "Which master pattern: a candidate phase's, or the last simulated one";
     st.masterView.refresh();
@@ -753,7 +822,6 @@ function showCrystal() {
   app.dataset.crystal = c ? "1" : "0";
   $("btn-simulate").disabled = !c;
   $("btn-simulate").title = c ? `Simulate ${st.crystalName}'s master pattern under the settings below` : "Needs a crystal: open a CIF or pick a preset";
-  $("crystal-none").hidden = !!c;
   $("crystal").hidden = !c;
   st.cellInfo = null;
   if (c) {
@@ -947,13 +1015,22 @@ async function addSimPhase() {
 
 // ── the map ──
 
+/** The map's colouring: an engine map kind, or "ipf" for the axis chosen beside it. The IPF's
+ *  axis and key, and the overview's source, stand in the bar while theirs is the map. */
 function setMapKind(kind) {
+  if (kind === "ipf") kind = $("ipf-axis").value;
   st.mapKind = kind;
-  for (const b of $("map-kind").children) b.setAttribute("aria-pressed", String(b.dataset.kind === kind));
+  const ipf = kind.startsWith("ipf");
+  for (const b of $("map-kind").children) b.setAttribute("aria-pressed", String(b.dataset.kind === (ipf ? "ipf" : kind)));
+  if (ipf) $("ipf-axis").value = kind;
+  $("ipf-key").value = st.settings.ipf_colors;
   drawMap();
 }
 
 function drawMap() {
+  // (the IPF's axis and key once there are orientations to colour; the overview's source while it is the map)
+  $("ipf-opts").hidden = !st.mapKind.startsWith("ipf") || !st.results;
+  $("overview-opts").hidden = st.mapKind !== "overview";
   if (!st.scan) return;
   const { rows, cols } = st.scan;
   const canvas = $("map");
@@ -980,7 +1057,8 @@ function drawLegend() {
   box.replaceChildren();
   const kind = st.mapKind;
   const R = st.results;
-  box.dataset.folded = st.legendFolded ? "1" : "0";
+  $("btn-key").setAttribute("aria-pressed", String(!st.legendFolded));
+  if (st.legendFolded) { box.hidden = true; return; }
   const text = (t) => { const s = document.createElement("span"); s.textContent = t; return s; };
   const chip = (color, t) => { const s = document.createElement("span"); s.className = "chip"; const i = document.createElement("i"); i.style.background = color; s.append(i, t); return s; };
   const bar = () => { const b = document.createElement("span"); b.className = "bar"; return b; };
@@ -990,19 +1068,20 @@ function drawLegend() {
     if (!source) { box.hidden = true; return; }
     box.append(text(source.label), bar());
   } else if (kind === "ncc" || kind === "nmi" || kind === "z") {
-    // gray between the indexed cells' extremes, as the engine draws it
-    let lo = Infinity, hi = -Infinity;
-    const v = R[kind];
-    for (let i = 0; i < v.length; i++) if (R.phase[i] >= 0) { if (v[i] < lo) lo = v[i]; if (v[i] > hi) hi = v[i]; }
-    const f = (x) => (kind === "z" ? x.toFixed(1) : x.toFixed(3));
-    box.append(text(`${kind === "z" ? "z" : kind.toUpperCase()}  ${Number.isFinite(lo) ? f(lo) : ""}`), bar(), text(Number.isFinite(hi) ? f(hi) : ""));
+    // gray between the indexed cells' extremes, as the engine draws it (NMI's z is the same map on another scale)
+    const range = (v) => { let lo = Infinity, hi = -Infinity; for (let i = 0; i < v.length; i++) if (R.phase[i] >= 0) { if (v[i] < lo) lo = v[i]; if (v[i] > hi) hi = v[i]; } return [lo, hi]; };
+    const [lo, hi] = range(R[kind]);
+    const f = (x, d) => (Number.isFinite(x) ? x.toFixed(d) : "");
+    box.append(text(`${kind === "z" ? "z" : kind.toUpperCase()}  ${f(lo, kind === "z" ? 1 : 3)}`), bar(), text(f(hi, kind === "z" ? 1 : 3)));
+    if (kind === "nmi") { const [zl, zh] = range(R.z); box.append(text(`z  ${f(zl, 1)} … ${f(zh, 1)}`)); }
   } else if (kind === "phase") {
     st.ze.phases.forEach((p, i) => box.append(chip(PHASE_COLORS[i % PHASE_COLORS.length], p.name)));
   } else if (kind === "sweep") {
     st.ze.sweepPlan.forEach((p, i) => box.append(chip(PHASE_COLORS[i % PHASE_COLORS.length], `${i + 1}: ${sweepLabel(p)}`)));
     box.append(chip("#3a3a3e", "none accepted"));
   } else {
-    // one key per Laue class among the phases
+    // one key per Laue class among the phases, under the sample axis it colours
+    box.append(text(`IPF ${kind.slice(-1).toUpperCase()}`));
     const seen = new Set();
     st.ze.phases.forEach((p, i) => {
       // (two point groups of one Laue class can differ in their rotations, and so in their key)
@@ -1011,8 +1090,8 @@ function drawLegend() {
       seen.add(id);
       box.append(ipfKey(i, p.laue, id));
     });
-    box.append(text(`of sample ${kind.slice(-1)}`));
   }
+  box.dataset.kind = kind.startsWith("ipf") && R ? "ipf" : "";
   box.hidden = false;
 }
 
@@ -1022,7 +1101,7 @@ function drawLegend() {
 function ipfKey(phase, laue, id) {
   let key = st.keys.get(id);
   if (!key) {
-    key = [st.ze.ipfKey(phase, 72), st.ze.ipfKey(phase, 72, true)].filter((k) => k.box[2] > k.box[0] || k.box[3] > k.box[1]);
+    key = [st.ze.ipfKey(phase, 104), st.ze.ipfKey(phase, 104, true)].filter((k) => k.box[2] > k.box[0] || k.box[3] > k.box[1]);
     st.keys.set(id, key);
   }
   const wrap = document.createElement("span");
@@ -1152,10 +1231,18 @@ function drawMapOverlay() {
     const d = st.roiDrag;
     over.append(svg("rect", { x: Math.min(d.c0, d.c1), y: Math.min(d.r0, d.r1), width: Math.abs(d.c1 - d.c0) + 1, height: Math.abs(d.r1 - d.r0) + 1, fill: "rgba(214,176,100,.15)", stroke: "#e8c77e", "stroke-width": u }));
   }
-  if ($("show-fit").checked) {
+  // (the fits' lattice belongs to the fits: drawn on the Geometry step, its box dimmed elsewhere)
+  const fitStep = app.dataset.tab === "geometry";
+  $("show-fit").disabled = !fitStep;
+  $("show-fit").closest("label").dataset.off = fitStep ? "0" : "1";
+  if ($("show-fit").checked && fitStep) {
     const cells = st.fit ? st.fit.cells : fitLattice();
+    // (a few fit patterns are rings; a dense lattice, the plane's, a light dotting that leaves the map legible)
+    const spacing = Math.sqrt((rows * cols) / Math.max(cells.length, 1));
+    const dense = cells.length > 150;
+    const rad = dense ? Math.min(1.8 * u, 0.25 * spacing) : 3.5 * u;
     for (const c of cells) {
-      over.append(svg("circle", { cx: (c % cols) + 0.5, cy: Math.floor(c / cols) + 0.5, r: 3.5 * u, fill: st.fit ? "#7fbf6e" : "none", stroke: st.fit ? "#0a0a0b" : "#9d9da4", "stroke-width": u }));
+      over.append(svg("circle", { cx: (c % cols) + 0.5, cy: Math.floor(c / cols) + 0.5, r: rad, fill: st.fit ? "#7fbf6e" : "none", "fill-opacity": dense ? 0.75 : 1, stroke: dense ? "none" : st.fit ? "#0a0a0b" : "#9d9da4", "stroke-width": u }));
     }
   }
   if (st.cell >= 0) {
@@ -1234,6 +1321,94 @@ async function indexNow(cell) {
   return o;
 }
 
+/** The selected pattern simulated under the centre in use (its orientation indexed on the spot
+ *  and refined, as the pattern pane has it) and under the centre the file gave (indexed and
+ *  simulated there by the engine, the geometry in use staying as it is): null while a job runs.
+ *  `file` is null when the file gives no centre or it is the one in use. Kept for the cell, the
+ *  geometry and the settings. */
+async function centreSims(cell) {
+  const g0 = st.geoOpened, now = st.ze.geometry;
+  if (st.busy || !st.ze.phases.length) return null;
+  const key = `${cell} ${now.pc.join()} ${now.planeKind} ${JSON.stringify(st.settings)}`;
+  if (st.pcSims && st.pcSims.key === key) return st.pcSims;
+  const differs = st.pcFile && g0 && (now.planeKind || !now.pc.every((v, i) => Math.abs(v - g0.pc[i]) < 5e-7));
+  const o = await indexNow(cell);
+  const nowSim = await st.ze.simulate(o.phase, [cell], o.q, false);
+  const fileSim = differs ? (await st.ze.cellUnder(cell, g0, st.settings.fit_bandwidth)).sim : null;
+  st.pcSims = { key, now: nowSim, file: fileSim };
+  return st.pcSims;
+}
+
+/** The mask the engine scores under (settings mask, mask_radius), for an h × w pattern. */
+function scoreMask(h, w) {
+  const s = st.settings;
+  const mask = new Uint8Array(h * w).fill(1);
+  if (s.mask) {
+    const rad = s.mask_radius * 0.5 * Math.min(h, w);
+    for (let r = 0; r < h; r++) for (let c = 0; c < w; c++) mask[r * w + c] = (r - (h - 1) / 2) ** 2 + (c - (w - 1) / 2) ** 2 <= rad * rad ? 1 : 0;
+  }
+  return mask;
+}
+
+/** The comparison's two square images fill the dock's height: its width follows from it. */
+function sizeCompare() {
+  const pair = document.querySelector(".pc-cmp-pair");
+  const side = pair.clientHeight - (pair.querySelector("figcaption")?.offsetHeight || 0);
+  if (side > 60) $("votes-body").style.setProperty("--cmp-w", `${2 * side + 1}px`);
+}
+
+/** The dock's comparison, for the selected pattern: the pattern as it is matched, and beside it
+ *  its simulation under the file's centre and under the one in use, in turn (or one held), with
+ *  both centres and their scores. */
+async function showPcCompare() {
+  if ($("dock-votes").hidden || !st.scan || st.cell < 0 || st.cell >= st.scan.rows * st.scan.cols || st.overviewLoading) return;
+  const run = st.pcRun = (st.pcRun || 0) + 1, cell = st.cell, scan = st.scan;
+  // (another scan, or another call since, makes this one's answer stale)
+  const stale = () => run !== st.pcRun || scan !== st.scan;
+  try {
+    const [h, w] = st.ze.shape(false);
+    const exp = await st.ze.pattern(cell, "filtered", false);
+    if (stale()) return;
+    const mask = scoreMask(h, w);
+    drawGray($("pc-cmp-exp"), exp, w, h, { mask });
+    $("pc-cmp-exp-cap").textContent = `row ${Math.floor(cell / st.scan.cols)}, col ${cell % st.scan.cols} · filtered`;
+    const sims = await centreSims(cell);
+    if (stale()) return;
+    st.pcPair = sims && { ...sims, w, h, mask, nowNcc: nccOf(exp, sims.now, mask), fileNcc: sims.file ? nccOf(exp, sims.file, mask) : null };
+    drawPcCompare();
+  } catch (e) {
+    if (!stale()) log(String(e.message || e), true);
+  }
+}
+
+function drawPcCompare() {
+  clearInterval(st.pcTimer);
+  const c = st.pcPair, canvas = $("pc-cmp-sim"), tag = $("pc-cmp-tag");
+  const show = c && c.file ? st.pcShow || "flicker" : "now";
+  for (const b of $("pc-cmp-show").children) { b.setAttribute("aria-pressed", String(b.dataset.show === show)); b.disabled = !c || (!c.file && b.dataset.show !== "now"); }
+  const g = st.ze.geometry, f4 = (pc) => pc.map((v) => v.toFixed(4).padStart(7)).join(" ");
+  // (each centre's line in the colour of its tag on the simulation)
+  const lines = [["", "              x       y       z     NCC"]];
+  if (st.pcFile) lines.push(["file", `file     ${f4(st.pcFile)}  ${c && c.fileNcc !== null ? c.fileNcc.toFixed(4) : c && !c.file ? c.nowNcc.toFixed(4) : "  …"}`]);
+  lines.push(["now", `current  ${f4(g.pc)}  ${c ? c.nowNcc.toFixed(4) : "  …"}`]);
+  if (c && c.file) { const d = c.nowNcc - c.fileNcc; lines.push(["", `Δ NCC    ${d >= 0 ? "+" : "−"}${Math.abs(d).toFixed(4)}`]); }
+  else if (!st.pcFile) lines.push(["", "no PC in the file"]);
+  $("pc-cmp-readout").replaceChildren(...lines.map(([on, text]) => { const d = document.createElement("div"); d.textContent = text; if (on) d.dataset.on = on; return d; }));
+  if (!c) { tag.textContent = ""; $("pc-cmp-cap").textContent = st.busy ? "when the job is done" : ""; return; }
+  const one = (which) => {
+    st.pcOn = which;
+    drawGray(canvas, which === "file" ? c.file : c.now, c.w, c.h, { mask: c.mask });
+    tag.dataset.on = which;
+    tag.textContent = which === "file" ? "file PC" : "current PC";
+    $("pc-cmp-cap").textContent = `NCC ${(which === "file" ? c.fileNcc : c.nowNcc).toFixed(4)}${c.file ? (show === "flicker" ? " · click to hold" : " · click to switch") : ""}`;
+  };
+  if (show !== "flicker") { one(show); return; }
+  let file = st.pcOn !== "file";
+  const tick = () => { one(file ? "file" : "now"); file = !file; };
+  tick();
+  st.pcTimer = setInterval(tick, 700);
+}
+
 function nccOf(a, b, mask) {
   let n = 0, sa = 0, sb = 0;
   for (let i = 0; i < a.length; i++) if (mask[i]) { n++; sa += a[i]; sb += b[i]; }
@@ -1261,7 +1436,8 @@ function showNlpar(a) {
   inset.style.width = `${a.side * px}px`;
   inset.style.height = `${a.side * px}px`;
   const more = a.shares.filter((v) => v > 0.01).length - 1;
-  $("nlpar-readout").textContent = `the selected pattern\nnoise ${a.noise.toFixed(a.noise < 10 ? 2 : 1)} a pixel as stored, ${(100 * a.left).toFixed(0)} % of it left\n${(100 * a.own).toFixed(0)} % of its average is the pattern itself\n${Math.max(more, 0)} of its ${a.side * a.side - 1} neighbours hold over 1 % of it`;
+  showKv($("nlpar-readout"), [["noise", a.noise.toFixed(a.noise < 10 ? 2 : 1)], ["left", `${(100 * a.left).toFixed(0)} %`],
+    ["itself", `${(100 * a.own).toFixed(0)} %`], ["neighbours", `${Math.max(more, 0)} / ${a.side * a.side - 1}`]]);
 }
 
 async function showCell() {
@@ -1294,7 +1470,8 @@ async function showCell() {
     $("pat-cell").title = `map cell ${cell}; shown at ${h} × ${w}`;
     let o = orientationOf(cell);
     const nPh = st.ze.phases.length;
-    if (!o && nPh && $("pat-live").checked && !st.busy) {
+    // (a fit pattern's orientation is the vote's, coarse and not refined: the refined one is preferred)
+    if ((!o || o.from === "fit") && nPh && $("pat-live").checked && !st.busy) {
       o = await indexNow(cell);
       if (run !== st.showRun) return;
     }
@@ -1316,7 +1493,7 @@ async function showCell() {
       if (nPh > 1) facts.push(["phase", ph.name]);
       facts.push(["NCC", nccOf(proc, sim, mask).toFixed(4)]);
       if (o.nmi !== null) {
-        facts.push(["NMI", `${o.nmi.toFixed(4)},  z ${o.z.toFixed(1)} above chance`]);
+        facts.push(["NMI", `${o.nmi.toFixed(4)}  (z ${o.z.toFixed(1)})`]);
         if (o.sweep !== null) facts.push(["accepted", o.sweep >= 0 ? (s.sweeps > 1 ? `in sweep ${o.sweep + 1}` : "yes") : ((s.accept_nmi > 0 ? o.nmi < s.accept_nmi : o.z < s.accept_z) ? `no (below ${acceptText()})` : "no (refinement not settled)")]);
       }
       // (as the results store an orientation: its representative in the fundamental zone)
@@ -1331,6 +1508,8 @@ async function showCell() {
     }
     if (exp.nlpar) facts.push(["averaging", `${(100 * exp.nlpar.left).toFixed(0)} % of the noise left`]);
     $("pat-facts").replaceChildren(...factRows(facts));
+    // the dock's comparison follows the pattern shown (it starts once this call is done)
+    queueMicrotask(showPcCompare);
   } catch (e) {
     if (run === st.showRun) { status(String(e.message || e), true); log(String(e.message || e), true); }
   }
@@ -1400,6 +1579,7 @@ function drawPc() {
 
 function drawVotes() {
   votes.show(st.votes, { start: st.pcStart, file: st.pcFile });
+  showPcCompare();
 }
 
 async function fitPc() {
@@ -1409,8 +1589,10 @@ async function fitPc() {
     st.fit = st.ze.fitPatterns();
     st.votes = st.ze.pcLevels();
     st.pcStart = r.start;
-    $("fit-readout").textContent = `centre  ${r.pc.map((v) => v.toFixed(5)).join("  ")}\nNCC     ${r.score.toFixed(4)}  (start ${r.startScore.toFixed(4)})\n${r.nCandidates.toLocaleString()} candidates × ${r.nPatterns} patterns, L ${st.settings.fit_bandwidth}${r.atBorder ? "\nthe best candidate is at the search's border: widen it, or fit again from here" : ""}`;
-    $("fit-readout").textContent += againstTrueGeometry();
+    showKv($("fit-readout"), [["NCC", r.score.toFixed(4)], ["start", r.startScore.toFixed(4)],
+      ["patterns", String(r.nPatterns)], ["candidates", r.nCandidates.toLocaleString()],
+      ...(r.atBorder ? [["", "at the search's edge: widen it", "warn wide"]] : []), ...againstTrueGeometry()]);
+    showPlaneSaid([]);
     done("geometry");
     selectDock("votes");
     drawVotes();
@@ -1419,34 +1601,58 @@ async function fitPc() {
   });
 }
 
-// What a plane fit found: the plane's source at the map's middle, how its points lie about it, and
-// what it says of the tilt, the scan and the steps, each with its standard error.
-function planeReadout(r) {
+/** What a geometry's plane of source points is: a tilt line (PCx fixed, PCy and PCz along the
+ *  rows: an affine plane with no slope across the columns and none in PCx) or a plane. */
+function planeName(kind, P) {
+  if (kind === 2) return "projective plane";
+  return P && P[0] === 0 && P[1] === 0 && P[3] === 0 && P[6] === 0 ? "tilt line" : "affine plane";
+}
+
+
+/** A plane fit's result: the rows shown, and the rest under Fit details (`before`: rows that go first there). */
+function planeReadout(r, before = []) {
   const deg = (v) => (v * 180) / Math.PI;
   const signed = (v, d) => `${v > 0 ? "+" : v < 0 ? "−" : ""}${Math.abs(v).toFixed(d)}`;
+  const pm = (v, se) => `${signed(deg(v), 2)}° ± ${deg(se).toFixed(2)}°`;
   const g = st.ze.geometry;
-  const lines = [
-    `plane   ${r.kind === 2 ? "projective" : "affine"}, ${r.nUsed.toLocaleString()} of ${r.nPatterns.toLocaleString()} patterns`,
-    `centre  ${r.pc.map((v) => v.toFixed(5)).join("  ")}`,
-    `scatter ${r.rmsd.map((v) => v.toFixed(5)).join("  ")}`,
-    `tilt    ${signed(deg(r.saidRot[1]), 2)}° ± ${deg(r.saidRotSe[1]).toFixed(2)}°  (sample ${(g.sampleTiltDeg - deg(r.saidRot[1])).toFixed(2)}°)`,
-    `swing   ${signed(deg(r.saidRot[0]), 2)}° ± ${deg(r.saidRotSe[0]).toFixed(2)}°`,
-    `scan    turned ${signed(deg(r.saidRot[2]), 2)}° ± ${deg(r.saidRotSe[2]).toFixed(2)}°`,
-    `        ${signed(deg(r.skew), 2)}° ± ${deg(r.skewSe).toFixed(2)}° off square`,
-  ];
-  if (r.step[0] > 0) lines.push(`steps   row ${r.step[0].toFixed(3)} ± ${r.stepSe[0].toFixed(3)}`, `        column ${r.step[1].toFixed(3)} ± ${r.stepSe[1].toFixed(3)}`);
-  lines.push(`frame   ${r.frame ? "follows the plane" : "as the tilts say"}`, `NCC     ${r.ncc.toFixed(4)}  (start ${r.startNcc.toFixed(4)})`);
-  return lines.join("\n");
+  const model = PLANE_MODELS[r.model];
+  const shown = [["model", model === "line" ? "tilt line" : model === "centre" ? "centre" : r.kind === 2 ? "projective" : "affine"],
+    ["used", `${r.nUsed.toLocaleString()} / ${r.nPatterns.toLocaleString()}`], ["NCC", r.ncc.toFixed(4)], ["start", r.startNcc.toFixed(4)]];
+  const more = [...before, ["scatter", r.rmsd.map((v) => v.toFixed(5)).join(" "), "wide"]];
+  // the automatic fit: each model's misfit on blocks of the map left out of its fit, against the best one's
+  if (r.compared) {
+    const tried = PLANE_MODELS.map((m, i) => [m, r.cv[i]]).filter(([, v]) => v > 0);
+    const best = Math.min(...tried.map(([, v]) => v));
+    more.push(["misfit", tried.map(([m, v]) => `${m === "affine" || m === "projective" ? "plane" : m} ${(v / best).toFixed(2)}`).join(" "), "wide"]);
+  }
+  if (model !== "centre") {
+    shown.push(["tilt", pm(r.saidRot[1], r.saidRotSe[1]), "wide"]);
+    more.push(["sample", `${(g.sampleTiltDeg - deg(r.saidRot[1])).toFixed(2)}°`], ["frame", r.frame ? "plane" : "nominal"]);
+    if (model !== "line") more.push(["swing", pm(r.saidRot[0], r.saidRotSe[0]), "wide"], ["scan turn", pm(r.saidRot[2], r.saidRotSe[2]), "wide"], ["skew", pm(r.skew, r.skewSe), "wide"]);
+    if (r.step[0] > 0) {
+      more.push(["row step", `${r.step[0].toFixed(3)} ± ${r.stepSe[0].toFixed(3)}`, "wide"]);
+      if (model !== "line") more.push(["col step", `${r.step[1].toFixed(3)} ± ${r.stepSe[1].toFixed(3)}`, "wide"]);
+    }
+  }
+  showPlaneSaid(more);
+  return shown;
+}
+
+/** The rows under Fit details (none: the details are gone). */
+function showPlaneSaid(rows) {
+  showKv($("plane-said"), rows);
+  $("plane-said-box").hidden = !rows.length;
 }
 
 /** A plane fit is done (by itself, or after the vote): its numbers, its points, and everything drawn from the
  *  geometry. `vote`: a line for the vote that came before it. */
-function afterPlane(r, vote = "") {
+function afterPlane(r, vote = []) {
   st.fit = st.ze.fitPatterns();
   st.plane = { r, pts: st.ze.planePoints() };
-  $("fit-readout").textContent = vote + planeReadout(r) + againstTrueGeometry();
+  showKv($("fit-readout"), [...planeReadout(r, vote), ...againstTrueGeometry()]);
   done("geometry");
-  selectDock("plane");
+  // (one centre leaves the vote's geometry: its search and the comparison are the view then)
+  selectDock(PLANE_MODELS[r.model] === "centre" ? "votes" : "plane");
   planeView.show(r, st.plane.pts, st.scan);
   geometryChanged(true);
   drawMapOverlay();
@@ -1468,7 +1674,7 @@ async function fitGeometry() {
     const mid = (a) => (a[0] + a[a.length - 1]) / 2;
     st.pcStart = st.votes.length ? [mid(st.votes[0].x), mid(st.votes[0].y), mid(st.votes[0].z)] : null;
     drawVotes();
-    afterPlane(r, `vote    ${r.startPc.map((v) => v.toFixed(5)).join("  ")}\n`);
+    afterPlane(r, [["vote", r.startPc.map((v) => v.toFixed(5)).join(" "), "wide"]]);
   });
 }
 
@@ -1478,7 +1684,7 @@ async function runIndex() {
   await busy("indexing…", async () => {
     await st.ze.indexBegin();
     st.resultsGeo = JSON.stringify(st.ze.geometry);
-    if (st.mapKind === "overview") setMapKind("ipf_z");
+    if (st.mapKind === "overview") setMapKind("ipf");
     const t0 = performance.now();
     let last = 0, visited = 0, s = null;
     for (;;) {
@@ -1487,13 +1693,15 @@ async function runIndex() {
       visited += Math.min(before.total - before.done, st.settings.batch);
       const dt = (performance.now() - t0) / 1000;
       progress(s.done / Math.max(s.total, 1));
-      const head = s.sweeps > 1 ? `sweep ${s.sweep + 1} of ${s.sweeps}, ${sweepLabel(s)}\n` : "";
-      $("index-readout").textContent = `${head}${s.done.toLocaleString()} of ${s.total.toLocaleString()} patterns  ·  ${(visited / Math.max(dt, 1e-6)).toFixed(0)} patterns/s\n${s.accepted.toLocaleString()} of ${s.region.toLocaleString()} accepted (${acceptText()})`;
+      showKv($("index-readout"), [...(s.sweeps > 1 ? [["sweep", `${s.sweep + 1} / ${s.sweeps} · ${sweepLabel(s)}`, "wide"]] : []),
+        ["indexed", `${s.done.toLocaleString()} / ${s.total.toLocaleString()}`], ["rate", `${Math.round(visited / Math.max(dt, 1e-6)).toLocaleString()}/s`],
+        ["accepted", `${s.accepted.toLocaleString()} / ${s.region.toLocaleString()} (${acceptText()})`, "wide"]]);
       if (performance.now() - last > 250 || s.left === 0) { st.results = st.ze.results(); drawMap(); last = performance.now(); await sleep(0); }
       if (s.left === 0 || st.stop) break;
     }
     st.results = st.ze.results();
-    $("index-readout").textContent += againstTruth();
+    const truth = againstTruth();
+    if (truth.length) showKv($("index-readout"), [...[...$("index-readout").children].reduce((rows, e, i, all) => (i % 2 ? rows : [...rows, [e.textContent, all[i + 1].textContent, e.className]]), []), ...truth]);
     // what chance gives on this scan: the scale z is read on, measured once for the run
     try { st.chance = await st.ze.chance(0); } catch { st.chance = null; }
     showSweeps();
@@ -1516,8 +1724,9 @@ async function runTune() {
     await st.ze.tune(() => !st.stop);
     st.settings = st.ze.settings;
     fields.show(st.settings);
-    // the engine's own summary, a setting to a line
-    $("index-readout").textContent = st.tuned.replace(/, (?=batch |refine_pixels |wg_)/g, "\n").replace("; ", "\n");
+    // what it landed on (the log has the engine's own summary)
+    const t = st.settings;
+    showKv($("index-readout"), [["batch", String(t.batch)], ["px / thread", String(t.refine_pixels)], ["WG refine", String(t.wg_refine)], ["WG FFT", String(t.wg_fft)]]);
   });
 }
 
@@ -1538,7 +1747,7 @@ function drawZ() {
   ctx.clearRect(0, 0, W, H);
   const zs = [];
   if (R) for (let i = 0; i < R.z.length; i++) if (R.phase[i] >= 0) zs.push(R.z[i]);
-  if (!zs.length) { $("z-hint").textContent = "Index to see how the matches stand above chance."; return; }
+  if (!zs.length) { $("z-hint").textContent = "Not indexed yet"; return; }
   // the threshold on z's scale: the calibration's own, or the absolute NMI's place on it
   const t = st.settings.accept_nmi > 0 && st.chance ? (st.settings.accept_nmi - st.chance.median) / st.chance.spread : st.settings.accept_z;
   const [q0, q1] = quantiles(Float32Array.from(zs), 0.002, 0.998);
@@ -1575,7 +1784,7 @@ function drawZ() {
     ctx.fillText(String(z), x(z), H - pad.b + 4);
   }
   const sorted = zs.slice().sort((a, b) => a - b);
-  $("z-hint").textContent = `z of ${zs.length.toLocaleString()} indexed cells: median ${sorted[sorted.length >> 1].toFixed(1)}; ${accepted.toLocaleString()} (${((100 * accepted) / zs.length).toFixed(1)} %) at or above the threshold ${st.settings.accept_nmi > 0 ? `NMI ${st.settings.accept_nmi} (z ${t.toFixed(1)})` : t}`;
+  $("z-hint").textContent = `${zs.length.toLocaleString()} cells · median z ${sorted[sorted.length >> 1].toFixed(1)} · ${accepted.toLocaleString()} (${((100 * accepted) / zs.length).toFixed(1)} %) at or above ${st.settings.accept_nmi > 0 ? `NMI ${st.settings.accept_nmi} (z ${t.toFixed(1)})` : `z ${t}`}`;
 }
 
 // ── docks, enabling, files ──
@@ -1586,7 +1795,7 @@ function selectDock(kind) {
   $("dock-meta").textContent = "";
   $("votes-meta").hidden = kind !== "votes";
   if (kind === "master") showMaster();
-  if (kind === "votes") votes.draw();
+  if (kind === "votes") { sizeCompare(); votes.draw(); showPcCompare(); }
   if (kind === "plane") planeView.draw();
   if (kind === "z") drawZ();
 }
@@ -1729,10 +1938,10 @@ async function makeToy() {
   });
 }
 
-/** How the indexed orientations and phases stand against a toy scan's own answer. */
+/** How the indexed orientations and phases stand against a toy scan's own answer: rows for a `.kv`. */
 function againstTruth() {
   const R = st.results, T = st.truth;
-  if (!R || !T || T.phase.length !== R.phase.length) return "";
+  if (!R || !T || T.phase.length !== R.phase.length) return [];
   const off = [];
   let crystals = 0, right = 0, blank = 0, blankAccepted = 0;
   for (let i = 0; i < R.phase.length; i++) {
@@ -1743,23 +1952,28 @@ function againstTruth() {
     right++;
     off.push((st.ze.disorientation(R.phase[i], R.quaternions.subarray(4 * i, 4 * i + 4), T.quaternions.subarray(4 * i, 4 * i + 4)) * 180) / Math.PI);
   }
-  if (!crystals && !blank) return "";
+  if (!crystals && !blank) return [];
   off.sort((a, b) => a - b);
   const within = off.filter((d) => d < 1).length;
-  let text = "\nagainst the toy scan's answer: ";
-  if (crystals) text += `${st.ze.phases.length > 1 ? `phase right for ${((100 * right) / crystals).toFixed(1)} %; ` : ""}orientations a median ${off.length ? off[off.length >> 1].toFixed(3) : "–"}° off, ${((100 * within) / crystals).toFixed(1)} % within 1°`;
-  if (blank) text += `${crystals ? "; " : ""}${blankAccepted} of ${blank} blank cells accepted`;
-  return text;
+  const rows = [];
+  if (crystals) {
+    rows.push(["vs truth", `median ${off.length ? off[off.length >> 1].toFixed(3) : "–"}° · ${((100 * within) / crystals).toFixed(1)} % < 1°`, "wide"]);
+    if (st.ze.phases.length > 1) rows.push(["phase", `${((100 * right) / crystals).toFixed(1)} % right`, "wide"]);
+  }
+  if (blank) rows.push(["blank", `${blankAccepted} / ${blank} accepted`, "wide"]);
+  return rows;
 }
 
-/** How a fitted geometry stands against the one a toy scan was made under. */
+/** How a fitted geometry stands against the one a toy scan was made under: rows for a `.kv`. */
 function againstTrueGeometry() {
   const T = st.truth && st.truth.geometry;
-  if (!T) return "";
+  if (!T) return [];
   const g = st.ze.geometry;
   const pc = Math.max(...g.pc.map((v, i) => Math.abs(v - T.pc[i])));
   const rot = Math.max(...g.rot.map((v, i) => Math.abs(v - T.rot[i]))) * 180 / Math.PI;
-  return `\nagainst the toy scan's geometry: pattern centre within ${pc.toFixed(5)}, rotation within ${rot.toFixed(3)}°${Math.abs(g.pxUm - T.pxUm) > 1e-9 * T.pxUm ? `; the pixel size is ${g.pxUm.toFixed(1)} µm, the scan was made with ${T.pxUm.toFixed(1)}` : ""}`;
+  const rows = [["vs truth", `PC ${pc.toFixed(5)} · rotation ${rot.toFixed(3)}°`, "wide"]];
+  if (Math.abs(g.pxUm - T.pxUm) > 1e-9 * T.pxUm) rows.push(["pixel", `${g.pxUm.toFixed(1)} µm (true ${T.pxUm.toFixed(1)})`, "wide"]);
+  return rows;
 }
 
 async function loadExample() {
@@ -2011,9 +2225,18 @@ function updateWiring() {
   });
   $("pat-stage").addEventListener("change", (e) => { st.stage = e.target.value; showStage(); showCell(); });
   $("show-fit").addEventListener("change", drawMapOverlay);
-  $("map-legend").addEventListener("click", () => { st.legendFolded = !st.legendFolded; drawLegend(); });
+  $("btn-key").addEventListener("click", () => { st.legendFolded = !st.legendFolded; drawLegend(); });
+  $("ipf-axis").addEventListener("change", (e) => setMapKind(e.target.value));
+  $("ipf-key").addEventListener("change", (e) => applySetting("ipf_colors", e.target.value));
   $("pat-live").addEventListener("change", showCell);
   $("pat-cmp").addEventListener("change", (e) => { st.cmp.mode = e.target.value; drawCompare(); });
+  // the comparison in the dock: both centres in turn, or one held; a click on it switches
+  $("pc-cmp-show").addEventListener("click", (e) => { const b = e.target.closest("button"); if (b) { st.pcShow = b.dataset.show; drawPcCompare(); } });
+  $("pc-cmp-well").addEventListener("click", () => {
+    if (!st.pcPair || !st.pcPair.file) return;
+    st.pcShow = st.pcShow === "file" ? "now" : st.pcShow === "now" ? "file" : st.pcOn === "file" ? "now" : "file";
+    drawPcCompare();
+  });
   // the bar between the pattern and its simulation: press or drag anywhere on the image
   {
     const well = $("pat-cmp-well");
@@ -2053,7 +2276,7 @@ function updateWiring() {
     const d = { ArrowLeft: [0, -1], ArrowRight: [0, 1], ArrowUp: [-1, 0], ArrowDown: [1, 0] }[e.key];
     if (!d || e.altKey || e.ctrlKey || e.metaKey) return;
     const t = e.target;
-    if (t.closest && t.closest("input, select, textarea, [contenteditable], #tabs, .votes-grid")) return;
+    if (t.closest && t.closest("input, select, textarea, [contenteditable], #tabs, .pcv-search")) return;
     if (app.dataset.tab === "simulate") {
       if (d[0] === 0 && stepBin(d[1])) e.preventDefault();
       return;
@@ -2123,7 +2346,7 @@ function updateWiring() {
   // whatever is laid out by hand follows its pane
   new ResizeObserver(() => { if (st.scan) { layoutMap(); drawMapOverlay(); } }).observe(well);
   new ResizeObserver(() => { if (st.scan) { drawPc(); if (st.cmp.mode === "split") drawCompare(); } }).observe($("pats"));
-  new ResizeObserver(() => { if (!$("dock-votes").hidden) votes.draw(); if (!$("dock-plane").hidden) planeView.draw(); drawZ(); }).observe(document.querySelector(".dock"));
+  new ResizeObserver(() => { if (!$("dock-votes").hidden) { sizeCompare(); votes.draw(); } if (!$("dock-plane").hidden) planeView.draw(); drawZ(); }).observe(document.querySelector(".dock"));
   new ResizeObserver(() => showEnergy()).observe($("energy"));
 
   // drop files anywhere

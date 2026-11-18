@@ -109,14 +109,17 @@ const evaluate = async (expr, timeout = 300000) => {
 await send("Runtime.enable", {}, sessionId);
 await send("Page.navigate", { url: appUrl }, sessionId);
 
-// Set a control of the rail by its label, as a user would.
-const setField = (label, value) => `{
-  const el = [...document.querySelectorAll(".field")].find((f) => f.querySelector("span")?.textContent === ${JSON.stringify(label)});
+// Set a control of the rail, found by its setting's key, as a user would set it.
+const setField = (key, value) => `{
+  const el = document.querySelector('.field[data-key=${JSON.stringify(key)}]');
   const input = el.querySelector("input, select");
   if (input.type === "checkbox") input.checked = ${JSON.stringify(value === true)}; else input.value = ${JSON.stringify(String(value))};
   input.dispatchEvent(new Event("change"));
   await new Promise((r) => setTimeout(r, 60));
 }`;
+
+// A fit's results as names and values: those shown and those under Fit details.
+const KV = `const kvOf = (...ids) => Object.fromEntries(ids.flatMap((id) => [...document.querySelectorAll("#" + id + " dt")].map((dt) => [dt.textContent, dt.nextElementSibling.textContent])));`;
 
 // Click a button and wait for the app's job to finish.
 const job = (id) => `
@@ -163,55 +166,57 @@ try {
     let t0 = performance.now();
     ${job("btn-fit-pc")}
     const vote = { pc: window.ze.geometry.pc, s: (performance.now() - t0) / 1000, votes: window.ze.pcScores().shape };
-    // the votes view: every grid of the search, three slices each; a click moves the cross-hair
+    // the votes view: every tier of the search, its slices side by side; a click moves the cross-hair
     const grids = [...document.querySelectorAll("#votes-levels button")];
     grids[0].click();
-    const xy = document.getElementById("votes");
-    const r = xy.getBoundingClientRect();
+    const all = document.getElementById("votes-all");
+    const r = all.getBoundingClientRect();
     const before = document.getElementById("votes-readout").textContent;
-    xy.dispatchEvent(new MouseEvent("click", { clientX: r.left + r.width * 0.1, clientY: r.top + r.height * 0.9, bubbles: true }));
+    all.dispatchEvent(new MouseEvent("click", { clientX: r.left + (0.5 / all.width) * r.width, clientY: r.top + (8.5 / all.height) * r.height, bubbles: true }));
     // the slices show the ballots' density, or the mean correlation
-    const shows = () => document.getElementById("votes").getContext("2d").getImageData(0, 0, 9, 9).data.join();
+    const shows = () => document.getElementById("votes-all").getContext("2d").getImageData(0, 0, 9, 9).data.join();
     const asBallots = shows();
     document.querySelector('#votes-what [data-what="mean"]').click();
     vote.what = { differ: asBallots !== shows(), said: document.getElementById("votes-readout").textContent.split("\\n").pop() };
     document.querySelector('#votes-what [data-what="ballots"]').click();
     // the patterns' own favourites are an overlay to ask for: off as the app opens
     const pats = document.getElementById("votes-pats");
-    const marksOff = document.querySelectorAll("#votes-over circle").length + (pats.checked ? 1000 : 0);
+    const marksOff = document.querySelectorAll("#votes-all-over circle").length + (pats.checked ? 1000 : 0);
     pats.click();
-    vote.view = { marksOff, grids: grids.length, slices: ["votes", "votes-xz", "votes-yz"].map((id) => document.getElementById(id).width), moved: before !== document.getElementById("votes-readout").textContent,
-      marks: document.querySelectorAll("#votes-over circle").length, readout: document.getElementById("votes-readout").textContent.split("\\n")[1] };
+    vote.view = { marksOff, grids: grids.length, every: all.width, moved: before !== document.getElementById("votes-readout").textContent,
+      marks: document.querySelectorAll("#votes-all-over circle").length, readout: document.getElementById("votes-readout").textContent.split("\\n")[1] };
     // through the volume: the slider under a slice steps along its third axis; every slice
     // along an axis shows side by side
     pats.click();
-    const cap = () => document.getElementById("votes-cap").textContent;
-    const slide = document.getElementById("votes-slide");
+    const cap = () => document.getElementById("votes-all-cap").textContent;
+    const slide = document.getElementById("votes-all-slide");
     const at0 = cap();
     slide.value = String((+slide.value + 1) % (+slide.max + 1));
     slide.dispatchEvent(new Event("input"));
     const at1 = cap();
-    document.getElementById("votes").parentElement.dispatchEvent(new WheelEvent("wheel", { deltaY: 120, bubbles: true, cancelable: true }));
+    all.parentElement.dispatchEvent(new WheelEvent("wheel", { deltaY: 120, bubbles: true, cancelable: true }));
     const at2 = cap();
+    document.querySelector('#votes-mode [data-mode="y"]').click();
+    const alongY = cap();
     document.querySelector('#votes-mode [data-mode="z"]').click();
-    vote.volume = { slid: at0 !== at1, scrolled: at1 !== at2, steps: +slide.max + 1, every: document.getElementById("votes-all").width, shown: document.getElementById("votes-all").getBoundingClientRect().width > 50, cap: at1 };
-    document.querySelector('#votes-mode [data-mode="planes"]').click();
+    vote.volume = { slid: at0 !== at1, scrolled: at1 !== at2, steps: +slide.max + 1, every: all.width, shown: all.getBoundingClientRect().width > 50, cap: at1, alongY };
     grids[grids.length - 1].click();
     t0 = performance.now();
     ${job("btn-fit-plane")}
     // the plane of source points: each fit pattern's own, and the plane through them, in a view of their own
-    const plane = { pc: window.ze.geometry.pc, s: (performance.now() - t0) / 1000, readout: document.getElementById("fit-readout").textContent, kind: window.ze.geometry.planeKind,
-      said: document.getElementById("geo-readout").textContent, shown: !document.getElementById("dock-plane").hidden && document.getElementById("plane-canvas").width > 40,
+    ${KV}
+    const plane = { pc: window.ze.geometry.pc, s: (performance.now() - t0) / 1000, readout: kvOf("fit-readout", "plane-said"), kind: window.ze.geometry.planeKind,
+      said: document.getElementById("plane-state").textContent, shown: !document.getElementById("dock-plane").hidden && document.getElementById("plane-canvas").width > 40,
       points: window.ze.planePoints().cells.length, cap: document.getElementById("plane-cap").textContent };
     document.querySelector('#dock-kind [data-dock="votes"]').click();
     // the plane fit moved the pattern centre: the slices cut through it again
     const cross = /cross-hair\\s+([\\d.]+) ([\\d.]+) ([\\d.]+)/.exec(document.getElementById("votes-readout").textContent).slice(1).map(Number);
-    const follow = { cross, meta: document.getElementById("votes-meta").textContent, grid: document.querySelector("#votes-levels [aria-pressed=true]").textContent };
+    const follow = { cross, following: document.getElementById("votes-follow").disabled, grid: document.querySelector("#votes-levels [aria-pressed=true]").textContent };
     // the whole fit by itself, from a pattern centre put well off
     window.ze.setGeometry({ pc: [plane.pc[0] + 0.03, plane.pc[1] - 0.03, plane.pc[2] + 0.02] });
     t0 = performance.now();
     ${job("btn-fit-auto")}
-    const auto = { pc: window.ze.geometry.pc, rot: window.ze.geometry.rot, px: window.ze.geometry.pxUm, s: (performance.now() - t0) / 1000, readout: document.getElementById("fit-readout").textContent,
+    const auto = { pc: window.ze.geometry.pc, rot: window.ze.geometry.rot, px: window.ze.geometry.pxUm, s: (performance.now() - t0) / 1000, readout: kvOf("fit-readout", "plane-said"),
       grids: document.querySelectorAll("#votes-levels button").length, kind: window.ze.geometry.planeKind,
       // the plane's view came up by itself
       shown: !document.getElementById("dock-plane").hidden && document.getElementById("plane-canvas").width > 40 };
@@ -283,7 +288,7 @@ try {
     px.value = "500";
     px.dispatchEvent(new Event("change"));
     await new Promise((r) => setTimeout(r, 150));
-    auto.pixel = { typed: window.ze.geometry.pxUm, said: document.getElementById("geo-readout").textContent };
+    auto.pixel = { typed: window.ze.geometry.pxUm, said: document.getElementById("px-src").textContent };
     px.value = "";
     px.dispatchEvent(new Event("change"));
     await new Promise((r) => setTimeout(r, 150));
@@ -293,27 +298,53 @@ try {
     // the detector at its nominal attitude: the plane's sample frame is the nominal one unless
     // it is asked to follow the plane.
     auto.turned = window.ze.geometry.rot.map((v) => (v * 180) / Math.PI);
-    return { vote, plane, auto, readout: document.getElementById("fit-readout").textContent, follow };`);
+    return { vote, plane, auto, follow };`);
   const err = (pc) => Math.max(...pc.map((v, i) => Math.abs(v - pcFile[i])));
   check("Fit pattern centre votes near the scan's centre", err(fits.vote.pc) < 0.008, `${fits.vote.pc.map((v) => v.toFixed(4)).join(" ")} (${err(fits.vote.pc).toFixed(4)} off) in ${fits.vote.s.toFixed(1)} s`);
-  check("the votes view shows how the search went", fits.vote.view.grids >= 3 && fits.vote.view.slices.join() === "9,9,9" && fits.vote.view.moved && fits.vote.view.marks > 0 && fits.vote.view.marksOff === 0,
-    `${fits.vote.view.grids} grids, slices ${fits.vote.view.slices.join(" / ")} candidates wide, ${fits.vote.view.marks} candidates some pattern prefers; ${fits.vote.view.readout}`);
-  check("the volume shows the ballots that chose, or the mean correlation", fits.vote.what.differ && /ballots lie by the winner/.test(fits.vote.what.said), fits.vote.what.said);
-  check("its volume can be gone through slice by slice", fits.vote.volume.slid && fits.vote.volume.scrolled && fits.vote.volume.steps === 5 && fits.vote.volume.every > 9 && fits.vote.volume.shown,
+  check("the votes view shows how the search went", fits.vote.view.grids >= 3 && fits.vote.view.every > 9 && fits.vote.view.moved && fits.vote.view.marks > 0 && fits.vote.view.marksOff === 0,
+    `${fits.vote.view.grids} tiers, slices ${fits.vote.view.every} cells across, ${fits.vote.view.marks} candidates some pattern prefers; ${fits.vote.view.readout}`);
+  check("the volume shows the ballots that chose, or the mean correlation", fits.vote.what.differ && /^ballots\s+\d+ \/ \d+ at the winner$/.test(fits.vote.what.said), fits.vote.what.said);
+  check("its volume can be gone through slice by slice", fits.vote.volume.slid && fits.vote.volume.scrolled && fits.vote.volume.steps === 5 && fits.vote.volume.every > 9 && fits.vote.volume.shown && /^y = [\d.]+ \(\d+\/\d+\)$/.test(fits.vote.volume.alongY),
     `${fits.vote.volume.steps} slices along z by the slider and the wheel (${fits.vote.volume.cap.trim()}); every z side by side, ${fits.vote.volume.every} cells across`);
   const off = Math.max(...fits.follow.cross.map((v, i) => Math.abs(v - fits.plane.pc[i])));
-  check("the slices follow the pattern centre a fit moves", /cut through the pattern centre/.test(fits.follow.meta) && off < 0.006,
+  check("the slices follow the pattern centre a fit moves", fits.follow.following && off < 0.006,
     `after Fit plane: cross-hair ${fits.follow.cross.join(" ")} in grid ${fits.follow.grid}, ${off.toFixed(4)} from the pattern centre`);
-  check("Fit plane fits the plane of source points and shows it", err(fits.plane.pc) < 0.004 && fits.plane.kind === 1 && fits.plane.shown && fits.plane.points > 100 && /^plane\s+affine, [\d,]+ of [\d,]+ patterns$/m.test(fits.plane.readout)
-    && /^tilt\s+[+−][\d.]+° ± [\d.]+°/m.test(fits.plane.readout) && /the fitted affine plane/.test(fits.plane.said) && /affine plane through/.test(fits.plane.cap),
-    `${fits.plane.pc.map((v) => v.toFixed(5)).join(" ")} (${err(fits.plane.pc).toFixed(5)} from kikuchipy's) in ${fits.plane.s.toFixed(2)} s; ${fits.plane.points} points; ${fits.plane.readout.split("\n").slice(0, 4).join("; ")}`);
+  check("Fit plane fits the plane of source points and shows it", err(fits.plane.pc) < 0.004 && fits.plane.kind === 1 && fits.plane.shown && fits.plane.points > 100 && fits.plane.readout.model === "affine" && /^[\d,]+ \/ [\d,]+$/.test(fits.plane.readout.used)
+    && /^[+−][\d.]+° ± [\d.]+°$/.test(fits.plane.readout.tilt) && /^[\d.]+ [\d.]+ [\d.]+$/.test(fits.plane.readout.scatter) && fits.plane.said === "affine plane" && /affine plane through/.test(fits.plane.cap),
+    `${fits.plane.pc.map((v) => v.toFixed(5)).join(" ")} (${err(fits.plane.pc).toFixed(5)} from kikuchipy's) in ${fits.plane.s.toFixed(2)} s; ${fits.plane.points} points; ${["model", "used", "NCC", "tilt"].map((k) => `${k} ${fits.plane.readout[k]}`).join("; ")}`);
+  // the pattern centre the file gave beside the fitted one, and in the dock the selected pattern
+  // beside its simulations under the two in turn (a click switches); the geometry in use stays
+  const flick = await evaluate(`
+    document.getElementById("tab-geometry").click();
+    document.querySelector('#dock-kind [data-dock="votes"]').click();
+    const before = window.ze.geometry.pc.join();
+    const tag = () => document.getElementById("pc-cmp-tag").textContent;
+    const said = new Set();
+    for (let i = 0; i < 300 && said.size < 2; i++) {
+      if (tag()) said.add(tag());
+      await new Promise((r) => setTimeout(r, 100));
+    }
+    document.querySelector('#pc-cmp-show [data-show="file"]').click();
+    const held = tag();
+    await new Promise((r) => setTimeout(r, 900));
+    const still = tag();
+    document.getElementById("pc-cmp-well").click();
+    const switched = tag();
+    document.querySelector('#pc-cmp-show [data-show="flicker"]').click();
+    document.getElementById("tab-data").click();
+    return { said: [...said], table: document.getElementById("pc-grid").innerText, readout: [...document.getElementById("pc-cmp-readout").children].map((d) => d.textContent).join("\\n"),
+      same: window.ze.geometry.pc.join() === before, hold: held === "file PC" && still === held && switched === "current PC",
+      exp: document.getElementById("pc-cmp-exp").width };`);
+  check("the file's pattern centre and the fitted one side by side, and the pattern beside its simulations under the two", /file/.test(flick.table) && /current/.test(flick.table) && /Δ/.test(flick.table)
+    && flick.said.length === 2 && flick.hold && flick.same && flick.exp > 1 && /Δ NCC\s+[+−][\d.]+/.test(flick.readout),
+    `${flick.said.join(" / ")}; ${flick.readout.split("\n").slice(1).join("; ")}`);
+
   // (the scan's file gives the detector's pixel: 70 µm binned by 8)
-  const lines = fits.auto.readout.split("\n");
-  const line = (start) => lines.find((l) => l.startsWith(start)) || "";
+  const autoSaid = fits.auto.readout;
   check("Auto fit geometry is the vote, then the plane", err(fits.auto.pc) < 0.004 && fits.auto.grids >= 3 && fits.auto.px === 560 && fits.auto.shown && fits.auto.kind === 1 && fits.auto.dropped === 0
-    && /^vote\s+[\d.]+\s+[\d.]+\s+[\d.]+$/.test(lines[0]) && /^plane\s+affine/.test(line("plane")) && /^centre\s+[\d.]+\s+[\d.]+\s+[\d.]+$/.test(line("centre")) && fits.auto.turned.every((v) => v === 0),
-    `from 0.03 off: ${fits.auto.pc.map((v) => v.toFixed(5)).join(" ")} (${err(fits.auto.pc).toFixed(5)} from kikuchipy's), in ${fits.auto.s.toFixed(2)} s; "${lines[0]}"; "${line("plane")}"`);
-  check("the detector's pixel size can be typed in, and cleared", fits.auto.pixel.typed === 500 && /typed in/.test(fits.auto.pixel.said) && fits.auto.pixel.cleared === 560 && fits.auto.pixel.shown === 560,
+    && /^[\d.]+ [\d.]+ [\d.]+$/.test(autoSaid.vote) && autoSaid.model === "affine" && /^centre [\d.]+ line [\d.]+ plane 1\.00$/.test(autoSaid.misfit) && fits.auto.turned.every((v) => v === 0),
+    `from 0.03 off: ${fits.auto.pc.map((v) => v.toFixed(5)).join(" ")} (${err(fits.auto.pc).toFixed(5)} from kikuchipy's), in ${fits.auto.s.toFixed(2)} s; vote ${autoSaid.vote}; ${autoSaid.model}, misfit ${autoSaid.misfit}`);
+  check("the detector's pixel size can be typed in, and cleared", fits.auto.pixel.typed === 500 && fits.auto.pixel.said === "typed" && fits.auto.pixel.cleared === 560 && fits.auto.pixel.shown === 560,
     `${fits.auto.pixel.said}; cleared: ${fits.auto.pixel.cleared} µm`);
   check("the pattern centre's volume can be turned about", fits.auto.volume.lit > 200 && fits.auto.volume.turned, `${fits.auto.volume.lit} pixels lit; a drag redraws it`);
   check("the pattern and its simulation split by a bar", fits.auto.split.shown && fits.auto.split.moved && fits.auto.split.cap === "split", fits.auto.split.cap);
@@ -340,7 +371,7 @@ try {
     return { n, ncc: ncc / n, median: dis[dis.length >> 1], within3: dis.filter((d) => d < 3).length / dis.length, secs, ang: ang.length, map: map.length,
       kind: document.querySelector("#map-kind [aria-pressed=true]").dataset.kind, stats: window.ze.stats(),
       key: { w: document.querySelector("#map-legend canvas")?.width || 0, names: [...document.querySelectorAll("#map-legend .key span")].map((e) => e.textContent).join(" ") } };`);
-  check("Index covers the map", idx.n === 4125 && idx.kind === "ipf_z" && idx.map === 4125 * 4, `${idx.n} patterns in ${idx.secs.toFixed(2)} s (${(idx.n / idx.secs).toFixed(0)} patterns/s)`);
+  check("Index covers the map", idx.n === 4125 && idx.kind === "ipf" && idx.map === 4125 * 4, `${idx.n} patterns in ${idx.secs.toFixed(2)} s (${(idx.n / idx.secs).toFixed(0)} patterns/s)`);
   check("the orientations are the ones kikuchipy refined", idx.median < 0.6 && idx.within3 > 0.97 && idx.ncc > 0.45, `median ${idx.median.toFixed(3)}° apart, within 3°: ${(100 * idx.within3).toFixed(1)} %, mean NCC ${idx.ncc.toFixed(3)}`);
   check("the export has every cell", idx.ang === 4125, `${idx.ang} lines`);
   check("the map says what its colours mean", idx.key.w > 20 && idx.key.names === "001 101 111", `an inverse pole figure key ${idx.key.w} px wide, corners ${idx.key.names}`);
@@ -352,10 +383,10 @@ try {
     await pick("perfect_rotation");
     const c1 = document.getElementById("map").getContext("2d").getImageData(0, 0, 75, 55).data.join();
     const out = { changed: c0 !== c1, setting: window.ze.settings.ipf_colors, w: document.querySelector("#map-legend canvas")?.width || 0,
-      names: [...document.querySelectorAll("#map-legend .key span")].map((e) => e.textContent).join(" "), dimmed: [...document.querySelectorAll(".field")].filter((f) => /λ/.test(f.textContent)).map((f) => f.dataset.off).join("") };
+      names: [...document.querySelectorAll("#map-legend .key span")].map((e) => e.textContent).join(" "), dimmed: [...document.querySelectorAll('.field[data-key^="ipf_"]')].map((f) => f.dataset.off).join("") };
     await pick("classic");
     out.back = [...document.querySelectorAll("#map-legend .key span")].map((e) => e.textContent).join(" ");
-    out.dimmedAfter = [...document.querySelectorAll(".field")].filter((f) => /λ/.test(f.textContent)).map((f) => f.dataset.off).join("");
+    out.dimmedAfter = [...document.querySelectorAll('.field[data-key^="ipf_"]')].map((f) => f.dataset.off).join("");
     return out;`);
   check("the colours can be the paper's, by orientation", keyed.changed && keyed.setting === "perfect_rotation" && keyed.w > 20 && keyed.names === "001 101 111 011" && keyed.dimmed === "00" && keyed.back === "001 101 111" && keyed.dimmedAfter === "11",
     `the key's corners ${keyed.names}; its two gradients' controls in use, and dimmed again under the classic colours`);
@@ -370,7 +401,7 @@ try {
     const scan = window.ze.scan, meta = document.getElementById("scan-meta").textContent;
     document.getElementById("tab-index").click();
     ${job("btn-index")}
-    const said = document.getElementById("index-readout").textContent.split("\\n").pop();
+    const said = [...document.querySelectorAll("#index-readout dd")].map((d) => d.textContent).find((t) => /median/.test(t)) || "";
     const out = { enabled, rows: scan.rows, cols: scan.cols, meta, said, median: +(/median ([\\d.]+)°/.exec(said) || [0, 99])[1] };
     return out;`);
   check("a toy scan can be made from the masters and indexed against its answer", toy.enabled && toy.rows === 24 && toy.cols === 32 && /toy scan, seed 3/.test(toy.meta) && toy.median < 0.5, `${toy.meta}; ${toy.said}`);
@@ -407,10 +438,10 @@ try {
     ${job("btn-tune")}
     const said = (/tuned on .*?per second/.exec(document.getElementById("log").textContent) || [""])[0];
     const s = window.ze.settings;
-    const shown = [...document.querySelectorAll(".field")].find((f) => f.querySelector("span")?.textContent === "patterns per step").querySelector("input").value;
+    const shown = document.querySelector('.field[data-key="batch"] input').value;
     return { said, batch: s.batch, shown, before };`);
   check("Tune speed times a sample and sets the batch", tune.said.startsWith("tuned on") && String(tune.batch) === tune.shown, tune.said);
-  await evaluate(`${setField("patterns per step", 256)} ${setField("pixels per invocation", 64)} ${setField("correlation memory (MiB)", 256)} ${setField("workgroup, correlation", 64)} ${setField("workgroup, refinement", 64)} return 1;`);
+  await evaluate(`${setField("batch", 256)} ${setField("refine_pixels", 64)} ${setField("tile_mb", 256)} ${setField("wg_fft", 64)} ${setField("wg_refine", 64)} return 1;`);
 
   // averaged with their neighbours first (NLPAR): the pattern view shows the average, and
   // shows another when the averaging's settings change
@@ -426,31 +457,31 @@ try {
   const pre = await evaluate(`${setField("sweeps", 1)} ${look}
     const c = document.getElementById("pat-exp");
     const plain = Array.from(c.getContext("2d").getImageData(0, 0, c.width, c.height).data.filter((_, i) => i % 4 === 0));
-    ${setField("average with neighbours (NLPAR)", true)}
+    ${setField("nlpar", true)}
     const on = await run();
-    ${setField("lambda", 1.4)}
+    ${setField("nlpar_lambda", 1.4)}
     const wide = await run();
-    ${setField("lambda", 0.7)}
-    ${setField("cells each way", 1)}
+    ${setField("nlpar_lambda", 0.7)}
+    ${setField("nlpar_radius", 1)}
     const small = await run();
-    ${setField("cells each way", 3)}
+    ${setField("nlpar_radius", 3)}
     const differ = (a, b) => a.reduce((n, v, i) => n + (v !== b[i]), 0) / a.length;
-    return { on: differ(plain, on.px), lambda: differ(on.px, wide.px), radius: differ(on.px, small.px), cap: on.cap, said: on.said.split("\\n").slice(1).join("; "), saidWide: wide.said.split("\\n")[1], shares: [on.shares, small.shares] };`);
-  check("the pattern view shows the averaging, and follows its settings", pre.on > 0.3 && pre.lambda > 0.3 && pre.radius > 0.3 && /averaged 7 × 7/.test(pre.cap) && pre.shares.join() === "7,3" && /of it left/.test(pre.said) && pre.said !== pre.saidWide,
+    return { on: differ(plain, on.px), lambda: differ(on.px, wide.px), radius: differ(on.px, small.px), cap: on.cap, said: on.said, saidWide: wide.said, shares: [on.shares, small.shares] };`);
+  check("the pattern view shows the averaging, and follows its settings", pre.on > 0.3 && pre.lambda > 0.3 && pre.radius > 0.3 && /averaged 7 × 7/.test(pre.cap) && pre.shares.join() === "7,3" && /left/.test(pre.said) && pre.said !== pre.saidWide,
     `${pre.cap}: ${(100 * pre.on).toFixed(0)} % of its pixels changed; λ 0.7 → 1.4 changed ${(100 * pre.lambda).toFixed(0)} %, 7 × 7 → 3 × 3 ${(100 * pre.radius).toFixed(0)} %; ${pre.said}`);
   const nl = await again();
   const said = await evaluate(`return (/neighbour averaging: .*?itself/.exec(document.getElementById("log").textContent) || [""])[0];`);
   check("patterns averaged with their neighbours index better", nl.median < 0.6 && nl.within3 > 0.965 && nl.ncc > idx.ncc + 0.03 && said.includes("% of it left"),
     `median ${nl.median.toFixed(3)}°, within 3°: ${(100 * nl.within3).toFixed(1)} %, mean NCC ${idx.ncc.toFixed(3)} → ${nl.ncc.toFixed(3)}; ${said}`);
-  await evaluate(`${setField("average with neighbours (NLPAR)", false)} return 1;`);
-  await evaluate(`${setField("sweeps", 1)} ${setField("reduce by", 2)} ${setField("at stored size", "refine")} return 1;`);
+  await evaluate(`${setField("nlpar", false)} return 1;`);
+  await evaluate(`${setField("sweeps", 1)} ${setField("binning", 2)} ${setField("full_resolution", "refine")} return 1;`);
   const bin = await again();
   check("a search on binned patterns, refined at the stored size", bin.shape.join() === "30,30" && bin.median < 0.6 && bin.within3 > 0.965,
     `search at ${bin.shape.join(" × ")}: median ${bin.median.toFixed(3)}°, within 3°: ${(100 * bin.within3).toFixed(1)} %`);
-  await evaluate(`${setField("reduce by", 1)} return 1;`);
+  await evaluate(`${setField("binning", 1)} return 1;`);
 
   // a first sweep on the dictionary's components, the correlation for what it leaves
-  await evaluate(`${setField("sweeps", 2)} ${setField("earlier sweeps by", "pca")} ${setField("first dictionary grid", 40)} return 1;`);
+  await evaluate(`${setField("sweeps", 2)} ${setField("sweep_method", "pca")} ${setField("sweep_dict_grid", 40)} return 1;`);
   const mix = await again();
   check("dictionary components first, the correlation for the rest", mix.median < 0.6 && mix.within3 > 0.965 && mix.bySweep[0] > 3300 && mix.bySweep[1] > 0,
     `median ${mix.median.toFixed(3)}°, within 3°: ${(100 * mix.within3).toFixed(1)} %, accepted by the components: ${mix.bySweep[0]}, by the correlation: ${mix.bySweep[1]}, never: ${mix.bySweep[-1] || 0}`);
@@ -498,8 +529,8 @@ try {
     window.dispatchEvent(new DragEvent("drop", { dataTransfer: dt, bubbles: true, cancelable: true }));
     for (let i = 0; i < 100 && window.ze.settings.bandwidth !== 48; i++) await new Promise((r) => setTimeout(r, 50));
     await new Promise((r) => setTimeout(r, 300));
-    const shown = (label) => [...document.querySelectorAll(".field")].find((f) => f.querySelector("span")?.textContent === label).querySelector("input").value;
-    const out = { s: window.ze.settings, pc: window.ze.geometry.pc, bw: shown("bandwidth L"), pcShown: [...document.querySelectorAll('#geometry-fields input[data-geo="pc"]')].map((i) => +i.value) };
+    const shown = (key) => document.querySelector('.field[data-key="' + key + '"] input').value;
+    const out = { s: window.ze.settings, pc: window.ze.geometry.pc, bw: shown("bandwidth"), pcShown: [...document.querySelectorAll('#pc-grid input[data-geo="pc"]')].map((i) => +i.value) };
     window.ze.configure({ bandwidth: 64, accept_z: 15 });
     window.ze.setGeometry(g);
     return out;`);
@@ -515,7 +546,7 @@ try {
     sel.value = "GaN";
     sel.dispatchEvent(new Event("change"));
     for (let i = 0; i < 100 && !document.getElementById("crystal-group").textContent; i++) await new Promise((r) => setTimeout(r, 50));
-    ${setField("half-width (px)", 60)}
+    ${setField("sim_halfw", 60)}
     const before = window.ze.phases.length;
     ${job("btn-simulate")}
     const readout = [...document.querySelectorAll("#log > div")].map((d) => d.textContent).filter((t) => /the fundamental sector of/.test(t)).pop() || "";

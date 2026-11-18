@@ -130,19 +130,22 @@ input.slide:disabled { visibility: hidden; }
 .sub[open] > summary::before { transform: rotate(90deg); }
 .sub > * + * { margin-top: 6px; }
 
-.fields { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 5px 8px; }
-.fields.three { grid-template-columns: repeat(3, minmax(0, 1fr)); }
-/* the geometry: halves, and thirds for the steps and the pixel they go with */
-#geometry-fields { grid-template-columns: repeat(6, minmax(0, 1fr)); }
-#geometry-fields .field { grid-column: span 3; }
-#geometry-fields .field.third { grid-column: span 2; }
-#geometry-fields .field.wide { grid-column: 1 / -1; }
+/* settings: two to a row, each a label and its control side by side */
+.fields { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 4px 12px; }
 .fields:empty { display: none; }
-.field { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.field { display: flex; align-items: center; gap: 6px; min-width: 0; height: var(--ctl); }
 .field.wide { grid-column: 1 / -1; }
-.field > span { color: var(--muted); font-size: 11px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.field.toggle { flex-direction: row; align-items: center; gap: 7px; height: var(--ctl); align-self: end; }
-.field.toggle > span { color: var(--text); font-size: 12px; }
+.field > span { flex: 1 1 auto; min-width: 0; color: var(--muted); font-size: 11px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.field > input[type="number"] { flex: none; width: 58px; padding-left: 6px; }
+/* (no spin buttons: they take the narrow box's room; the arrow keys and the wheel still step) */
+.field > input[type="number"] { -moz-appearance: textfield; }
+.field > input[type="number"]::-webkit-inner-spin-button, .field > input[type="number"]::-webkit-outer-spin-button { -webkit-appearance: none; margin: 0; }
+.field > select { flex: 0 1 auto; width: auto; min-width: 0; max-width: 70%; }
+.field.wide > span { flex: 0 0 auto; min-width: 64px; }
+.field.wide > select { flex: 1 1 auto; max-width: none; }
+.field.toggle > span { flex: 0 1 auto; color: var(--text); font-size: 12px; }
+.field > .slider-row { flex: 1 1 auto; }
+.field .src { color: var(--faint); font-size: 10.5px; margin-left: 3px; }
 /* a slider with its value beside it */
 .slider-row { display: flex; align-items: center; gap: 9px; height: var(--ctl); }
 .slider-row input[type="range"] { flex: 1; min-width: 0; }
@@ -150,7 +153,29 @@ input.slide:disabled { visibility: hidden; }
 /* a control that does not apply with the settings as they are is dimmed, never hidden: what
    is not in view is taken not to exist */
 .field[data-off="1"] { opacity: .4; }
-.triple { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 4px; }
+/* three numbers under x, y, z (or swing, tilt, twist), with a name for each row */
+.tri { display: grid; grid-template-columns: 52px repeat(3, minmax(0, 1fr)); gap: 3px 4px; align-items: center; font: 11.5px var(--mono); }
+.tri > .h { color: var(--faint); font: 10.5px var(--font); text-align: center; }
+.tri > .k { color: var(--muted); font: 11.5px var(--font); white-space: nowrap; }
+.tri > .v { color: var(--text); padding: 0 6px; white-space: nowrap; }
+.tri > .v.d { color: var(--muted); }
+.tri > input { width: 100%; min-width: 0; padding: 0 5px; font-size: 11.5px; -moz-appearance: textfield; }
+.tri > input::-webkit-inner-spin-button, .tri > input::-webkit-outer-spin-button { -webkit-appearance: none; margin: 0; }
+#geo-turn-fields { grid-template-columns: 66px repeat(3, minmax(0, 1fr)); padding: 0; }
+.panel > .tri { padding: 6px 8px; background: var(--field); border: 1px solid var(--line-soft); border-radius: var(--rad-s); }
+.tri input { background: var(--panel); }
+/* what a fit found: names and values, two to a row */
+.kv { display: grid; grid-template-columns: auto minmax(0, 1fr) auto minmax(0, 1fr); gap: 2px 8px; font-size: 11.5px; align-items: baseline; }
+.kv:empty { display: none; }
+.kv dt { color: var(--faint); white-space: nowrap; }
+.kv dd { color: var(--text); font: 11.5px var(--mono); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.kv dt.wide { grid-column: 1; }
+.kv dd.wide { grid-column: span 3; }
+.kv dd.warn { color: var(--accent-hi); }
+.panel > .kv { padding: 6px 8px; background: var(--field); border: 1px solid var(--line-soft); border-radius: var(--rad-s); }
+.state { display: flex; align-items: center; gap: 8px; font-size: 11.5px; color: var(--muted); }
+.state b { font-weight: 500; color: var(--text); }
+.state button { margin-left: auto; }
 /* while a job runs, the settings it runs with stay as they are (dimmed after a moment: a job
    done at once does not flash the rail) */
 .app[data-busy="1"] .panel .fields, .app[data-busy="1"] .row.tight { pointer-events: none; opacity: .55; transition: opacity .15s linear .35s; }
@@ -215,7 +240,10 @@ input.slide:disabled { visibility: hidden; }
   grid-template-columns: minmax(280px, 1fr) 4px minmax(200px, min(var(--pat-w, clamp(260px, 18vw, 360px)), calc(100% - 290px)));
   grid-template-rows: minmax(140px, 1fr) 4px minmax(110px, min(var(--dock-h, 42%), calc(100% - 150px)));
   grid-template-areas: "map sv pat" "sh sv pat" "dock sv pat"; }
-.app[data-tab="geometry"] .stage { grid-template-rows: minmax(120px, 1fr) 4px minmax(110px, min(var(--dock-h, 62%), calc(100% - 130px))); }
+/* the Geometry step sets the selected pattern beside its simulations in the dock: the pattern
+   pane gives its room to the map and the dock */
+.app[data-tab="geometry"] .stage { grid-template-columns: minmax(0, 1fr) 0 0; grid-template-rows: minmax(120px, 1fr) 4px minmax(110px, min(var(--dock-h, 60%), calc(100% - 130px))); }
+.app[data-tab="geometry"] .pat-pane, .app[data-tab="geometry"] .split-v { display: none; }
 /* no scan open: no pattern to show, so no pattern pane */
 .app[data-scan="0"] .stage { grid-template-columns: minmax(0, 1fr) 0 0; }
 .app[data-scan="0"] .pat-pane, .app[data-scan="0"] .split-v { display: none; }
@@ -230,9 +258,6 @@ input.slide:disabled { visibility: hidden; }
 /* (the Simulate step needs no bar: the dock is the master's, and its own bar says the rest) */
 .app[data-tab="simulate"] .dock-pane > .pane-bar { display: none; }
 .facts-line { color: var(--muted); font: 11px var(--mono); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.fields.four { grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 5px 6px; }
-.fields.four .field > span { overflow: visible; }
-.fields.four input[type="number"] { padding-left: 4px; padding-right: 1px; }
 .well-tools.bl { bottom: 0; left: 0; right: 0; }
 .stereo-bar { align-items: center; gap: 14px; }
 .stereo-bar > label { display: inline-flex; align-items: center; gap: 7px; padding: 3px 9px; border-radius: var(--rad-s); background: rgba(14, 14, 16, .84); border: 1px solid var(--line); color: var(--muted); font-size: 11px; backdrop-filter: blur(3px); }
@@ -272,15 +297,18 @@ body[data-resize="col"] * { cursor: col-resize !important; }
 .empty { position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 6px; color: var(--muted); text-align: center; padding: 20px; }
 .app[data-scan="1"] #map-empty { display: none; }
 /* what the map's colours mean, in its corner */
-.legend { position: absolute; left: 8px; bottom: 8px; display: flex; align-items: center; gap: 4px 8px; flex-wrap: wrap; max-width: calc(100% - 16px); padding: 4px 7px; border-radius: var(--rad-s);
-  background: rgba(14, 14, 16, .84); border: 1px solid var(--line); color: var(--muted); font: 11px var(--mono); cursor: pointer; user-select: none; backdrop-filter: blur(3px); }
-.legend[data-folded="1"] > * { display: none; }
-.legend[data-folded="1"]::after { content: "key"; }
+.map-opts { display: inline-flex; align-items: center; gap: 6px; }
+.map-opts[hidden] { display: none; }
+.map-opts select { width: auto; height: 22px; font-size: 11.5px; padding: 0 20px 0 7px; -webkit-appearance: none; appearance: none; background: var(--field) var(--caret) no-repeat right 7px center / 8px 5px; }
+.legend { position: absolute; right: 8px; top: 8px; display: flex; align-items: center; gap: 4px 8px; flex-wrap: wrap; max-width: calc(100% - 16px); padding: 4px 7px; border-radius: var(--rad-s);
+  background: rgba(14, 14, 16, .84); border: 1px solid var(--line); color: var(--muted); font: 11px var(--mono); user-select: none; backdrop-filter: blur(3px); }
 .legend .bar { width: 96px; height: 8px; border-radius: 2px; background: linear-gradient(90deg, #000, #fff); border: 1px solid #3a3a41; }
 .legend .chip { display: inline-flex; align-items: center; gap: 4px; }
 .legend .chip i { width: 9px; height: 9px; border-radius: 2px; display: block; }
 .legend canvas { image-rendering: auto; }
 .legend .keys { display: flex; align-items: flex-end; }
+.legend[data-kind="ipf"] { flex-direction: column; align-items: center; gap: 2px; }
+.legend[data-kind="ipf"] > span:first-child { color: var(--text); }
 .legend .key { position: relative; display: block; }
 .legend .key span { position: absolute; font-size: 10px; color: var(--text); text-shadow: 0 0 3px #000, 0 0 3px #000; white-space: nowrap; }
 
@@ -306,32 +334,41 @@ body[data-resize="col"] * { cursor: col-resize !important; }
 
 /* ── the dock ── */
 .dock { flex: 1; min-height: 0; display: flex; }
-.votes { flex: 1; min-height: 0; min-width: 0; display: flex; flex-direction: column; }
-.votes-bar { flex: none; display: flex; align-items: center; gap: 4px 10px; flex-wrap: wrap; padding: 4px 10px; border-bottom: 1px solid var(--line-soft); }
-/* three planes: the x–y slice large, the two slices along z stacked beside it; or every slice
-   along one axis in one figure. The profiles and the numbers at the right. */
-.votes-grid { flex: 1; min-height: 0; display: grid; grid-template: repeat(2, minmax(0, 1fr)) / minmax(0, 1.5fr) minmax(0, .9fr) minmax(0, 1.05fr) minmax(210px, 244px); gap: 1px; background: var(--line); }
-.votes-grid figure { display: flex; flex-direction: column; min-width: 0; min-height: 0; background: var(--bg); }
-.votes-grid figure.space { grid-column: 1; grid-row: 1 / 3; }
-.votes-grid figure.space .well canvas { image-rendering: auto; max-width: none; max-height: none; cursor: grab; }
-.votes-grid figure.space .well canvas:active { cursor: grabbing; }
-.votes-grid figure.p-xy { grid-column: 2; grid-row: 1 / 3; }
-.votes-grid figure.p-xz { grid-column: 3; grid-row: 1; }
-.votes-grid figure.p-yz { grid-column: 3; grid-row: 2; }
-.votes-grid figure.every { display: none; grid-column: 2 / 4; grid-row: 1 / 3; }
-.votes-grid:not([data-mode="planes"]) figure.plane { display: none; }
-.votes-grid:not([data-mode="planes"]) figure.every { display: flex; }
-.votes-side { grid-column: 4; grid-row: 1 / 3; background: var(--bg); overflow: auto; padding: 6px 10px; display: flex; flex-direction: column; gap: 6px; }
-.votes-side > * { flex: none; }
-.votes-side .readout { font-size: 10.5px; line-height: 1.45; white-space: pre; }
-.votes-side .marks { font-size: 11px; white-space: normal; }
-.votes-side .marks .k { font-family: var(--mono); margin-left: 3px; }
-.votes-grid .well canvas { cursor: crosshair; }
-.votes-grid figcaption { flex: none; display: flex; align-items: center; justify-content: center; gap: 8px; padding: 2px 8px; color: var(--faint); font: 10.5px var(--mono); border-top: 1px solid var(--line-soft); white-space: nowrap; overflow: hidden; }
-.votes-grid figcaption span { overflow: hidden; text-overflow: ellipsis; }
-.votes-bar label.num { display: inline-flex; align-items: center; gap: 5px; color: var(--muted); font-size: 11.5px; white-space: nowrap; }
-.votes-bar label.num input { width: 52px; height: 20px; padding: 0 4px; font: 11.5px var(--mono); }
-.votes-bar .meta { font: 11px var(--mono); color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.votes { flex: 1; min-height: 0; min-width: 0; }
+.pcv { display: grid; grid-template-columns: min(var(--cmp-w, 60%), 68%) minmax(0, 1fr); gap: 1px; background: var(--line); }
+.zone { display: flex; flex-direction: column; min-width: 0; min-height: 0; background: var(--bg); }
+.zone-bar { flex: none; display: flex; align-items: center; gap: 6px 10px; flex-wrap: wrap; min-height: 32px; padding: 3px 10px; border-bottom: 1px solid var(--line-soft); }
+.zone-bar .ttl { font-size: 11.5px; font-weight: 600; color: var(--text); letter-spacing: .02em; }
+.zone-bar .meta { font: 11px var(--mono); color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+.zone-foot { flex: none; margin: 0; padding: 6px 10px; border-top: 1px solid var(--line-soft); }
+.pcv figure { display: flex; flex-direction: column; min-width: 0; min-height: 0; margin: 0; background: var(--bg); }
+.pcv figcaption { flex: none; display: flex; align-items: center; justify-content: center; gap: 8px; padding: 3px 8px; color: var(--faint); font: 10.5px var(--mono); border-top: 1px solid var(--line-soft); white-space: nowrap; overflow: hidden; }
+.pcv figcaption span { overflow: hidden; text-overflow: ellipsis; }
+.pc-cmp-pair { flex: 1; min-height: 0; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 1px; background: var(--line); }
+.pc-cmp-pair .well canvas { width: 100%; height: 100%; object-fit: contain; cursor: pointer; }
+.pc-tag { position: absolute; left: 8px; top: 6px; padding: 1px 6px; border-radius: 3px; font: 11.5px var(--mono); background: rgba(10, 10, 11, .7); color: var(--text); }
+.pc-tag[data-on="file"] { color: #8fbbe0; }
+.pc-tag[data-on="now"] { color: #e8c77e; }
+.pcv-cmp .readout { font-size: 11px; line-height: 1.5; white-space: pre; }
+.pcv-cmp .readout [data-on="file"] { color: #8fbbe0; }
+.pcv-cmp .readout [data-on="now"] { color: #e8c77e; }
+.pcv-body { flex: 1; min-height: 0; display: grid; grid-template-rows: minmax(0, 1.25fr) minmax(0, 1fr); gap: 1px; background: var(--line); }
+.pcv .space .well canvas { image-rendering: auto; max-width: none; max-height: none; cursor: grab; }
+.pcv .space .well canvas:active { cursor: grabbing; }
+.pcv .every .well canvas { cursor: crosshair; }
+.pcv .every figcaption { justify-content: flex-start; }
+.pcv .every figcaption .slide { margin-left: auto; }
+.pcv figcaption label.check { font: 11px var(--font); color: var(--muted); }
+.vote-read { display: flex; flex-direction: column; gap: 5px; }
+.vote-read .readout { margin: 0; font-size: 10.5px; line-height: 1.5; white-space: pre; overflow: hidden; }
+.vote-acts { display: flex; gap: 6px; flex-wrap: wrap; }
+.vote-read .marks { margin: 0; font-size: 10.5px; }
+.vote-read .marks .k { font-family: var(--mono); margin-left: 6px; }
+.votes-empty { display: none; flex: 1; margin: 0; padding: 12% 24px 0; }
+.votes-empty .hint { max-width: 34em; margin: 0 auto 12px; text-align: center; }
+.votes-empty .readout { width: max-content; margin: 0 auto; font-size: 12px; line-height: 1.6; white-space: pre; }
+.votes[data-empty="1"] .pcv-search > :not(.zone-bar):not(.votes-empty), .votes[data-empty="1"] .pcv-search .zone-bar > :not(.ttl) { display: none; }
+.votes[data-empty="1"] .votes-empty { display: block; }
 .dock-view { flex: 1; min-width: 0; min-height: 0; display: flex; flex-direction: column; }
 .dock-view > .hint { flex: none; padding: 4px 10px; border-top: 1px solid var(--line-soft); background: var(--panel); }
 .dock-view > .well canvas { width: 100%; height: 100%; object-fit: contain; }
@@ -443,6 +480,7 @@ body[data-resize="col"] * { cursor: col-resize !important; }
 
 /* the plane fit: every fit pattern's own source point, and the plane through them */
 .plane-wrap { flex: 1; min-height: 0; min-width: 0; display: flex; flex-direction: column; }
+.plane-wrap > .hint { flex: none; margin: 0; padding: 4px 10px; border-top: 1px solid var(--line-soft); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 #plane-body .well canvas { image-rendering: auto; max-width: none; max-height: none; }
 #plane-body > .hint { flex: none; padding: 4px 10px; border-top: 1px solid var(--line-soft); font-family: var(--mono); font-size: 11px; }
 
@@ -462,15 +500,9 @@ label.check[data-off="1"] { opacity: .4; }
 .seg[data-off="1"] { opacity: .45; }
 
 /* the pattern steps, each a card: a switch (or a choice) and what it takes, dimmed when it is off */
-.fields.pstep { padding: 7px 8px 8px; background: var(--field); border: 1px solid var(--line-soft); border-radius: var(--rad-s); gap: 5px 8px; }
-.fields.pstep.c2 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-.fields.pstep.c3 { grid-template-columns: repeat(3, minmax(0, 1fr)); }
-.fields.pstep .field.toggle { grid-column: 1 / -1; align-self: center; height: 20px; }
+.fields.pstep { padding: 5px 8px; background: var(--field); border: 1px solid var(--line-soft); border-radius: var(--rad-s); }
 .fields.pstep .field.toggle > span { font-weight: 500; }
-.fields.pstep.inline .field.toggle { grid-column: auto; align-self: end; height: var(--ctl); }
-.fields.pstep .field.wide { grid-column: 1 / -1; }
 .panel .pstep + .pstep { margin-top: -2px; }
 .panel h4[title] { cursor: help; }
 
-.overview-bar { flex-wrap: wrap; padding-top: 4px; padding-bottom: 4px; }
-#overview-source { width: auto; min-width: 155px; height: 24px; }
+#overview-source { width: auto; height: 22px; padding: 0 22px 0 6px; font-size: 11.5px; }
