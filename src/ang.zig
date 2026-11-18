@@ -80,31 +80,17 @@ fn checkCoordinate(actual: f64, expected: f64, origin: f64, travel: f64, step: f
 }
 
 const PcDecision = struct { value: ?[3]f64 = null, note: []const u8 = "" };
-const LegacyPhase = struct {
-    material_seen: bool = false,
-    blank_material: bool = false,
-    zero_families_before_lattice: bool = false,
-    lattice: bool = false,
-    elastic: usize = 0,
-    categories: bool = false,
-    fn matches(self: LegacyPhase) bool {
-        return self.material_seen and self.blank_material and self.zero_families_before_lattice and self.lattice and self.elastic == 6 and self.categories;
-    }
-};
+/// The pattern centre in the header, and who wrote the file: what decides its convention. EDAX
+/// (OIM) measures x and y in fractions of the pattern's width and height, y from the bottom, and z
+/// in fractions of its smaller side; EMSphInx, and zebsdsolve up to 0.2.1, scale y and z by the
+/// width. On a square pattern the two agree.
 const PcHeader = struct {
     raw: [3]?f64 = .{ null, null, null },
     width_producer: bool = false,
-    software_seen: bool = false,
     edax_producer: bool = false,
+    software_seen: bool = false,
     header_start: bool = false,
     numeric_version: bool = false,
-    version_seen: bool = false,
-    phases: usize = 0,
-    previous_legacy_phases: bool = true,
-    phase: LegacyPhase = .{},
-    operator_unknown: bool = false,
-    sample_empty: bool = false,
-    scan_empty: bool = false,
 
     fn header(self: *PcHeader, key: []const u8, value: []const u8) !void {
         const index: ?usize = if (eq(key, "x-star")) 0 else if (eq(key, "y-star")) 1 else if (eq(key, "z-star")) 2 else null;
@@ -117,35 +103,17 @@ const PcHeader = struct {
             self.software_seen = true;
             var words = std.mem.tokenizeAny(u8, value, " \t");
             const producer = words.next() orelse return;
-            if (eq(producer, "zebsdsolve") or eq(producer, "EMSphInx")) self.width_producer = true;
             if (eq(producer, "EDAX") or eq(producer, "OIM")) self.edax_producer = true;
+            if (eq(producer, "EMSphInx")) self.width_producer = true;
+            // (zebsdsolve names EDAX's convention after its version from 0.3; before, it scaled by the width)
+            if (eq(producer, "zebsdsolve")) {
+                if (std.mem.indexOf(u8, value, "EDAX") != null) self.edax_producer = true else self.width_producer = true;
+            }
         } else if (eq(key, "HEADER") and eq(value, "Start")) {
             self.header_start = true;
         } else if (eq(key, "VERSION")) {
-            self.version_seen = true;
             _ = std.fmt.parseInt(u32, value, 10) catch return;
             self.numeric_version = true;
-        } else if (eq(key, "Phase")) {
-            if (self.phases != 0) self.previous_legacy_phases = self.previous_legacy_phases and self.phase.matches();
-            self.phases += 1;
-            self.phase = .{};
-        } else if (self.phases != 0 and eq(key, "MaterialName")) {
-            self.phase.material_seen = true;
-            self.phase.blank_material = value.len == 0;
-        } else if (self.phases != 0 and eq(key, "NumberFamilies")) {
-            self.phase.zero_families_before_lattice = !self.phase.lattice and eq(value, "0");
-        } else if (self.phases != 0 and eq(key, "LatticeConstants")) {
-            self.phase.lattice = true;
-        } else if (self.phases != 0 and eq(key, "ElasticConstants")) {
-            self.phase.elastic += 1;
-        } else if (self.phases != 0 and eq(key, "Categories")) {
-            self.phase.categories = true;
-        } else if (eq(key, "OPERATOR")) {
-            self.operator_unknown = eq(value, "unknown");
-        } else if (eq(key, "SAMPLEID")) {
-            self.sample_empty = value.len == 0;
-        } else if (eq(key, "SCANID")) {
-            self.scan_empty = value.len == 0;
         }
     }
 
@@ -157,27 +125,19 @@ const PcHeader = struct {
         const raw: [3]f64 = .{ self.raw[0].?, self.raw[1].?, self.raw[2].? };
         if (raw[0] == 0 and raw[1] == 0 and raw[2] == 0) return .{}; // producer's uncalibrated sentinel
         if (raw[2] <= 0 or width == 0 or height == 0) return error.InvalidANGPatternCentre;
-        // The classic EMSphInx writer's phase-block ordering and trailer distinguish
-        // it from an unknown ANG; blank material/phase IDs alone are not a convention.
-        const legacy = self.phases > 0 and self.previous_legacy_phases and self.phase.matches() and !self.version_seen and !self.software_seen and self.operator_unknown and self.sample_empty and self.scan_empty;
-        const standard_edax = self.header_start and self.numeric_version and !self.software_seen;
-        // Explicit recognized writers outrank inherited structural headers. Conflicting
-        // explicit writers are ambiguous only when the detector normalizations differ.
+        // who wrote it: the SOFTWARE line, else OIM's own header lines; on a rectangular pattern an
+        // unknown writer's convention is not guessed at
         const conflict = self.width_producer and self.edax_producer;
-        if (conflict and width != height) return .{ .note = "ANG pattern centre was not applied: explicit producer markers conflict." };
-        const explicit = self.width_producer or self.edax_producer;
-        const width_scaled = self.width_producer or (!explicit and legacy and !standard_edax);
-        const edax = self.edax_producer or (!explicit and standard_edax and !legacy);
-        if (!width_scaled and !edax and width != height) return .{ .note = "ANG pattern centre was not applied: producer convention is unknown for a rectangular detector." };
+        if (conflict and width != height) return .{ .note = "ANG pattern centre not applied: conflicting writers named" };
+        const width_scaled = self.width_producer and !self.edax_producer;
+        const edax = self.edax_producer or (!self.width_producer and !self.software_seen and self.header_start and self.numeric_version);
+        if (!width_scaled and !edax and width != height) return .{ .note = "ANG pattern centre not applied: its convention is unknown for a rectangular pattern" };
         const w: f64 = @floatFromInt(width);
         const h: f64 = @floatFromInt(height);
-        // Convert the producer's normalization and bottom origin to the engine's convention.
-        // EDAX/OIM: x/width, y/height from bottom, distance/min(width,height).
-        // EMSphInx/zebsdsolve: all three normalized by width.
         const pc: [3]f64 = if (width_scaled) .{ raw[0], 1 - raw[1] * w / h, raw[2] * w / h } else .{ raw[0], 1 - raw[1], raw[2] * @min(w, h) / h };
         for (pc) |x| if (!std.math.isFinite(x)) return error.InvalidANGPatternCentre;
         if (!(pc[2] > 0)) return error.InvalidANGPatternCentre;
-        return .{ .value = pc, .note = if (conflict) "Imported ANG pattern centre: square detector; conflicting producer normalizations coincide." else if (width_scaled) "Imported ANG pattern centre: EMSphInx/zebsdsolve width-normalized convention." else if (edax) "Imported ANG pattern centre: EDAX/OIM convention." else "Imported ANG pattern centre: square detector; ANG normalizations coincide." };
+        return .{ .value = pc, .note = if (width_scaled) "ANG pattern centre: width-scaled (EMSphInx, zebsdsolve 0.2.1 and before)" else if (edax) "ANG pattern centre: EDAX convention" else "ANG pattern centre: square pattern, the conventions agree" };
     }
 };
 

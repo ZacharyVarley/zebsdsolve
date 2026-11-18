@@ -153,12 +153,13 @@ pub fn exportText(e: *Engine, kind: u32) ![]u8 {
     const ratio = @as(f64, @floatFromInt(i.pat_w)) / @as(f64, @floatFromInt(i.pat_h));
     switch (kind) {
         0 => {
-            // EDAX measures the pattern centre's y from the bottom and y, z in fractions of the width
-            try w.print("# TEM_PIX_PER_UM          1.000000\n# x-star                 {d:.6}\n# y-star                 {d:.6}\n# z-star                 {d:.6}\n# WorkingDistance        0.000000\n#\n", .{ g.pc[0], (1 - g.pc[1]) / ratio, g.pc[2] / ratio });
+            // EDAX measures the pattern centre's y from the bottom, x and y in fractions of the
+            // width and height, z of the smaller of the two (kikuchipy's convention for TSL)
+            try w.print("# TEM_PIX_PER_UM          1.000000\n# x-star                 {d:.6}\n# y-star                 {d:.6}\n# z-star                 {d:.6}\n# WorkingDistance        0.000000\n#\n", .{ g.pc[0], 1 - g.pc[1], g.pc[2] / @min(ratio, 1) });
             for (e.phases.items, 0..) |*p, pi| {
                 try w.print("# Phase {d}\n# MaterialName  \t{s}\n# Formula     \t\n# Info \t\t\n# Symmetry              {d}\n# LatticeConstants      {d:.8} {d:.8} {d:.8}  {d:.8}  {d:.8}  {d:.8}\n# NumberFamilies        0\n#\n", .{ pi + 1, p.master.name, tslSymmetry(p.master.laue), p.master.lattice.?[0], p.master.lattice.?[1], p.master.lattice.?[2], p.master.lattice.?[3], p.master.lattice.?[4], p.master.lattice.?[5] });
             }
-            try w.print("# GRID: SqrGrid\n# XSTEP: {d:.6}\n# YSTEP: {d:.6}\n# NCOLS_ODD: {d}\n# NCOLS_EVEN: {d}\n# NROWS: {d}\n#\n# SOFTWARE: zebsdsolve {s}\n# COLUMNS: phi1 PHI phi2 x y IQ(NMI) CI(NCC) Phase SEM Fit\n", .{ g.step_x_um, g.step_y_um, i.cols, i.cols, i.rows, engine.version });
+            try w.print("# GRID: SqrGrid\n# XSTEP: {d:.6}\n# YSTEP: {d:.6}\n# NCOLS_ODD: {d}\n# NCOLS_EVEN: {d}\n# NROWS: {d}\n#\n# SOFTWARE: zebsdsolve {s} (EDAX pattern centre)\n# COLUMNS: phi1 PHI phi2 x y IQ(NMI) CI(NCC) Phase SEM Fit\n", .{ g.step_x_um, g.step_y_um, i.cols, i.cols, i.rows, engine.version });
             for (0..i.rows) |r| for (0..i.cols) |c| {
                 const at = r * i.cols + c;
                 const x = @as(f64, @floatFromInt(c)) * g.step_x_um;

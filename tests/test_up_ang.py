@@ -45,6 +45,7 @@ class UpAng(unittest.TestCase):
         for version, bits, producer_header, expected_pc in (
             (1, 8, ["# HEADER: Start", "# VERSION 7"], [.43, .73, .61]),
             (3, 16, ["# SOFTWARE: zebsdsolve 0.2.1"], [.43, .6625, .7625]),
+            (1, 16, ["# SOFTWARE: zebsdsolve 0.3.0 (EDAX pattern centre)"], [.43, .73, .61]),
         ):
             with self.subTest(version=version, bits=bits):
                 up, patterns = self.up(version, bits)
@@ -66,6 +67,14 @@ class UpAng(unittest.TestCase):
                 self.assertEqual((self.s.scan["rows"], self.s.scan["cols"]), (1, 6) if version == 1 else (2, 3))
                 self.assertIsNone(self.s.stored_overview())
                 self.assertFalse(self.s.scan["has_pc"])
+
+    def test_unknown_writer_leaves_a_rectangular_pattern_centre(self):
+        # 10 × 8 patterns: EDAX's and the width-scaled conventions differ, and nothing says which
+        up, _ = self.up()
+        ang, _ = self.ang(pc_header=["# x-star .43", "# y-star .27", "# z-star .61"])
+        self.s.open(up, ang)
+        self.assertEqual((self.s.scan["rows"], self.s.scan["cols"]), (2, 3))
+        self.assertFalse(self.s.scan["has_pc"])
 
     def test_invalid_pair_preserves_current_scan(self):
         up, patterns = self.up()

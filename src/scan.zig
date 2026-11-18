@@ -476,9 +476,10 @@ pub const Scan = struct {
                     const x = num.get(h, pc, "x-star");
                     const y = num.get(h, pc, "y-star");
                     const z = num.get(h, pc, "z-star");
-                    // EDAX measures y from the bottom, y and z in fractions of the width; an
-                    // all-zero entry means not calibrated
-                    if (x != 0 or y != 0 or z != 0) info.pc = .{ x, 1 - y * ratio, z * ratio };
+                    // EDAX measures y from the bottom, x and y in fractions of the width and
+                    // height, z of the smaller of the two (as kikuchipy has it); an all-zero
+                    // entry means not calibrated
+                    if (x != 0 or y != 0 or z != 0) info.pc = .{ x, 1 - y, z * @min(ratio, 1) };
                 }
             },
             .h5_oxford => {
