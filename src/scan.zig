@@ -493,23 +493,27 @@ pub const Scan = struct {
         const w = try f.int(u32, 4);
         const hgt = try f.int(u32, 8);
         const off = try f.int(u32, 12);
-        if (w == 0 or hgt == 0 or off < 16 or off > f.size) return error.BadScanFile;
+        if ((version != 1 and version < 3) or w == 0 or hgt == 0 or off < 16 or off > f.size) return error.BadScanFile;
         const info = &self.info;
         self.format = .edax_up;
         info.pat_w = w;
         info.pat_h = hgt;
         info.pixel = if (is16) .u16 else .u8;
         self.data_offset = off;
-        const pb = self.patternBytes();
+        const pb = std.math.mul(u64, @as(u64, w) * hgt, self.bytesPerPx()) catch return error.BadScanFile;
+        if ((f.size - off) % pb != 0) return error.UPIncompletePattern;
         const n = (f.size - off) / pb;
-        if (version >= 3 and off >= 41) {
-            const nx = try f.int(u32, 16);
-            const ny = try f.int(u32, 20);
-            if (@as(u64, nx) * ny == n) {
+        if (n == 0 or n > std.math.maxInt(u32)) return error.ScanShapeMismatch;
+        if (version >= 3) {
+            if (off < 42) return error.BadScanFile;
+            // Packed v3+ header: extra-pattern flag, dimensions, hex flag, steps.
+            const nx = try f.int(u32, 17);
+            const ny = try f.int(u32, 21);
+            if (try f.int(u8, 25) == 0 and @as(u64, nx) * ny == n) {
                 info.cols = nx;
                 info.rows = ny;
-                info.step_x_um = @bitCast(try f.int(u64, 25));
-                info.step_y_um = @bitCast(try f.int(u64, 33));
+                info.step_x_um = @bitCast(try f.int(u64, 26));
+                info.step_y_um = @bitCast(try f.int(u64, 34));
             }
         }
         if (hints.rows != 0 and hints.cols != 0) {
