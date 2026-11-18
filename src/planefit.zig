@@ -80,7 +80,86 @@ pub const PlaneResult = extern struct {
     /// rounds of the patterns' own refinement
     iterations: u32 = 0,
     blocks: u32 = 0,
+    /// plane.Model the geometry took: the full plane by itself (Fit plane); in the automatic
+    /// fit, the simplest model the map supports
+    model: u32 = 0,
+    /// 1: the models were compared (the automatic fit)
+    compared: u32 = 0,
+    /// each model's error in predicting a block of the map from the others (mean rᵀ W r a point,
+    /// over the blocks: 0 where it was not tried), and its standard error against the best
+    /// model's, block by block
+    cv: [4]f64 = @splat(0),
+    cv_se: [4]f64 = @splat(0),
+    /// settings.PlaneMethod: 0 joint, 1 through the patterns' own points
+    method: u32 = 0,
+    _pad: u32 = 0,
 };
+
+/// The models compared, block by block: each fitted without one block of the map and asked
+/// where that block's points stand, as mean rᵀ W r. The simplest model whose error is not
+/// above the best one's by more than the standard error of their difference (the "one
+/// standard error" rule, over paired blocks) is the one the map supports.
+fn choose(a: std.mem.Allocator, models: []const plane_mod.Model, pts: []plane_mod.Point, cells: []const u64, rows: u32, cols: u32, fr: plane_mod.Frame, aspect: f64, res: *PlaneResult) !plane_mod.Model {
+    const BL = 6;
+    const K = 4;
+    var err: [BL * BL][K]f64 = undefined;
+    var got: usize = 0;
+    const was = try a.alloc(bool, pts.len);
+    for (pts, 0..) |pt, b| was[b] = pt.used;
+    for (0..BL * BL) |g| {
+        var in_block: usize = 0;
+        for (pts, 0..) |*pt, b| {
+            const at: usize = @intCast((cells[b] / cols * BL / rows) * BL + cells[b] % cols * BL / cols);
+            pt.used = was[b] and at != g;
+            in_block += @intFromBool(was[b] and at == g);
+        }
+        if (in_block == 0) continue;
+        var row: [K]f64 = @splat(0);
+        var ok = true;
+        for (models) |m| {
+            const P = plane_mod.fitModel(m, pts, fr) orelse {
+                ok = false;
+                break;
+            };
+            var sum: f64 = 0;
+            for (pts, 0..) |pt, b| {
+                const at: usize = @intCast((cells[b] / cols * BL / rows) * BL + cells[b] % cols * BL / cols);
+                if (was[b] and at == g) sum += plane_mod.misfit(P, pt, aspect);
+            }
+            row[@intFromEnum(m)] = sum / @as(f64, @floatFromInt(in_block));
+        }
+        if (!ok) continue;
+        err[got] = row;
+        got += 1;
+    }
+    for (pts, 0..) |*pt, b| pt.used = was[b];
+    res.compared = 1;
+    if (got < 3) return models[models.len - 1];
+    const G: f64 = @floatFromInt(got);
+    var best = models[0];
+    for (models) |m| {
+        const i = @intFromEnum(m);
+        var s: f64 = 0;
+        for (err[0..got]) |e| s += e[i];
+        res.cv[i] = s / G;
+        if (res.cv[i] < res.cv[@intFromEnum(best)]) best = m;
+    }
+    const bi = @intFromEnum(best);
+    for (models) |m| {
+        const i = @intFromEnum(m);
+        var mean: f64 = 0;
+        for (err[0..got]) |e| mean += e[i] - e[bi];
+        mean /= G;
+        var v: f64 = 0;
+        for (err[0..got]) |e| v += (e[i] - e[bi] - mean) * (e[i] - e[bi] - mean);
+        res.cv_se[i] = @sqrt(v / (G - 1) / G);
+    }
+    for (models) |m| {
+        const i = @intFromEnum(m);
+        if (res.cv[i] - res.cv[bi] <= res.cv_se[i]) return m;
+    }
+    return best;
+}
 
 /// A pattern's normalized cross-correlation with its simulation, with its gradient and
 /// Gauss–Newton matrix (the score falls by ½ δᵀ H δ about its top) over the device's six
@@ -532,6 +611,246 @@ const Fit = struct {
     }
 };
 
+// ── the joint fit ──
+
+/// What the joint fit works in: the fit patterns, the model's frame, and how a source's place
+/// in the fit's coordinates y = (PCx · aspect, PCy, PCz) becomes the detector's position the
+/// device takes (pixels, the sample's axes): t = R (½ − h y₁, ½ − h y₀, h y₂), so ∂t/∂y = h M
+/// (geometry.translationFor).
+const Joint = struct {
+    fit: *Fit,
+    fr: plane_mod.Frame,
+    R: rot.Mat3,
+    M: rot.Mat3,
+    h: f64,
+    cols: u32,
+
+    fn cellOf(self: *const Joint, b: usize) [2]f64 {
+        const c = self.fit.cells[b];
+        return .{ @floatFromInt(c / self.cols), @floatFromInt(c % self.cols) };
+    }
+
+    /// Each pattern's source where the model puts it, as a shift from where the fit began.
+    fn sourcesOf(self: *const Joint, theta: [plane_mod.N]f64, out: []rot.Vec3) void {
+        for (0..self.fit.n) |b| {
+            const rc = self.cellOf(b);
+            const y = plane_mod.modelAt(theta, self.fr, rc[0], rc[1]).y;
+            const t = rot.matVec(self.R, .{ 0.5 - y[1] * self.h, 0.5 - y[0] * self.h, y[2] * self.h });
+            out[b] = rot.sub(t, self.fit.base[b]);
+        }
+    }
+
+    /// d(t)/d(y) for a column of y's Jacobian: h M J.
+    fn jt(self: *const Joint, J: [3 * plane_mod.N]f64) [3 * plane_mod.N]f64 {
+        const N = plane_mod.N;
+        var out: [3 * N]f64 = undefined;
+        for (0..3) |k| for (0..N) |i| {
+            var acc: f64 = 0;
+            for (0..3) |l| acc += self.M[k * 3 + l] * J[l * N + i];
+            out[k * N + i] = self.h * acc;
+        };
+        return out;
+    }
+};
+
+/// A pattern's information about its source with its turn profiled out (pixels, the sample's
+/// axes): the curvature S = H_tt − H_tq H_qq⁻¹ H_qt and the pull g̃ = g_t − H_tq H_qq⁻¹ g_q, what
+/// its score says of its source once its orientation follows. Null where its turn is not told.
+fn profiled(l: *const Local) ?struct { S: [9]f64, g: [3]f64 } {
+    const B = damped(3, l, 0).A;
+    var S: [9]f64 = undefined;
+    for (0..3) |c| {
+        const col = solve(3, B, .{ l.H[c * 6 + 3], l.H[c * 6 + 4], l.H[c * 6 + 5] }) orelse return null;
+        for (0..3) |i| {
+            var acc: f64 = l.H[i * 6 + c];
+            for (0..3) |k| acc -= l.H[i * 6 + 3 + k] * col[k];
+            S[i * 3 + c] = acc;
+        }
+    }
+    const xg = solve(3, B, .{ l.g[3], l.g[4], l.g[5] }) orelse return null;
+    var g: [3]f64 = undefined;
+    for (0..3) |i| {
+        var acc = l.g[i];
+        for (0..3) |k| acc -= l.H[i * 6 + 3 + k] * xg[k];
+        g[i] = acc;
+    }
+    for (0..3) |i| for (i + 1..3) |j| {
+        const v = 0.5 * (S[i * 3 + j] + S[j * 3 + i]);
+        S[i * 3 + j] = v;
+        S[j * 3 + i] = v;
+    };
+    return .{ .S = S, .g = g };
+}
+
+/// The model's numbers fitted to all the used fit patterns at once: Levenberg–Marquardt on
+/// their mean NCC, the unknowns the model's (plane.Model.free), each pattern's orientation
+/// profiled out of the step and then taken along with it (δq = H_qq⁻¹ (g_q − H_qt δt)). No
+/// pattern has a source of its own: each is where the model puts it. Returns the rounds taken;
+/// leaves the patterns' orientations, their systems (`keep`) and the mean NCC in the fit.
+fn jointFit(j: *const Joint, which: plane_mod.Model, theta: *[plane_mod.N]f64, most: u32) !u32 {
+    const N = plane_mod.N;
+    const fit = j.fit;
+    const n = fit.n;
+    const F = which.free();
+    j.sourcesOf(theta.*, fit.shift);
+    fit.ncc = try fit.eval(fit.q, fit.shift);
+    @memcpy(fit.keep, fit.locals);
+    var lam: f64 = 1e-3;
+    var it: u32 = 0;
+    while (it < most) : (it += 1) {
+        if (fit.e.cancel) return error.Cancelled;
+        var A: [N * N]f64 = @splat(0);
+        var v: [N]f64 = @splat(0);
+        for (0..n) |b| {
+            if (!fit.use[b] or !fit.keep[b].ok) continue;
+            const pr = profiled(&fit.keep[b]) orelse continue;
+            const rc = j.cellOf(b);
+            const Jt = j.jt(plane_mod.modelAt(theta.*, j.fr, rc[0], rc[1]).J);
+            for (F) |fi| {
+                var sj: [3]f64 = .{ 0, 0, 0 };
+                for (0..3) |k| for (0..3) |l| {
+                    sj[k] += pr.S[k * 3 + l] * Jt[l * N + fi];
+                };
+                for (0..3) |k| v[fi] += Jt[k * N + fi] * pr.g[k];
+                for (F) |fj| {
+                    for (0..3) |k| A[fi * N + fj] += Jt[k * N + fj] * sj[k];
+                }
+            }
+        }
+        // the damped system over the model's own unknowns
+        var Am: [N * N]f64 = @splat(0);
+        var vm: [N]f64 = @splat(0);
+        var tr: f64 = 0;
+        for (F, 0..) |fi, a| tr += A[fi * N + fi] / @as(f64, @floatFromInt(F.len)) + 0 * @as(f64, @floatFromInt(a));
+        for (F, 0..) |fi, a| {
+            vm[a] = v[fi];
+            for (F, 0..) |fj, c| Am[a * N + c] = A[fi * N + fj];
+            Am[a * N + a] = Am[a * N + a] * (1 + lam) + 1e-12 * tr + 1e-300;
+        }
+        const d = plane_mod.solve(F.len, Am, vm) orelse break;
+        var trial = theta.*;
+        for (F, 0..) |fi, a| trial[fi] += d[a];
+        j.sourcesOf(trial, fit.shift_t);
+        for (0..n) |b| {
+            fit.q_t[b] = fit.q[b];
+            if (!fit.use[b] or !fit.keep[b].ok) continue;
+            const l = &fit.keep[b];
+            const dt = rot.sub(fit.shift_t[b], fit.shift[b]);
+            var r: [3]f64 = undefined;
+            for (0..3) |i| {
+                var acc = l.g[3 + i];
+                for (0..3) |k| acc -= l.H[(3 + i) * 6 + k] * dt[k];
+                r[i] = acc;
+            }
+            const sys = damped(3, l, lam);
+            const dq = solve(3, sys.A, r) orelse continue;
+            fit.q_t[b] = rot.qstd(rot.qmul(rot.so3Exp(.{ dq[0], dq[1], dq[2] }), fit.q[b]));
+        }
+        const now = try fit.eval(fit.q_t, fit.shift_t);
+        fit.e.events.emit(.{ .kind = "progress", .stage = "plane", .done = it + 1, .total = most });
+        if (now > fit.ncc) {
+            const gain = now - fit.ncc;
+            theta.* = trial;
+            @memcpy(fit.q, fit.q_t);
+            @memcpy(fit.shift, fit.shift_t);
+            @memcpy(fit.keep, fit.locals);
+            fit.ncc = now;
+            lam = @max(lam / 3, 1e-6);
+            if (gain < 1e-8) {
+                it += 1;
+                break;
+            }
+        } else {
+            lam *= 5;
+            if (lam > 1e8) break;
+        }
+    }
+    // (the systems where the patterns now stand, for what is read of them next)
+    _ = try fit.eval(fit.q, fit.shift);
+    @memcpy(fit.keep, fit.locals);
+    return it;
+}
+
+/// What each used pattern says of its own source, one Newton step from where the model puts
+/// it, with its information as the weight: ŷ = y + W⁻¹ p, W = h² Mᵀ S M, p = h Mᵀ g̃ (the
+/// inverse a little regularized, for directions a pattern does not tell). With these points
+/// and weights the model's weighted least-squares fit is the joint fit's own Gauss–Newton
+/// step, so the comparison of models and the standard errors read them as they read measured
+/// points; they are also the points the plane's view draws.
+fn pseudoPoints(j: *const Joint, theta: [plane_mod.N]f64, pts: []plane_mod.Point) void {
+    const fit = j.fit;
+    for (0..fit.n) |b| {
+        const rc = j.cellOf(b);
+        const y = plane_mod.modelAt(theta, j.fr, rc[0], rc[1]).y;
+        pts[b] = .{ .row = rc[0], .col = rc[1], .y = y, .used = false };
+        if (!fit.use[b] or !fit.keep[b].ok) continue;
+        const pr = profiled(&fit.keep[b]) orelse continue;
+        var W = rot.matMul(rot.transpose(j.M), rot.matMul(pr.S, j.M));
+        for (&W) |*w| w.* *= j.h * j.h;
+        const tr = W[0] + W[4] + W[8];
+        if (!(tr > 0)) continue;
+        const p = rot.scale(rot.matVec(rot.transpose(j.M), pr.g), j.h);
+        var Wr: [9]f64 = W;
+        for (0..3) |i| Wr[i * 3 + i] += 1e-6 * tr;
+        const dy = solve(3, Wr, p) orelse continue;
+        for (0..3) |i| W[i * 3 + i] += 1e-9 * tr;
+        pts[b].y = .{ y[0] + dy[0], y[1] + dy[1], y[2] + dy[2] };
+        pts[b].w = W;
+        pts[b].used = true;
+    }
+}
+
+/// The joint fit of the full model from the geometry as it stands, with the patterns whose
+/// pull is far beyond the others' (settings.plane_outlier, as the points' fit has it) left out
+/// and the fit run again. Leaves the pseudo-points in `pts`; returns the rounds taken.
+fn jointPlane(j: *const Joint, which: plane_mod.Model, theta: *[plane_mod.N]f64, pts: []plane_mod.Point, outlier: f64, most: u32, a: std.mem.Allocator) !u32 {
+    const fit = j.fit;
+    // the model through the sources where the geometry has them: where the joint fit starts
+    for (0..fit.n) |b| {
+        const rc = j.cellOf(b);
+        const pc = Geometry.pcOf(j.R, fit.base[b], j.h, j.h * j.fr.aspect);
+        pts[b] = .{ .row = rc[0], .col = rc[1], .y = .{ pc[0] * j.fr.aspect, pc[1], pc[2] } };
+    }
+    theta.* = plane_mod.fitTheta(which, pts, j.fr) orelse return error.TooFewFitPatterns;
+    var rounds = try jointFit(j, which, theta, most);
+    pseudoPoints(j, theta.*, pts);
+    if (!(outlier > 0)) return rounds;
+    const dist = try a.alloc(f64, fit.n);
+    const sorted = try a.alloc(f64, fit.n);
+    var round: u32 = 0;
+    while (round < 4) : (round += 1) {
+        var m: usize = 0;
+        for (pts, 0..) |pt, b| {
+            dist[b] = 0;
+            if (!pt.used) continue;
+            const y = plane_mod.modelAt(theta.*, j.fr, pt.row, pt.col).y;
+            const r: [3]f64 = .{ pt.y[0] - y[0], pt.y[1] - y[1], pt.y[2] - y[2] };
+            var q: f64 = 0;
+            for (0..3) |i| for (0..3) |k| {
+                q += r[i] * pt.w[i * 3 + k] * r[k];
+            };
+            dist[b] = @sqrt(@max(q, 0));
+            sorted[m] = dist[b];
+            m += 1;
+        }
+        if (m < 8) break;
+        std.mem.sort(f64, sorted[0..m], {}, std.sort.asc(f64));
+        const sigma = sorted[m / 2] / 1.538;
+        var dropped: usize = 0;
+        for (pts, 0..) |pt, b| {
+            if (pt.used and dist[b] > outlier * sigma) {
+                fit.use[b] = false;
+                fit.n_used -= 1;
+                dropped += 1;
+            }
+        }
+        if (dropped == 0) break;
+        rounds += try jointFit(j, which, theta, most);
+        pseudoPoints(j, theta.*, pts);
+    }
+    return rounds;
+}
+
 /// The plane of source points (plane.zig): every fit pattern's own source point and
 /// orientation by that pattern's own fit (Fit.settle), then the transformation of the
 /// scan's indices that passes through them (settings.plane_kind), by weighted least squares
@@ -539,34 +858,81 @@ const Fit = struct {
 /// the plane: the beam's position for every map cell is then the plane's, and the scan's steps
 /// and the detector's pixel size say nothing of it.
 pub fn plane(e: *Engine) !PlaneResult {
+    return fitPlane(e, false);
+}
+
+/// `plane`, or (`compare`) with the simpler models checked as well: the geometry takes the
+/// simplest the map supports (choose). One centre leaves the vote's geometry as it is.
+fn fitPlane(e: *Engine, compare: bool) !PlaneResult {
     const s = &e.set;
     const before = e.geo;
     errdefer e.geo = before;
     const info = try e.info();
     const fit = try Fit.open(e, s.plane_stride, s.plane_patterns_max);
     defer fit.close();
-    const gpa = e.gpa;
     const a = fit.arena.allocator();
     const n = fit.n;
     const sz = fit.sz;
     const aspect = sz[1] / sz[0];
     var res: PlaneResult = .{ .start_pc = before.pc, .start_ncc = fit.ncc, .n_patterns = @intCast(fit.n_used) };
     const trust = s.plane_trust * sz[0];
-    res.iterations = try fit.settle(6, trust, s.plane_iters);
-    res.ncc = fit.ncc;
-
-    // the measured points, and how well each is told
     const pts = try a.alloc(plane_mod.Point, n);
     const R = before.rotation();
     // a source's place, t, against (PCx · aspect, PCy, PCz): t = H R D y + const (geometry.translationFor)
     const M: rot.Mat3 = .{ -R[1], -R[0], R[2], -R[4], -R[3], R[5], -R[7], -R[6], R[8] };
+    const kind: plane_mod.Kind = if (s.plane_kind == .projective) .projective else .affine;
+    const fr = plane_mod.Frame.of(info.rows, info.cols, aspect);
+    const full = plane_mod.Model.of(kind);
+    const joint: Joint = .{ .fit = fit, .fr = fr, .R = R, .M = M, .h = sz[0], .cols = info.cols };
+    var theta: [plane_mod.N]f64 = @splat(0);
+    var P: [12]f64 = undefined;
+    res.method = @intFromEnum(s.plane_method);
+    if (s.plane_method == .joint) {
+        // the orientations settled where the geometry puts the sources, then the model's numbers
+        // fitted to all the patterns at once
+        _ = try fit.settle(3, 0, s.plane_iters);
+        res.start_ncc = fit.ncc;
+        res.iterations = try jointPlane(&joint, full, &theta, pts, s.plane_outlier, s.plane_iters, a);
+        P = plane_mod.toPlane(full, theta, fr) orelse return error.TooFewFitPatterns;
+    } else {
+        res.iterations = try fit.settle(6, trust, s.plane_iters);
+        P = try pointsPlane(fit, pts, M, kind, fr, aspect, trust, info.cols, a);
+    }
+    res.ncc = fit.ncc;
+    const h_px: f64 = @floatFromInt(info.pat_h);
+    // the model: the full plane by itself, or in the automatic fit the simplest the map supports
+    const model = if (compare) try choose(a, &[_]plane_mod.Model{ .centre, .line, full }, pts, fit.cells, info.rows, info.cols, fr, aspect, &res) else full;
+    res.model = @intFromEnum(model);
+    if (model != full) {
+        if (s.plane_method == .joint) {
+            // the chosen model fitted to the patterns themselves, from its fit to the points
+            theta = plane_mod.fitTheta(model, pts, fr) orelse return error.TooFewFitPatterns;
+            res.iterations += try jointFit(&joint, model, &theta, s.plane_iters);
+            res.ncc = fit.ncc;
+            P = plane_mod.toPlane(model, theta, fr) orelse return error.TooFewFitPatterns;
+        } else P = plane_mod.fitModel(model, pts, fr) orelse return error.TooFewFitPatterns;
+    }
+    const said = plane_mod.said(P, &before, info.rows, info.cols, aspect, h_px, s.scan_x_sign, s.scan_y_sign);
+    return finishPlane(e, fit, &res, &before, P, model, full, kind, pts, fr, aspect, said, info);
+}
+
+/// The way of Winkelmann et al. and kikuchipy: each pattern's own source point (after `settle`
+/// over six unknowns), weighed by how sharply its pattern tells it, and the plane through
+/// them, with the points far from it left out.
+fn pointsPlane(fit: *Fit, pts: []plane_mod.Point, M: rot.Mat3, kind: plane_mod.Kind, fr: plane_mod.Frame, aspect: f64, trust: f64, cols: u32, a: std.mem.Allocator) ![12]f64 {
+    const e = fit.e;
+    const s = &e.set;
+    const n = fit.n;
+    const sz = fit.sz;
+    const R = fit.geo0.rotation();
+    const info_cols = cols;
     for (0..n) |b| {
         const pc = Geometry.pcOf(R, rot.add(fit.base[b], fit.shift[b]), sz[0], sz[1]);
         var at_edge = false;
         for (fit.shift[b]) |v| at_edge = at_edge or @abs(v) >= trust * (1 - 1e-9);
         pts[b] = .{
-            .col = @floatFromInt(fit.cells[b] % info.cols),
-            .row = @floatFromInt(fit.cells[b] / info.cols),
+            .col = @floatFromInt(fit.cells[b] % info_cols),
+            .row = @floatFromInt(fit.cells[b] / info_cols),
             .y = .{ pc[0] * aspect, pc[1], pc[2] },
             .used = fit.use[b] and !at_edge,
         };
@@ -609,8 +975,6 @@ pub fn plane(e: *Engine) !PlaneResult {
         pts[b].w = W;
     }
 
-    const kind: plane_mod.Kind = if (s.plane_kind == .projective) .projective else .affine;
-    const fr = plane_mod.Frame.of(info.rows, info.cols, aspect);
     var P = plane_mod.fit(kind, pts, fr) orelse return error.TooFewFitPatterns;
     // the points far from the plane go, and the plane is fitted again, until none more goes
     const dist = try a.alloc(f64, n);
@@ -647,8 +1011,20 @@ pub fn plane(e: *Engine) !PlaneResult {
             P = plane_mod.fit(kind, pts, fr) orelse return error.TooFewFitPatterns;
         }
     }
+    return P;
+}
+
+/// What follows either way of fitting: each number's standard error by blocks, the geometry
+/// taking the model, the points kept for the view, and the fit patterns' orientations.
+fn finishPlane(e: *Engine, fit: *Fit, res_out: *PlaneResult, before_in: *const Geometry, P: [12]f64, model: plane_mod.Model, full: plane_mod.Model, kind: plane_mod.Kind, pts: []plane_mod.Point, fr: plane_mod.Frame, aspect: f64, said: plane_mod.Said, info: anytype) !PlaneResult {
+    const s = &e.set;
+    const gpa = e.gpa;
+    const a = fit.arena.allocator();
+    const n = fit.n;
+    const before = before_in.*;
+    var res = res_out.*;
+    const compare = res.compared != 0;
     const h_px: f64 = @floatFromInt(info.pat_h);
-    const said = plane_mod.said(P, &before, info.rows, info.cols, aspect, h_px, s.scan_x_sign, s.scan_y_sign);
 
     // each one's standard error: the plane fitted again without the points of one block of the map, block by block
     {
@@ -666,7 +1042,7 @@ pub fn plane(e: *Engine) !PlaneResult {
                 any = any or (was[b] and at == g);
             }
             if (!any) continue;
-            const Pg = plane_mod.fit(kind, pts, fr) orelse continue;
+            const Pg = plane_mod.fitModel(model, pts, fr) orelse continue;
             const w = plane_mod.said(Pg, &before, info.rows, info.cols, aspect, h_px, s.scan_x_sign, s.scan_y_sign);
             val[got] = .{ w.rot[0], w.rot[1], w.rot[2], w.step[0], w.step[1], w.skew, w.pc[0], w.pc[1], w.pc[2] };
             for (0..9) |i| mean[i] += val[got][i];
@@ -689,19 +1065,22 @@ pub fn plane(e: *Engine) !PlaneResult {
         }
     }
 
-    // the geometry takes the plane
-    res.kind = @intFromEnum(kind);
-    res.frame = @intFromBool(s.plane_frame == .follow);
+    // the geometry takes the plane (a tilt line is an affine plane; one centre leaves the
+    // vote's geometry, its pattern centre and the scan's steps, as it is)
+    res.kind = if (model == .centre) 0 else @intFromEnum(kind);
+    res.frame = @intFromBool(s.plane_frame == .follow and model != .centre);
     res.plane = P;
-    res.pc = said.pc;
+    res.pc = if (model == .centre) before.pc else said.pc;
     res.said_rot = said.rot;
     res.step = said.step;
     res.skew = said.skew;
     e.geo = before;
-    e.geo.plane_kind = @intFromEnum(kind);
-    e.geo.plane = P;
-    e.geo.pc = said.pc;
-    if (s.plane_frame == .follow) e.geo.rot = said.rot;
+    if (model != .centre) {
+        e.geo.plane_kind = if (model == .projective) @intFromEnum(plane_mod.Kind.projective) else @intFromEnum(plane_mod.Kind.affine);
+        e.geo.plane = P;
+        e.geo.pc = said.pc;
+        if (s.plane_frame == .follow) e.geo.rot = said.rot;
+    }
     res.rot = e.geo.rot;
 
     e.plane_points.clearRetainingCapacity();
@@ -743,6 +1122,11 @@ pub fn plane(e: *Engine) !PlaneResult {
     fit.committed = true;
 
     const deg = 180.0 / std.math.pi;
+    if (compare) e.events.log("the source over the scan, each model asked where a block of the map stands from the others (mean misfit a point): one centre {d:.3}, a tilt line {d:.3}, the {s} plane {d:.3}; the map supports {s}", .{ res.cv[0], res.cv[1], @tagName(kind), res.cv[@intFromEnum(full)], switch (model) {
+        .centre => "one centre: the vote's geometry stays",
+        .line => "a tilt line: PCx the same everywhere, PCy and PCz along the rows",
+        else => "the plane",
+    } });
     e.events.log("plane of source points ({s}): {d} of {d} fit patterns used; about it they scatter by {d:.5} {d:.5} {d:.5} (PCx, PCy, PCz); mean NCC {d:.4} with each pattern at its own best (was {d:.4})", .{ @tagName(kind), res.n_used, res.n_patterns, res.rmsd[0], res.rmsd[1], res.rmsd[2], res.ncc, res.start_ncc });
     e.events.log("plane: source at the map's middle {d:.5} {d:.5} {d:.5}; the sample's frame against the nominal one: swing {d:.2}° ± {d:.2}°, tilt {d:.2}° ± {d:.2}°, the scan turned in its plane {d:.2}° ± {d:.2}°; the beam's travel for a row {d:.3} ± {d:.3} and for a column {d:.3} ± {d:.3} of what the steps and the pixel size say; the scan's directions {d:.2}° ± {d:.2}° off square", .{ res.pc[0], res.pc[1], res.pc[2], said.rot[0] * deg, res.said_rot_se[0] * deg, said.rot[1] * deg, res.said_rot_se[1] * deg, said.rot[2] * deg, res.said_rot_se[2] * deg, said.step[0], res.step_se[0], said.step[1], res.step_se[1], said.skew * deg, res.skew_se * deg });
     return res;
@@ -758,7 +1142,7 @@ pub fn auto(e: *Engine) !PlaneResult {
     e.geo = e.geo_given;
     _ = try pcfit.run(e);
     if (e.cancel) return error.Cancelled;
-    return plane(e);
+    return fitPlane(e, true);
 }
 
 test "small dense solve" {

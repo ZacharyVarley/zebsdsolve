@@ -409,8 +409,11 @@ const GEOMETRY_SIZE = 192;
 export const PLANE_KINDS = ["none", "affine", "projective"];
 const PLANE_RESULT = [["plane", "f64x12", 0], ["pc", "f64x3", 96], ["startPc", "f64x3", 120], ["rot", "f64x3", 144], ["saidRot", "f64x3", 168], ["saidRotSe", "f64x3", 192],
   ["step", "f64x2", 216], ["stepSe", "f64x2", 232], ["skew", "f64", 248], ["skewSe", "f64", 256], ["pcSe", "f64x3", 264], ["rmsd", "f64x3", 288], ["ncc", "f64", 312], ["startNcc", "f64", 320],
-  ["kind", "u32", 328], ["frame", "u32", 332], ["nPatterns", "u32", 336], ["nUsed", "u32", 340], ["iterations", "u32", 344], ["blocks", "u32", 348]];
-const PLANE_RESULT_SIZE = 352;
+  ["kind", "u32", 328], ["frame", "u32", 332], ["nPatterns", "u32", 336], ["nUsed", "u32", 340], ["iterations", "u32", 344], ["blocks", "u32", 348],
+  ["model", "u32", 352], ["compared", "u32", 356], ["cv", "f64x4", 360], ["cvSe", "f64x4", 392], ["method", "u32", 424]];
+const PLANE_RESULT_SIZE = 432;
+/** How the source moves over the scan, a plane fit's `model`: the automatic fit takes the simplest the map supports. */
+export const PLANE_MODELS = ["centre", "line", "affine", "projective"];
 const PLANE_POINT_SIZE = 72;
 const PC_RESULT = [["pc", "f64x3", 0], ["start", "f64x3", 24], ["score", "f64", 48], ["startScore", "f64", 56],
   ["nPatterns", "u32", 64], ["nCandidates", "u32", 68], ["levels", "u32", 72], ["atBorder", "bool", 76]];
@@ -975,6 +978,31 @@ export class Zebsdsolve {
 
   /** Simulated patterns of a phase: cells[k] with orientation quats[4k..4k+4] (w, x, y, z), at
    *  the reduced size or (full) the stored one; Float32Array(n·h·w). */
+  /** One cell indexed and simulated under another geometry than the one in use, which stays as
+   *  it is (two pattern centres side by side): `geometry` holds the fields to change, as for
+   *  setGeometry. The spherical correlation at `bandwidth`, then the refinement; returns the best
+   *  phase's { phase, q, ncc, nmi, sim }. */
+  cellUnder(cell, geometry, bandwidth, full = false) {
+    return this._serial(() => this._frame(async (f) => {
+      const [h, w] = this.shape(full);
+      const nPh = this.phases.length;
+      const g = f.alloc(GEOMETRY_SIZE);
+      this.x.ze_get_geometry(this.e, g);
+      const v = new DataView(this.mem);
+      for (const [k, t, off] of GEOMETRY) {
+        if (!(k in geometry)) continue;
+        const many = /^f64x(\d+)$/.exec(t);
+        if (many) for (let i = 0; i < +many[1]; i++) v.setFloat64(g + off + 8 * i, +geometry[k][i], true);
+        else if (t === "u32") v.setUint32(g + off, +geometry[k], true);
+        else v.setFloat64(g + off, +geometry[k], true);
+      }
+      const recs = f.alloc(nPh * 8 * 4), sim = f.alloc(h * w * 4);
+      const p = this._check(await this.x.ze_cell_under(this.e, BigInt(cell), g, bandwidth, full ? 1 : 0, recs, nPh * 8, sim, h * w), "cell under");
+      const r = new Float32Array(this.mem, recs + 32 * p, 8);
+      return { phase: p, q: Array.from(r.subarray(0, 4)), ncc: r[4], nmi: r[5], sim: new Float32Array(this.mem, sim, h * w).slice() };
+    }));
+  }
+
   simulate(phase, cells, quats, full = false) {
     return this._serial(() => this._frame(async (f) => {
       const [h, w] = this.shape(full);

@@ -121,13 +121,15 @@ export fn ze_scan_format(e: *Engine, buf: [*]u8, cap: usize) usize {
 }
 
 export fn ze_get_geometry(e: *Engine, out: *engine.Geometry) void {
-    out.* = e.geo;
+    // (the geometry in use, also while a cell is indexed under another: ze_cell_under)
+    out.* = e.geo_home orelse e.geo;
 }
 
 export fn ze_set_geometry(e: *Engine, in: *const engine.Geometry) void {
     // what the caller changed is given; what it passed back as it read it (a fit's result
     // among it) is not
-    const was = e.geo;
+    const home = if (e.geo_home) |*h| h else &e.geo;
+    const was = home.*;
     var g = in.*;
     // (no pixel size: the scan's own, or the one its detector's width gives)
     if (!(g.px_um > 0)) g.px_um = e.defaultPx();
@@ -141,7 +143,7 @@ export fn ze_set_geometry(e: *Engine, in: *const engine.Geometry) void {
     // (a pattern centre set by hand is one for the whole map again, the scan's steps saying how
     // the beam went from it: the plane it was read from goes, unless a plane comes with it)
     if (!std.meta.eql(in.pc, was.pc) and std.meta.eql(in.plane, was.plane) and in.plane_kind == was.plane_kind) g.plane_kind = 0;
-    e.geo = g;
+    home.* = g;
 }
 
 // ── phases ──
@@ -645,6 +647,22 @@ export fn ze_index_cells(e: *Engine, cells: [*]const u64, n: usize, out: [*]f32,
     const recs: []engine.Record = @as([*]engine.Record, @ptrCast(@alignCast(out)))[0 .. n_ph * n];
     e.indexCells(cells[0..n], e.searchOf(), recs) catch |err| return failed(e, "index_cells", err);
     return 0;
+}
+
+/// One cell indexed and simulated under the geometry `geo` instead of the one in use, which is
+/// left as it is (two pattern centres set side by side): a record per phase into `recs` (8 f32
+/// each, as ze_index_cells; the spherical correlation at `bandwidth`, then the refinement) and
+/// the best phase's simulation into `sim`, at the reduced size or (`full`) the stored one.
+/// Returns that phase.
+export fn ze_cell_under(e: *Engine, cell: u64, geo: *const engine.Geometry, bandwidth: u32, full: u32, recs: [*]f32, n_recs: usize, sim: [*]f32, len: usize) i32 {
+    const n_ph = e.phases.items.len;
+    if (n_ph == 0 or n_recs != n_ph * 8) return failed(e, "cell_under", error.BadLength);
+    if (bandwidth < 8 or bandwidth > 256) return failed(e, "cell_under", error.BadSetting);
+    var g = geo.*;
+    if (!(g.px_um > 0)) g.px_um = e.defaultPx();
+    const rs = @as([*]engine.Record, @ptrCast(@alignCast(recs)))[0..n_ph];
+    const p = e.cellUnder(cell, g, bandwidth, e.viewLevel(full != 0), rs, sim[0..len]) catch |err| return failed(e, "cell_under", err);
+    return @intCast(p);
 }
 
 /// ze_index_cells with the search given instead of the settings': `method` in

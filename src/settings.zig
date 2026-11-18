@@ -19,6 +19,9 @@ pub const PlaneKind = enum { affine, projective };
 pub const PlaneFrame = enum { nominal, follow };
 /// How the measured source points are weighed in the plane's fit.
 pub const PlaneWeights = enum { equal, information };
+/// How the plane's numbers are found: from all the fit patterns at once, each one's orientation
+/// following (`joint`), or through each pattern's own source point (`points`).
+pub const PlaneMethod = enum { joint, points };
 /// How the plane fit samples the master pattern.
 pub const Interp = enum { bilinear, bicubic, keys6 };
 /// How inverse pole figure colours are assigned (sym.Colors).
@@ -232,6 +235,16 @@ pub const Settings = struct {
     /// what makes many small patterns worth a few large ones: a small pattern tells its
     /// source's distance far better than where it stands across the detector.
     plane_weights: PlaneWeights = .information,
+    /// `joint`: the model's numbers (3 for one centre, 5 a tilt line, 9 or 11 the plane) fitted
+    /// to all the fit patterns at once, by Gauss–Newton on their mean NCC with each pattern's
+    /// orientation profiled out: no pattern ever has a source of its own, so a pattern whose
+    /// source and turn its own features can hardly tell apart adds what it does tell and no
+    /// more. `points`: Winkelmann et al.'s and kikuchipy's way, each pattern fitted by itself
+    /// over its source and its turn (six unknowns), then the model through those source points.
+    /// `points` by default: on synthetic scans the two are equally accurate, and `joint`'s
+    /// points for comparing the models are one step from the model fitted to every pattern,
+    /// the held-out ones too, which leans the comparison toward the full model.
+    plane_method: PlaneMethod = .points,
     /// The plane's patterns: every plane_stride-th cell each way, no more than
     /// plane_patterns_max (the stride is widened until they are; 0: no such limit).
     plane_stride: u32 = 2,
@@ -318,7 +331,7 @@ pub const Settings = struct {
     /// and the hue at an even rate round it; `perfect`, the keys of Nolze and Hielscher (2016)
     /// for the Laue class; `perfect_rotation`, theirs for the class's proper rotations, which
     /// tell a direction from its opposite.
-    ipf_colors: IpfColors = .classic,
+    ipf_colors: IpfColors = .perfect,
     /// The perfect keys' two gradients (the paper's equations 9 and 10). `ipf_lightness` is
     /// λ_L: 1 makes the lightness linear in the distance from a sector's centre, less widens
     /// the light (and dark) centre. `ipf_gray` is λ_S: 0 leaves the centres white and black,

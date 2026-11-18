@@ -51,6 +51,7 @@ class PlaneResult(ctypes.Structure):
         ("said_rot", F64 * 3), ("said_rot_se", F64 * 3), ("step", F64 * 2), ("step_se", F64 * 2), ("skew", F64), ("skew_se", F64),
         ("pc_se", F64 * 3), ("rmsd", F64 * 3), ("ncc", F64), ("start_ncc", F64),
         ("kind", U32), ("frame", U32), ("n_patterns", U32), ("n_used", U32), ("iterations", U32), ("blocks", U32),
+        ("model", U32), ("compared", U32), ("cv", F64 * 4), ("cv_se", F64 * 4), ("method", U32), ("_pad", U32),
     ]
 
 
@@ -153,6 +154,7 @@ _SIGS = {
     "ze_sweep": ([P, U32, u32p], None),
     "ze_index_cells": ([P, u64p, SZ, f32p, SZ], I32),
     "ze_index_cells_by": ([P, u64p, SZ, U32, U32, U32, f32p, SZ], I32),
+    "ze_cell_under": ([P, ctypes.c_uint64, ctypes.POINTER(Geometry), U32, U32, f32p, SZ, f32p, SZ], I32),
     "ze_results": ([P, U32, P, SZ], I64),
     "ze_map": ([P, U32, u8p, SZ], I32),
     "ze_ipf_key": ([P, U32, U32, U32, u8p, SZ, f32p], I32),

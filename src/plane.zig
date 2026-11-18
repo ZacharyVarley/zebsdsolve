@@ -20,6 +20,33 @@ const Geometry = @import("geometry.zig").Geometry;
 
 pub const Kind = enum(u32) { none = 0, affine = 1, projective = 2 };
 
+/// The models of how the source moves over the scan, simplest first, each inside the next:
+/// one place for every cell; a tilt line, PCx the same everywhere and PCy, PCz moving along the
+/// scan's rows (down the tilted surface: where the sample's tilt shows first) and not across
+/// them; the affine plane; the projective one. The first two are affine planes with some of
+/// their numbers held at zero.
+pub const Model = enum(u32) {
+    centre = 0,
+    line = 1,
+    affine = 2,
+    projective = 3,
+
+    /// The model's unknowns among the fit's (θ: x, y, z rows of (column, row, 1), then the
+    /// projective row).
+    pub fn free(m: Model) []const usize {
+        return switch (m) {
+            .centre => &[_]usize{ 2, 5, 8 },
+            .line => &[_]usize{ 2, 4, 5, 7, 8 },
+            .affine => &[_]usize{ 0, 1, 2, 3, 4, 5, 6, 7, 8 },
+            .projective => &[_]usize{ 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10 },
+        };
+    }
+
+    pub fn of(kind: Kind) Model {
+        return if (kind == .projective) .projective else .affine;
+    }
+};
+
 /// A source point measured on one pattern.
 pub const Point = struct {
     col: f64,
@@ -33,10 +60,10 @@ pub const Point = struct {
 };
 
 /// Unknowns: the three rows of the affine part (9), then the two of the projective row.
-const N = 11;
+pub const N = 11;
 
 /// Solve A x = b by elimination with partial pivoting (n ≤ N; the rest of the arrays is not read).
-fn solve(n: usize, A0: [N * N]f64, b0: [N]f64) ?[N]f64 {
+pub fn solve(n: usize, A0: [N * N]f64, b0: [N]f64) ?[N]f64 {
     var A = A0;
     var b = b0;
     for (0..n) |c| {
@@ -82,6 +109,22 @@ pub const Frame = struct {
     }
 };
 
+/// A model's place for a map cell and its Jacobian against the unknowns θ (3 × N, row-major), in
+/// the fit's own coordinates (PCx · aspect, PCy, PCz).
+pub fn modelAt(theta: [N]f64, fr: Frame, row: f64, col: f64) struct { y: [3]f64, J: [3 * N]f64 } {
+    const c = (col - fr.c0) / fr.sc;
+    const r = (row - fr.r0) / fr.sr;
+    const f = model(theta, c, r);
+    const b: [3]f64 = .{ c, r, 1 };
+    var J: [3 * N]f64 = @splat(0);
+    for (0..3) |k| {
+        for (0..3) |j| J[k * N + 3 * k + j] = b[j] / f.w;
+        J[k * N + 9] = -f.y[k] * c / f.w;
+        J[k * N + 10] = -f.y[k] * r / f.w;
+    }
+    return .{ .y = f.y, .J = J };
+}
+
 fn model(theta: [N]f64, c: f64, r: f64) struct { y: [3]f64, w: f64 } {
     const w = theta[9] * c + theta[10] * r + 1;
     var y: [3]f64 = undefined;
@@ -94,16 +137,28 @@ fn model(theta: [N]f64, c: f64, r: f64) struct { y: [3]f64, w: f64 } {
 /// there and takes Gauss–Newton steps (as Winkelmann: "starting from an affine transformation
 /// and minimizing the root mean square deviation"). Null with too few points, or none apart.
 pub fn fit(kind: Kind, pts: []const Point, fr: Frame) ?[12]f64 {
-    const n: usize = if (kind == .projective) 11 else 9;
+    return fitModel(Model.of(kind), pts, fr);
+}
+
+/// `fit` for any of the models: the unknowns the model leaves free, the others held at zero.
+pub fn fitModel(which: Model, pts: []const Point, fr: Frame) ?[12]f64 {
+    const theta = fitTheta(which, pts, fr) orelse return null;
+    return toPlane(which, theta, fr);
+}
+
+/// The model's unknowns themselves (θ, in the frame `fr`), fitted to the points.
+pub fn fitTheta(which: Model, pts: []const Point, fr: Frame) ?[N]f64 {
+    const all = which.free();
     var theta: [N]f64 = @splat(0);
     var count: usize = 0;
     for (pts) |p| count += @intFromBool(p.used);
-    if (count * 3 < n + 1) return null;
+    if (count * 3 < all.len + 1) return null;
     var it: u32 = 0;
-    const most: u32 = if (kind == .projective) 40 else 1;
+    const most: u32 = if (which == .projective) 40 else 1;
     while (it < most) : (it += 1) {
-        // (the first pass is the affine fit, the projective row held at zero)
-        const m: usize = if (it == 0) 9 else n;
+        // (the first pass of the projective fit is the affine one, the projective row held at zero)
+        const F = if (which == .projective and it == 0) Model.affine.free() else all;
+        const m = F.len;
         var A: [N * N]f64 = @splat(0);
         var g: [N]f64 = @splat(0);
         for (pts) |p| {
@@ -121,26 +176,31 @@ pub fn fit(kind: Kind, pts: []const Point, fr: Frame) ?[12]f64 {
             }
             var res: [3]f64 = undefined;
             for (0..3) |k| res[k] = p.y[k] - f.y[k];
-            for (0..m) |i| {
+            for (F, 0..) |fi, i| {
                 var wj: [3]f64 = .{ 0, 0, 0 };
                 for (0..3) |k| for (0..3) |l| {
-                    wj[k] += p.w[k * 3 + l] * J[l * N + i];
+                    wj[k] += p.w[k * 3 + l] * J[l * N + fi];
                 };
                 for (0..3) |k| g[i] += wj[k] * res[k];
-                for (0..m) |j| {
-                    for (0..3) |k| A[i * N + j] += wj[k] * J[k * N + j];
+                for (F, 0..) |fj, j| {
+                    for (0..3) |k| A[i * N + j] += wj[k] * J[k * N + fj];
                 }
             }
         }
         const d = solve(m, A, g) orelse return null;
         var moved: f64 = 0;
-        for (0..m) |i| {
-            theta[i] += d[i];
+        for (F, 0..) |fi, i| {
+            theta[fi] += d[i];
             moved = @max(moved, @abs(d[i]));
         }
         if (it > 0 and moved < 1e-13) break;
     }
-    // to the scan's own indices, and Bruker's PCx: P = Θ T, T taking (col, row, 1) to (c, r, 1)
+    return theta;
+}
+
+/// The model's unknowns as the plane P of the scan's own indices (Bruker's PCx): P = Θ T, T
+/// taking (col, row, 1) to (c, r, 1). Null where the plane would be undefined.
+pub fn toPlane(which: Model, theta: [N]f64, fr: Frame) ?[12]f64 {
     var P: [12]f64 = undefined;
     for (0..4) |k| {
         const a = if (k < 3) theta[3 * k] else theta[9];
@@ -154,11 +214,22 @@ pub fn fit(kind: Kind, pts: []const Point, fr: Frame) ?[12]f64 {
     if (!(@abs(P[11]) > 1e-12)) return null;
     const scale = 1 / P[11];
     for (&P) |*v| v.* *= scale;
-    if (kind != .projective) {
+    if (which != .projective) {
         P[9] = 0;
         P[10] = 0;
     }
     return P;
+}
+
+/// A point's squared distance from a plane, by its weight: rᵀ W r.
+pub fn misfit(P: [12]f64, p: Point, aspect: f64) f64 {
+    const pc = at(P, p.row, p.col);
+    const r: [3]f64 = .{ p.y[0] - pc[0] * aspect, p.y[1] - pc[1], p.y[2] - pc[2] };
+    var q: f64 = 0;
+    for (0..3) |i| for (0..3) |j| {
+        q += r[i] * p.w[i * 3 + j] * r[j];
+    };
+    return q;
 }
 
 /// The plane's source point for a map cell, in pattern-centre coordinates.
@@ -208,9 +279,21 @@ pub fn said(P: [12]f64, geo: *const Geometry, rows: u32, cols: u32, aspect: f64,
     const lx = @sqrt(rot.dot(xs, xs));
     const ly = @sqrt(rot.dot(ys, ys));
     var out: Said = .{ .pc = at(P, r0, c0), .rot = .{ 0, 0, 0 }, .step = .{ 0, 0 }, .skew = 0 };
-    if (!(lx > 0) or !(ly > 0)) return out;
+    if (geo.px_um > 0 and h_px > 0) {
+        out.step = .{ lx * h_px * geo.px_um / geo.step_y_um, ly * h_px * geo.px_um / geo.step_x_um };
+    }
+    if (!(lx > 0)) return out;
     const x = rot.scale(xs, 1 / lx);
-    const yn = rot.scale(ys, 1 / ly);
+    // (a tilt line says nothing across the rows: the sample's y is then the nominal one, made
+    // square to the x the line gives, and the scan is square)
+    const R0 = geo.nominal();
+    const yn = if (ly > 0) rot.scale(ys, 1 / ly) else blk: {
+        const y0: rot.Vec3 = .{ R0[3], R0[4], R0[5] };
+        const v = rot.sub(y0, rot.scale(x, rot.dot(y0, x)));
+        const lv = @sqrt(rot.dot(v, v));
+        if (!(lv > 1e-9)) return out;
+        break :blk rot.scale(v, 1 / lv);
+    };
     var z = rot.cross(x, yn);
     const lz = @sqrt(rot.dot(z, z));
     if (!(lz > 1e-9)) return out;
@@ -218,12 +301,35 @@ pub fn said(P: [12]f64, geo: *const Geometry, rows: u32, cols: u32, aspect: f64,
     const y = rot.cross(z, x);
     // R takes the detector's coordinates to the sample's: its rows are the sample's axes there
     const R: rot.Mat3 = .{ x[0], x[1], x[2], y[0], y[1], y[2], z[0], z[1], z[2] };
-    out.rot = rot.so3Log(rot.fromMat(rot.matMul(rot.transpose(geo.nominal()), R)));
+    out.rot = rot.so3Log(rot.fromMat(rot.matMul(rot.transpose(R0), R)));
     out.skew = std.math.asin(std.math.clamp(rot.dot(x, yn), -1, 1));
-    if (geo.px_um > 0 and h_px > 0) {
-        out.step = .{ lx * h_px * geo.px_um / geo.step_y_um, ly * h_px * geo.px_um / geo.step_x_um };
-    }
     return out;
+}
+
+test "each model is found again from its own points, and holds its zeros" {
+    const fr = Frame.of(40, 60, 1.25);
+    // a tilt line: PCx the same everywhere, PCy and PCz moving with the row alone
+    const L: [12]f64 = .{ 0, 0, 0.43, 0, -3.6e-4, 0.22, 0, 1.3e-4, 0.5, 0, 0, 1 };
+    var pts: [49]Point = undefined;
+    for (0..7) |i| for (0..7) |j| {
+        const row: f64 = @floatFromInt(i * 6 + 1);
+        const col: f64 = @floatFromInt(j * 9 + 2);
+        const pc = at(L, row, col);
+        pts[i * 7 + j] = .{ .col = col, .row = row, .y = .{ pc[0] * fr.aspect, pc[1], pc[2] } };
+    };
+    for ([_]Model{ .line, .affine }) |m| {
+        const P = fitModel(m, &pts, fr).?;
+        for (P, L) |got, want| try std.testing.expectApproxEqAbs(want, got, 1e-11);
+    }
+    // one centre: the points' mean, every slope zero
+    const C = fitModel(.centre, &pts, fr).?;
+    var mean: [3]f64 = .{ 0, 0, 0 };
+    for (pts) |q| {
+        const pc = at(L, q.row, q.col);
+        for (0..3) |k| mean[k] += pc[k] / pts.len;
+    }
+    for (0..3) |k| try std.testing.expectApproxEqAbs(mean[k], C[3 * k + 2], 1e-11);
+    for ([_]usize{ 0, 1, 3, 4, 6, 7 }) |i| try std.testing.expectEqual(@as(f64, 0), C[i]);
 }
 
 test "a plane is found again from its own points, affine and projective" {

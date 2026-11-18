@@ -36,6 +36,7 @@ _wgpu = None
 LAUE = {1: "-1", 2: "2/m", 3: "mmm", 4: "4/m", 5: "4/mmm", 6: "-3", 7: "-3m", 8: "6/m", 9: "6/mmm", 10: "m-3", 11: "m-3m"}
 # What the geometry's plane of source points is (`fit_plane`).
 PLANE_KINDS = ("none", "affine", "projective")
+PLANE_MODELS = ("centre", "line", "affine", "projective")
 METHODS = ("spherical", "dictionary", "pca")
 MAPS = {"ipf_x": 0, "ipf_y": 1, "ipf_z": 2, "ncc": 3, "nmi": 4, "phase": 5, "z": 6, "sweep": 7}
 
@@ -170,9 +171,8 @@ class Solver:
             "plane_kind": PLANE_KINDS[g.plane_kind], "plane": [list(g.plane[3 * k:3 * k + 3]) for k in range(4)],
         }
 
-    def set_geometry(self, **fields):
-        """Set any of the geometry's fields, e.g. ``set_geometry(pc=(0.5, 0.2, 0.5), px_um=70)``.
-        ``px_um=0`` puts the pixel size back to the scan's own, or the one its detector's width gives."""
+    def _geometry_with(self, fields):
+        """The geometry in use with the given fields changed, as the native struct."""
         g = _n.Geometry()
         self._lib.ze_get_geometry(self._e, ctypes.byref(g))
         for k, v in fields.items():
@@ -186,8 +186,30 @@ class Solver:
                 setattr(g, k, float(v))
             else:
                 raise Error(f"geometry has no field {k!r}")
+        return g
+
+    def set_geometry(self, **fields):
+        """Set any of the geometry's fields, e.g. ``set_geometry(pc=(0.5, 0.2, 0.5), px_um=70)``.
+        ``px_um=0`` puts the pixel size back to the scan's own, or the one its detector's width gives."""
+        g = self._geometry_with(fields)
         self._lib.ze_set_geometry(self._e, ctypes.byref(g))
         return self
+
+    def cell_under(self, cell, bandwidth=None, full=False, **fields):
+        """Index one map cell and simulate it under another geometry than the one in use, which
+        stays as it is: the fields given change it as for `set_geometry`, e.g.
+        ``cell_under(c, pc=file_pc)`` to set two pattern centres side by side. The spherical
+        correlation at `bandwidth` (the pattern-centre fit's, `fit_bandwidth`, unless given), then
+        the refinement. Returns the best phase's {phase, quaternion, ncc, nmi, simulation}."""
+        g = self._geometry_with(fields)
+        n_ph = self._lib.ze_phase_count(self._e)
+        recs = np.empty(n_ph * 8, np.float32)
+        h, w = self.shape(full)
+        sim = np.empty(h * w, np.float32)
+        bw = int(bandwidth or self.settings["fit_bandwidth"])
+        p = self._check(self._lib.ze_cell_under(self._e, int(cell), ctypes.byref(g), bw, 1 if full else 0, _ptr(recs, _n.f32p), recs.size, _ptr(sim, _n.f32p), sim.size), "cell_under")
+        r = recs.reshape(n_ph, 8)[p]
+        return {"phase": int(p), "quaternion": r[:4].copy(), "ncc": float(r[4]), "nmi": float(r[5]), "simulation": sim.reshape(h, w)}
 
     # ── scan ──
 
@@ -495,9 +517,13 @@ class Solver:
     def fit_geometry(self):
         """The automatic fit, from the geometry as it was given (by the scan or by
         `set_geometry`; what earlier fits left is not used, so the same scan and settings give
-        the same fit): the vote for the pattern centre (`fit_pc`), then the plane of source
-        points from there (`fit_plane`). Returns the dict `fit_plane` does; its start_pc is the
-        vote's pattern centre."""
+        the same fit): the vote for the pattern centre (`fit_pc`), then the fit patterns' own
+        source points from there, and of the ways they may move over the scan the simplest the
+        map supports: one centre (the vote's geometry stays), a tilt line (PCx the same
+        everywhere, PCy and PCz along the rows) or the plane (`plane_kind`). Each is asked where
+        a block of the map stands from the others; `models` gives each one's error so (`cv`,
+        and `cv_se`, the standard error of its difference from the best), `model` the one taken.
+        Otherwise the dict `fit_plane` returns; its start_pc is the vote's pattern centre."""
         r = _n.PlaneResult()
         self._check(self._lib.ze_fit_auto(self._e, ctypes.byref(r)), "fit_geometry")
         return self._plane_result(r)
@@ -506,6 +532,8 @@ class Solver:
         g = self.geometry
         return {
             "plane": np.array(r.plane, dtype=np.float64).reshape(4, 3), "kind": PLANE_KINDS[r.kind], "frame": ("nominal", "follow")[r.frame],
+            "model": PLANE_MODELS[r.model], "method": ("joint", "points")[r.method],
+            "models": {m: {"cv": r.cv[i], "cv_se": r.cv_se[i]} for i, m in enumerate(PLANE_MODELS) if r.compared and r.cv[i] > 0},
             "pc": list(r.pc), "pc_se": list(r.pc_se), "start_pc": list(r.start_pc), "rot": list(r.rot),
             "n_patterns": r.n_patterns, "n_used": r.n_used, "rmsd": list(r.rmsd), "ncc": r.ncc, "start_ncc": r.start_ncc, "iterations": r.iterations,
             "said": {
