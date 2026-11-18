@@ -678,7 +678,8 @@ export class Zebsdsolve {
     }));
   }
 
-  closeScan() { this.x.ze_close_scan(this.e); }
+  /** Close the scan, after the calls queued before (one may be waiting on the file's bytes). */
+  closeScan() { return this._serial(() => this.x.ze_close_scan(this.e)); }
 
   /** What the scan is: { rows, cols, patH, patW, pixel, format, hasBackground, hasPc, voltageKv, bytes }. */
   get scan() {

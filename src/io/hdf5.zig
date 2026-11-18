@@ -1,9 +1,10 @@
 //! A reader for the part of HDF5 that EBSD files use, written against the file format
 //! specification so the engine needs no HDF5 library (and so the browser reads a 100 GB file
 //! in place). It follows groups, reads dataset headers and reads datasets whole, by ranges of
-//! their first axis, or by a list of steps along it (the patterns of a preview lattice). A
-//! chunked dataset's index is read one tree level per round trip, and the chunks a request
-//! needs in one more.
+//! their first axis, or by a list of steps along it (the patterns of a preview lattice). Of a
+//! chunked dataset's index only the paths to the chunks a request needs are read, one tree
+//! level per round trip (the inner nodes are kept, so later requests mostly read leaves), and
+//! the chunks themselves in one more.
 //!
 //! Covered: superblock versions 0–3; object headers versions 1 and 2; groups stored as symbol
 //! tables (the default of every HDF5 writer) or as compact link messages; fixed-point, floating
@@ -64,8 +65,14 @@ pub const Dataset = struct {
     chunk: [MAX_RANK]u64 = @splat(1),
     filters: [4]Filter = undefined,
     n_filters: u8 = 0,
-    /// every chunk by its place in the chunk grid, row-major (filled on first read)
+    /// every chunk by its place in the chunk grid, row-major; a slot is filled once `known`
+    /// says so, when the leaf of the chunk tree that holds it (or would) has been read
     index: []Slot = &.{},
+    known: std.DynamicBitSetUnmanaged = .{},
+    /// the chunk tree's inner nodes read so far, by address: one for every 64 leaves or so
+    inner: std.AutoHashMapUnmanaged(u64, []u8) = .empty,
+    /// the bytes of a tree node: the default fan-out's, until a node says it holds more
+    node_len: usize = 0,
     /// chunks along each axis
     grid: [MAX_RANK]u64 = @splat(1),
     /// the last chunk decoded (single-chunk layout)
@@ -74,6 +81,10 @@ pub const Dataset = struct {
 
     pub fn deinit(self: *Dataset, gpa: Allocator) void {
         gpa.free(self.index);
+        self.known.deinit(gpa);
+        var it = self.inner.valueIterator();
+        while (it.next()) |b| gpa.free(b.*);
+        self.inner.deinit(gpa);
         gpa.free(self.cache);
         self.* = .{};
     }
@@ -592,60 +603,128 @@ pub const Hdf5 = struct {
         return self.readRows(ds, 0, if (ds.rank == 0) 1 else ds.dims[0], dst);
     }
 
-    fn buildIndex(self: *Hdf5, ds: *Dataset) !void {
+    /// The chunk grid and an index of unknown slots (an implicit index is known at once).
+    fn initIndex(self: *Hdf5, ds: *Dataset) !void {
         if (ds.index.len != 0) return;
         var n: u64 = 1;
         for (0..ds.rank) |d| {
-            ds.grid[d] = (ds.dims[d] + ds.chunk[d] - 1) / @max(ds.chunk[d], 1);
-            n *= ds.grid[d];
+            if (ds.chunk[d] == 0) return error.BadHdf5;
+            ds.grid[d] = (ds.dims[d] + ds.chunk[d] - 1) / ds.chunk[d];
+            n = std.math.mul(u64, n, ds.grid[d]) catch return error.BadHdf5;
         }
         if (n == 0) return;
-        const index = try self.gpa.alloc(Slot, @intCast(n));
+        const index = try self.gpa.alloc(Slot, std.math.cast(usize, n) orelse return error.BadHdf5);
         errdefer self.gpa.free(index);
         @memset(index, .{});
+        var known = try std.DynamicBitSetUnmanaged.initEmpty(self.gpa, index.len);
+        errdefer known.deinit(self.gpa);
         switch (ds.layout) {
-            .chunked => |c| if (c.btree != UNDEF) try self.collectChunks(ds, c.btree, index),
+            .chunked => |c| if (c.btree == UNDEF) known.setAll(),
             .implicit => |c| {
                 // unfiltered chunks back to back, in row-major order of the grid
                 const bytes = ds.chunkElements() * ds.dtype.size;
                 for (index, 0..) |*slot, k| slot.* = .{ .addr = c.addr + k * bytes, .size = @intCast(bytes), .mask = 0xffffffff };
+                known.setAll();
             },
-            else => {},
+            else => known.setAll(),
         }
-        ds.index = index;
-    }
-
-    /// Walk the version 1 B-tree of chunks breadth-first, every level's nodes in one round
-    /// trip (a scan of a million one-pattern chunks has tens of thousands of nodes).
-    fn collectChunks(self: *Hdf5, ds: *Dataset, root: u64, index: []Slot) !void {
-        const gpa = self.gpa;
-        const rank: usize = ds.rank;
-        const key: usize = 8 + 8 * (rank + 1);
-        const entry: usize = key + self.so;
-        const head: usize = 8 + 2 * @as(usize, self.so);
         // a node of the default fan-out (64 entries); a file written with a larger one shows
         // in its nodes' counts, and the batch is read again whole
-        var node_len: usize = head + 64 * entry + key;
-        var level: std.ArrayList(u64) = .empty;
+        ds.node_len = treeHead(self) + 64 * treeEntry(self, ds) + treeKey(ds);
+        ds.index = index;
+        ds.known = known;
+    }
+
+    fn treeKey(ds: *const Dataset) usize {
+        return 8 + 8 * (@as(usize, ds.rank) + 1);
+    }
+    fn treeEntry(self: *const Hdf5, ds: *const Dataset) usize {
+        return treeKey(ds) + self.so;
+    }
+    fn treeHead(self: *const Hdf5) usize {
+        return 8 + 2 * @as(usize, self.so);
+    }
+
+    /// The first slot whose chunk is at or past a key of the chunk tree. The tree orders chunks
+    /// by their origins, axis by axis and then by the element's byte (always 0 for a chunk),
+    /// which is the row-major order of the slots; a child of a node holds the chunks from its
+    /// key up to the next key. A key past the last chunk gives the slot count.
+    fn keySlot(ds: *const Dataset, key: []const u8) u64 {
+        const rank: usize = ds.rank;
+        var stride: [MAX_RANK]u64 = undefined;
+        var n: u64 = 1;
+        var d = rank;
+        while (d > 0) {
+            d -= 1;
+            stride[d] = n;
+            n *= ds.grid[d];
+        }
+        var slot: u64 = 0;
+        for (0..rank) |a| {
+            const o = std.mem.readInt(u64, key[8 + 8 * a ..][0..8], .little);
+            const g = o / ds.chunk[a];
+            const part = o % ds.chunk[a] != 0;
+            // past every origin with this prefix and coordinate: the next one up
+            if (part or g >= ds.grid[a]) return @min(slot + @min(g + @intFromBool(part), ds.grid[a]) * stride[a], n);
+            slot += g * stride[a];
+        }
+        const byte = std.mem.readInt(u64, key[8 + 8 * rank ..][0..8], .little);
+        return @min(slot + @intFromBool(byte != 0), n);
+    }
+
+    const Span = struct { lo: u64, hi: u64 };
+
+    /// Whether any of `want` (ascending, apart) falls in [lo, hi).
+    fn wanted(want: []const Span, lo: u64, hi: u64) bool {
+        var a: usize = 0;
+        var b = want.len;
+        while (a < b) {
+            const m = (a + b) / 2;
+            if (want[m].hi <= lo) a = m + 1 else b = m;
+        }
+        return a < want.len and want[a].lo < hi;
+    }
+
+    /// A node of the chunk tree to read: its address, the slots it holds and its level (the
+    /// root's is whatever it says).
+    const Node = struct { addr: u64, lo: u64, hi: u64, depth: ?u8 };
+
+    /// Read the part of the version 1 B-tree of chunks that holds the slots of `want`
+    /// (ascending spans, none known), breadth-first: of each level only the nodes on the way to
+    /// a wanted slot, those not read before in one round trip. A preview of a few patterns of a
+    /// scan of a million one-pattern chunks reads a path of three or four nodes, not its tens of
+    /// thousands of leaves; a request for every chunk reads the whole tree. Inner nodes are
+    /// kept. A leaf fills its chunks' slots and makes every slot between its keys known,
+    /// written or not.
+    fn resolve(self: *Hdf5, ds: *Dataset, want: []const Span) !void {
+        if (want.len == 0) return;
+        const gpa = self.gpa;
+        var level: std.ArrayList(Node) = .empty;
         defer level.deinit(gpa);
-        var next: std.ArrayList(u64) = .empty;
+        var next: std.ArrayList(Node) = .empty;
         defer next.deinit(gpa);
+        var fresh: std.ArrayList(Node) = .empty;
+        defer fresh.deinit(gpa);
         var ranges: std.ArrayList(Range) = .empty;
         defer ranges.deinit(gpa);
         var buf: std.ArrayList(u8) = .empty;
         defer buf.deinit(gpa);
-        try level.append(gpa, root);
+        try level.append(gpa, .{ .addr = ds.layout.chunked.btree, .lo = 0, .hi = ds.index.len, .depth = null });
         while (level.items.len != 0) {
             next.clearRetainingCapacity();
+            fresh.clearRetainingCapacity();
+            for (level.items) |nd| {
+                if (ds.inner.get(nd.addr)) |b| try self.chunkNode(ds, nd, b, want, &next) else try fresh.append(gpa, nd);
+            }
             var done: usize = 0;
-            while (done < level.items.len) {
-                const nb = @min(level.items.len - done, 2048);
+            while (done < fresh.items.len) {
+                const nb = @min(fresh.items.len - done, 2048);
                 ranges.clearRetainingCapacity();
                 var total: usize = 0;
-                for (level.items[done..][0..nb]) |a| {
-                    const at = a + self.base;
+                for (fresh.items[done..][0..nb]) |nd| {
+                    const at = std.math.add(u64, nd.addr, self.base) catch return error.BadHdf5;
                     if (at >= self.f.size) return error.BadHdf5;
-                    const len: usize = @intCast(@min(node_len, self.f.size - at));
+                    const len: usize = @intCast(@min(ds.node_len, self.f.size - at));
                     try ranges.append(gpa, .{ .offset = at, .len = len });
                     total += len;
                 }
@@ -654,45 +733,72 @@ pub const Hdf5 = struct {
                 var off: usize = 0;
                 var need: usize = 0;
                 for (ranges.items) |r| {
-                    const b = buf.items[off..][0..r.len];
+                    const len = try self.nodeLen(ds, buf.items[off..][0..r.len]);
                     off += r.len;
-                    if (b.len < head or !std.mem.eql(u8, b[0..4], "TREE") or b[4] != 1) return error.BadHdf5;
-                    const used: usize = std.mem.readInt(u16, b[6..8], .little);
-                    if (head + used * entry > b.len) need = @max(need, head + used * entry + key);
+                    if (len > r.len) need = @max(need, len);
                 }
                 if (need != 0) {
-                    if (need <= node_len) return error.BadHdf5;
-                    node_len = need;
+                    if (need <= ds.node_len) return error.BadHdf5;
+                    ds.node_len = need;
                     continue;
                 }
                 off = 0;
-                for (ranges.items) |r| {
-                    const b = buf.items[off..][0..r.len];
+                for (ranges.items, fresh.items[done..][0..nb]) |r, nd| {
+                    const b = buf.items[off..][0..try self.nodeLen(ds, buf.items[off..][0..r.len])];
                     off += r.len;
-                    const depth = b[5];
-                    const used: usize = std.mem.readInt(u16, b[6..8], .little);
-                    for (0..used) |i| {
-                        const p = b[head + i * entry ..];
-                        var kid: u64 = if (self.so == 8) std.mem.readInt(u64, p[key..][0..8], .little) else std.mem.readInt(u32, p[key..][0..4], .little);
-                        if (self.so == 4 and kid == 0xffffffff) kid = UNDEF;
-                        if (depth > 0) {
-                            try next.append(gpa, kid);
-                            continue;
-                        }
-                        // the chunk's place in the grid from its origin
-                        var slot: u64 = 0;
-                        for (0..rank) |d| {
-                            const o = std.mem.readInt(u64, p[8 + 8 * d ..][0..8], .little);
-                            if (o >= ds.dims[d] or o % ds.chunk[d] != 0) return error.BadHdf5;
-                            slot = slot * ds.grid[d] + o / ds.chunk[d];
-                        }
-                        index[@intCast(slot)] = .{ .addr = kid, .size = std.mem.readInt(u32, p[0..4], .little), .mask = std.mem.readInt(u32, p[4..8], .little) };
+                    try self.chunkNode(ds, nd, b, want, &next);
+                    if (b[5] != 0) {
+                        const kept = try gpa.dupe(u8, b);
+                        errdefer gpa.free(kept);
+                        try ds.inner.put(gpa, nd.addr, kept);
                     }
                 }
                 done += nb;
             }
-            std.mem.swap(std.ArrayList(u64), &level, &next);
+            std.mem.swap(std.ArrayList(Node), &level, &next);
         }
+    }
+
+    /// The bytes a tree node takes, from its own count of entries (it may be more than read).
+    fn nodeLen(self: *const Hdf5, ds: *const Dataset, b: []const u8) !usize {
+        if (b.len < treeHead(self) or !std.mem.eql(u8, b[0..4], "TREE") or b[4] != 1) return error.BadHdf5;
+        const used: usize = std.mem.readInt(u16, b[6..8], .little);
+        return treeHead(self) + used * treeEntry(self, ds) + treeKey(ds);
+    }
+
+    /// One node: a leaf's chunks into their slots, or the children of an inner node that hold
+    /// wanted slots onto `next`. Each level is one below its parent's, so a damaged tree cannot
+    /// loop.
+    fn chunkNode(self: *Hdf5, ds: *Dataset, nd: Node, b: []const u8, want: []const Span, next: *std.ArrayList(Node)) !void {
+        const depth = b[5];
+        if (nd.depth) |d| if (depth != d) return error.BadHdf5;
+        const used: usize = std.mem.readInt(u16, b[6..8], .little);
+        const head = treeHead(self);
+        const entry = treeEntry(self, ds);
+        const key = treeKey(ds);
+        for (0..used) |i| {
+            const p = b[head + i * entry ..];
+            var kid: u64 = if (self.so == 8) std.mem.readInt(u64, p[key..][0..8], .little) else std.mem.readInt(u32, p[key..][0..4], .little);
+            if (self.so == 4 and kid == 0xffffffff) kid = UNDEF;
+            if (depth > 0) {
+                const lo = @max(keySlot(ds, p), nd.lo);
+                const hi = @min(keySlot(ds, p[entry..]), nd.hi);
+                if (lo >= hi or !wanted(want, lo, hi)) continue;
+                if (kid == UNDEF) return error.BadHdf5;
+                try next.append(self.gpa, .{ .addr = kid, .lo = lo, .hi = hi, .depth = depth - 1 });
+                continue;
+            }
+            // the chunk's place in the grid from its origin, which its parent's keys bound
+            var slot: u64 = 0;
+            for (0..ds.rank) |d| {
+                const o = std.mem.readInt(u64, p[8 + 8 * d ..][0..8], .little);
+                if (o >= ds.dims[d] or o % ds.chunk[d] != 0) return error.BadHdf5;
+                slot = slot * ds.grid[d] + o / ds.chunk[d];
+            }
+            if (slot < nd.lo or slot >= nd.hi) return error.BadHdf5;
+            ds.index[@intCast(slot)] = .{ .addr = kid, .size = std.mem.readInt(u32, p[0..4], .little), .mask = std.mem.readInt(u32, p[4..8], .little) };
+        }
+        if (depth == 0) ds.known.setRangeValue(.{ .start = @intCast(nd.lo), .end = @intCast(nd.hi) }, true);
     }
 
     /// Undo a chunk's filters: `stored` as read from the file → the chunk's `out_len` bytes
@@ -755,7 +861,7 @@ pub const Hdf5 = struct {
 
     /// The given steps of the first axis (ascending) of a chunked dataset into `dst`.
     fn readChunked(self: *Hdf5, ds: *Dataset, rows: []const u64, dst: []u8) !void {
-        try self.buildIndex(ds);
+        try self.initIndex(ds);
         const gpa = self.gpa;
         const es: usize = ds.dtype.size;
         const rank: usize = ds.rank;
@@ -779,6 +885,26 @@ pub const Hdf5 = struct {
         const c0 = ds.chunk[0];
         // chunks in one slab of the grid's first axis
         const slab_len: usize = @intCast(ds.index.len / ds.grid[0]);
+        // the slots of the slabs the rows touch that the tree has not given yet, in one walk
+        {
+            var want: std.ArrayList(Span) = .empty;
+            defer want.deinit(gpa);
+            var last: u64 = UNDEF;
+            for (rows) |r| {
+                const slab = r / c0;
+                if (slab == last) continue;
+                last = slab;
+                var k: usize = @intCast(slab * slab_len);
+                const end = k + slab_len;
+                while (k < end) : (k += 1) {
+                    if (ds.known.isSet(k)) continue;
+                    if (want.items.len != 0 and want.items[want.items.len - 1].hi == k) {
+                        want.items[want.items.len - 1].hi += 1;
+                    } else try want.append(gpa, .{ .lo = k, .hi = k + 1 });
+                }
+            }
+            try self.resolve(ds, want.items);
+        }
 
         var want: std.ArrayList(Want) = .empty;
         defer want.deinit(gpa);

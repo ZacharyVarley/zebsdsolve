@@ -140,13 +140,14 @@ jobs:
       - name: App launcher
         run: cd "$RUNNER_TEMP" && "$RUNNER_TEMP/venv/bin/python" test_app.py
 
-      - name: Scan readers on generated files (EDAX UP headers; stored quality maps)
+      - name: Scan readers on generated files (EDAX UP headers; stored quality maps; HDF5 chunk trees)
         run: |
           "$RUNNER_TEMP/venv/bin/pip" install --quiet h5py
-          cp tests/test_up_header.py tests/test_stored_overview.py "$RUNNER_TEMP/"
+          cp tests/test_up_header.py tests/test_stored_overview.py tests/test_chunk_tree.py "$RUNNER_TEMP/"
           cd "$RUNNER_TEMP"
           "$RUNNER_TEMP/venv/bin/python" test_up_header.py
           "$RUNNER_TEMP/venv/bin/python" test_stored_overview.py
+          "$RUNNER_TEMP/venv/bin/python" test_chunk_tree.py
 
       - name: Tutorials (examples/ run as notebooks on the installed wheel)
         run: |
