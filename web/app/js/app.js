@@ -8,6 +8,7 @@ import { createPlaneView } from "./planeview.js";
 import { MasterView, PROJECTIONS } from "./masterview.js";
 import { CellView } from "./cellview.js";
 import { drawEnergy } from "./energy.js";
+import { createUpScanPrompt } from "./up-scan-files.js";
 
 const $ = (id) => document.getElementById(id);
 const app = $("app");
@@ -1909,7 +1910,23 @@ function isMaster(f) {
 /** Files picked or dropped: a project (.json, as the Index step saves one), a scan with its
  *  side files, master patterns. The project's settings go in before the scan opens (they may
  *  say how to read it) and its geometry after (over what the scan's file gives). */
+const upScanPrompt = createUpScanPrompt((file) => {
+  const message = `${file.name}: choose an ANG file`;
+  status(message, true);
+  log(message, true);
+  return message;
+});
+let fileRequest = 0;
 async function takeFiles(files) {
+  const request = ++fileRequest;
+  upScanPrompt.retire();
+  const up = files.find((f) => /\.up[12]$/i.test(f.name));
+  if (up && !files.some((f) => /\.ang$/i.test(f.name))) {
+    if (st.busy) return;
+    const companion = await upScanPrompt.choose(up);
+    if (request !== fileRequest || companion === null) return;
+    files = [up, ...files.filter((f) => f !== up), ...companion];
+  }
   const cifs = files.filter((f) => /\.cif$/i.test(f.name));
   if (cifs.length) {
     loadCif(await cifs[0].text(), cifs[0].name);
