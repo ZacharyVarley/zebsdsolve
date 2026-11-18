@@ -132,6 +132,7 @@ async function busy(label, fn) {
   try {
     await fn();
     status(`${label.replace(/…$/, "")}: done in ${((performance.now() - t0) / 1000).toFixed(2)} s`);
+    return true;
   } catch (e) {
     const msg = String(e.message || e);
     if (/Cancelled/.test(msg)) status("stopped"); else { status(msg, true); log(msg, true); console.error(e); }
@@ -357,24 +358,27 @@ function showStage() {
 
 // ── scan ──
 
+const FULL_ROI = { roi_x: 0, roi_y: 0, roi_w: 0, roi_h: 0 };
+
 function sortScanFiles(files) {
   // the pattern file first, side files after
   const rank = (f) => (/\.(h5|hdf5|h5ebsd|h5oina|up1|up2|ebsp|dat)$/i.test(f.name) ? 0 : 1);
   return [...files].sort((a, b) => rank(a) - rank(b));
 }
 
-async function openScan(files) {
+async function openScan(files, roi) {
   files = sortScanFiles(files);
   if (!files.length) return;
-  await busy(`opening ${files[0].name}…`, async () => {
+  return busy(`opening ${files[0].name}…`, async () => {
     invalidateOverview();
     await st.ze.openScan(files);
     st.scanName = files[0].name;
-    afterOpen();
+    afterOpen(roi);
   });
 }
 
-function afterOpen() {
+function afterOpen(roi = FULL_ROI) {
+  st.ze.configure(roi);
   invalidateOverview();
   ++st.showRun;
   const s = st.ze.scan;
@@ -1474,18 +1478,34 @@ async function fitGeometry() {
 
 // ── indexing ──
 
+function remainingTime(seconds) {
+  if (seconds < 60) return `${Math.max(1, Math.ceil(seconds))} s`;
+  const minutes = Math.ceil(seconds / 60);
+  if (minutes < 60) return `${minutes} min`;
+  const rest = minutes % 60;
+  return `${Math.floor(minutes / 60)} h${rest ? ` ${rest} min` : ""}`;
+}
+
 async function runIndex() {
   await busy("indexing…", async () => {
     await st.ze.indexBegin();
     st.resultsGeo = JSON.stringify(st.ze.geometry);
     if (st.mapKind === "overview") setMapKind("ipf_z");
     const t0 = performance.now();
-    let last = 0, visited = 0, s = null;
+    let last = 0, visited = 0, sweepStart = t0, s = null;
     for (;;) {
       const before = st.ze.indexStatus;
       s = await st.ze.indexStep();
       visited += Math.min(before.total - before.done, st.settings.batch);
-      const dt = (performance.now() - t0) / 1000;
+      const now = performance.now();
+      const dt = (now - t0) / 1000;
+      if (s.sweep !== before.sweep) sweepStart = now;
+      if (!st.stop) {
+        if (s.left > 0 && s.done > 0) {
+          const eta = remainingTime((now - sweepStart) / 1000 * s.left / s.done);
+          status(`indexing… · ~${eta} left${s.sweeps > 1 ? " this sweep" : ""}`);
+        } else status("indexing…");
+      }
       progress(s.done / Math.max(s.total, 1));
       const head = s.sweeps > 1 ? `sweep ${s.sweep + 1} of ${s.sweeps}, ${sweepLabel(s)}\n` : "";
       $("index-readout").textContent = `${head}${s.done.toLocaleString()} of ${s.total.toLocaleString()} patterns  ·  ${(visited / Math.max(dt, 1e-6)).toFixed(0)} patterns/s\n${s.accepted.toLocaleString()} of ${s.region.toLocaleString()} accepted (${acceptText()})`;
@@ -1692,6 +1712,7 @@ async function takeFiles(files) {
   const masters = files.filter((f) => !projects.includes(f) && isMaster(f));
   const scans = files.filter((f) => !projects.includes(f) && !masters.includes(f));
   let project = null;
+  const roi = { ...FULL_ROI };
   if (projects.length) {
     try {
       project = JSON.parse(await projects[0].text());
@@ -1706,11 +1727,20 @@ async function takeFiles(files) {
       const gone = Object.keys(project.settings).filter((k) => !(k in have));
       const take = Object.fromEntries(Object.entries(project.settings).filter(([k]) => k in have));
       if (gone.length) log(`project ${projects[0].name}: settings this version does not have, left out: ${gone.join(", ")}`);
-      try { st.ze.configure(take); } catch (e) { status(String(e.message || e), true); log(String(e.message || e), true); return; }
-      afterSettings(Object.keys(take));
+      const previousRoi = {};
+      if (scans.length) for (const key of Object.keys(roi)) if (Object.hasOwn(take, key)) {
+        previousRoi[key] = have[key];
+        roi[key] = take[key];
+      }
+      try {
+        st.ze.configure(take);
+        // Validate the project settings together, then keep the current scan's ROI until the new scan opens.
+        if (Object.keys(previousRoi).length) st.ze.configure(previousRoi);
+      } catch (e) { status(String(e.message || e), true); log(String(e.message || e), true); return; }
+      afterSettings(Object.keys(take).filter((key) => !Object.hasOwn(previousRoi, key)));
     }
   }
-  if (scans.length) await openScan(scans);
+  if (scans.length && !(await openScan(scans, roi))) return;
   if (masters.length) await addPhases(masters);
   if (project) {
     if (project.geometry) { beforeFit(); st.ze.setGeometry(project.geometry); geometryChanged(); }
@@ -1998,7 +2028,7 @@ function updateWiring() {
     if (b.dataset.look) st.cellView.lookAlong(+b.dataset.look); else st.cellView.reset();
   });
   $("btn-roi").addEventListener("click", () => { st.roiTool = !st.roiTool; showRoi(); if (st.roiTool) status("drag a box on the map for the region of interest (Escape: never mind)"); });
-  $("btn-roi-clear").addEventListener("click", () => setRoi({ roi_x: 0, roi_y: 0, roi_w: 0, roi_h: 0 }));
+  $("btn-roi-clear").addEventListener("click", () => setRoi(FULL_ROI));
   // the log: the banner opens it (and folds it again); Escape folds it
   $("console-bar").addEventListener("click", (e) => { if (!e.target.closest("#btn-stop")) openLog(); });
   $("console-bar").addEventListener("keydown", (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); openLog(); } });
@@ -2116,7 +2146,7 @@ function updateWiring() {
     const x = Math.min(roi.c0, roi.c1), y = Math.min(roi.r0, roi.r1), w = Math.abs(roi.c1 - roi.c0) + 1, h = Math.abs(roi.r1 - roi.r0) + 1;
     // a click without a drag clears the region
     const whole = w < 2 && h < 2;
-    setRoi(whole ? { roi_x: 0, roi_y: 0, roi_w: 0, roi_h: 0 } : { roi_x: x, roi_y: y, roi_w: w, roi_h: h });
+    setRoi(whole ? FULL_ROI : { roi_x: x, roi_y: y, roi_w: w, roi_h: h });
     status(whole ? "region of interest: the whole map" : `region of interest: ${w} × ${h} cells from column ${x}, row ${y}`);
   });
   map.addEventListener("mouseleave", () => { $("map-hover").textContent = ""; });

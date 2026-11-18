@@ -322,8 +322,13 @@ try {
 
   // index, against the orientations kikuchipy refined
   const idx = await evaluate(`
+    const banner = document.getElementById("status");
+    let eta = "";
+    const observer = new MutationObserver(() => { if (banner.textContent.includes(" left")) eta = banner.textContent; });
+    observer.observe(banner, { childList: true });
     const t0 = performance.now();
     ${job("btn-index")}
+    observer.disconnect();
     const secs = (performance.now() - t0) / 1000;
     const R = window.ze.results();
     const ref = new Float32Array(await (await fetch("./presets/nickel/reference_quaternions.f32")).arrayBuffer());
@@ -337,10 +342,11 @@ try {
     dis.sort((a, b) => a - b);
     const ang = new TextDecoder().decode(window.ze.exportText("ang")).split("\\n").filter((l) => l && !l.startsWith("#"));
     const map = window.ze.map("ipf_z");
-    return { n, ncc: ncc / n, median: dis[dis.length >> 1], within3: dis.filter((d) => d < 3).length / dis.length, secs, ang: ang.length, map: map.length,
+    return { n, ncc: ncc / n, median: dis[dis.length >> 1], within3: dis.filter((d) => d < 3).length / dis.length, secs, eta, finalStatus: banner.textContent, ang: ang.length, map: map.length,
       kind: document.querySelector("#map-kind [aria-pressed=true]").dataset.kind, stats: window.ze.stats(),
       key: { w: document.querySelector("#map-legend canvas")?.width || 0, names: [...document.querySelectorAll("#map-legend .key span")].map((e) => e.textContent).join(" ") } };`);
   check("Index covers the map", idx.n === 4125 && idx.kind === "ipf_z" && idx.map === 4125 * 4, `${idx.n} patterns in ${idx.secs.toFixed(2)} s (${(idx.n / idx.secs).toFixed(0)} patterns/s)`);
+  check("indexing shows an estimate until the job finishes", /~[0-9]+ (s|min|h).* left/.test(idx.eta) && !idx.finalStatus.includes(" left"), idx.eta);
   check("the orientations are the ones kikuchipy refined", idx.median < 0.6 && idx.within3 > 0.97 && idx.ncc > 0.45, `median ${idx.median.toFixed(3)}° apart, within 3°: ${(100 * idx.within3).toFixed(1)} %, mean NCC ${idx.ncc.toFixed(3)}`);
   check("the export has every cell", idx.ang === 4125, `${idx.ang} lines`);
   check("the map says what its colours mean", idx.key.w > 20 && idx.key.names === "001 101 111", `an inverse pole figure key ${idx.key.w} px wide, corners ${idx.key.names}`);
@@ -754,6 +760,35 @@ try {
 
   const errs = await evaluate(`return [...document.querySelectorAll("#log .err")].map((e) => e.textContent).slice(0, 5);`);
   check("no errors in the log", errs.length === 0, [...errs, ...(errs.length ? pageErrors.slice(0, 5).map((e) => `console: ${e}`) : [])].join(" | "));
+
+  const roi = await evaluate(`
+    const bytes = new Uint8Array(16 + 6 * 16 * 16);
+    const header = new DataView(bytes.buffer);
+    [1, 16, 16, 16].forEach((v, i) => header.setUint32(i * 4, v, true));
+    const saved = { roi_x: 1, roi_y: 0, roi_w: 3, roi_h: 1 };
+    const project = new File([JSON.stringify({ settings: saved })], "roi.json");
+    const banner = document.getElementById("status");
+    const open = async (name, data, ...companions) => {
+      const dt = new DataTransfer();
+      dt.items.add(new File([data], name));
+      for (const file of companions) dt.items.add(file);
+      window.dispatchEvent(new DragEvent("drop", { dataTransfer: dt, bubbles: true, cancelable: true }));
+      for (let i = 0; i < 100; i++) {
+        if ((banner.classList.contains("err") || document.getElementById("scan-meta").textContent.startsWith(name)) && document.getElementById("app").dataset.busy !== "1") break;
+        await new Promise((r) => setTimeout(r, 50));
+      }
+      const settings = window.ze.settings;
+      return Object.keys(saved).map((key) => settings[key]).join(",");
+    };
+    const withProject = await open("with-roi.up1", bytes, project);
+    const differentRoi = new File([JSON.stringify({ settings: { ...saved, roi_w: 2 } })], "different-roi.json");
+    const failed = await open("broken.up1", new Uint8Array(4), differentRoi);
+    const keptScan = document.getElementById("scan-meta").textContent.startsWith("with-roi.up1");
+    const errorShown = banner.classList.contains("err");
+    const plain = await open("new-scan.up1", bytes);
+    return { withProject, failed, keptScan, errorShown, plain };
+  `);
+  check("a new scan clears the ROI and a project restores it", roi.withProject === "1,0,3,1" && roi.failed === roi.withProject && roi.keptScan && roi.errorShown && roi.plain === "0,0,0,0", JSON.stringify(roi));
 
   // a CIF the reader cannot take: refused, with the reason (and an error in the log, rightly)
   const refused = await evaluate(`
