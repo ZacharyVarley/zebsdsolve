@@ -134,6 +134,14 @@ jobs:
         shell: bash
         run: cp tests/test_api.py "$RUNNER_TEMP/" && cd "$RUNNER_TEMP" && ZEBSDSOLVE_TESTDATA="$GITHUB_WORKSPACE/testdata" "$PY" test_api.py
 
+      - name: Scan readers on generated files
+        if: matrix.os == 'macos-15'
+        shell: bash
+        run: |
+          "$PY" -m pip install --quiet h5py
+          cp tests/test_up_header.py tests/test_stored_overview.py "$RUNNER_TEMP/" && cd "$RUNNER_TEMP"
+          "$PY" test_up_header.py && "$PY" test_stored_overview.py
+
       - name: Web app in headless Chrome (WebGPU), recording the pipelines it compiles
         if: matrix.os == 'macos-15'
         run: |

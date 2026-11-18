@@ -6,6 +6,21 @@ notes.
 
 ## Unreleased
 
+### Added
+
+- The map shows the quality the scan file stores for each pattern (Oxford's band contrast,
+  EDAX's image quality, Bruker's Radon quality) the moment the file opens, read without reading
+  a pattern; a file that stores none shows the patterns' contrast as before, and
+  **Calculate pattern contrast** gives it for any file. `Solver.stored_overview()` in Python
+  (#5, by [Tijmenvermeij](https://github.com/Tijmenvermeij)).
+
+### Fixed
+
+- EDAX `.up1` / `.up2` files of version 3 and later had their map size and steps read one byte
+  early, so a rectangular scan could open as one row with wrong steps; a file that ends partway
+  through a pattern, or whose header is cut short, is refused (#7, by
+  [Tijmenvermeij](https://github.com/Tijmenvermeij)).
+
 ## 0.2.1 — 2026-11-11
 
 ### Fixed

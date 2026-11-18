@@ -131,11 +131,6 @@ try {
   check("the app starts on WebGPU", /^ready/.test(ready.status), `${ready.status} on ${ready.adapter}`);
   if (!/^ready/.test(ready.status)) throw new Error("no WebGPU: " + ready.status);
 
-  await evaluate(`
-    window.overviewCalls = 0;
-    const stats = window.ze.patternStats.bind(window.ze);
-    window.ze.patternStats = (...args) => { window.overviewCalls++; return stats(...args); };
-  `);
   // the example: the module reads the HDF5 scan and the master pattern itself
   const opened = await evaluate(`${job("btn-example")}
     const s = window.ze.scan, g = window.ze.geometry;
@@ -144,21 +139,16 @@ try {
     `${opened.s.format}, ${opened.s.rows} × ${opened.s.cols}, phase ${opened.phases[0]?.name} (${opened.phases[0]?.pointGroupName})`);
   const pcFile = opened.pc;
 
-  // A scan without stored quality opens neutral; contrast is explicitly requested.
-  const idle = await evaluate(`
-    for (let i = 0; i < 300 && document.getElementById("btn-overview").disabled; i++) await new Promise(r => setTimeout(r, 100));
-    return {calls: window.overviewCalls, legend: document.getElementById("map-legend").hidden,
-      stage: document.getElementById("pat-stage").value, live: document.getElementById("pat-live").checked};
-  `);
-  check("opening leaves contrast optional and on-spot indexing enabled", idle.calls === 0 && idle.legend && idle.stage === "stored" && idle.live, JSON.stringify(idle));
+  // the example's file stores no quality map, so the overview is its patterns' contrast, by
+  // itself; the steps are tabs
   const seen = await evaluate(`
-    document.getElementById("btn-overview").click();
     for (let i = 0; i < 300 && !/overview:/.test(document.getElementById("log").textContent); i++) await new Promise((r) => setTimeout(r, 100));
     const shown = () => [...document.querySelectorAll("#panels .panel")].filter((p) => !p.hidden).map((p) => p.dataset.tab).join();
     const before = shown();
     document.getElementById("tab-index").click();
-    return { overview: (/overview: [^\\n]*/.exec(document.getElementById("log").textContent) || [""])[0], before, after: shown(), done: document.getElementById("tab-data").dataset.done };`);
-  check("explicit contrast calculation reads every pattern", /overview: 4,125 patterns/.test(seen.overview), seen.overview);
+    return { overview: (/overview: [^\\n]*/.exec(document.getElementById("log").textContent) || [""])[0], before, after: shown(), done: document.getElementById("tab-data").dataset.done,
+      source: document.getElementById("overview-source").value, stage: document.getElementById("pat-stage").value };`);
+  check("with no stored quality map, the overview reads every pattern", /overview: 4,125 patterns/.test(seen.overview) && seen.source === "calculated" && seen.stage === "filtered", `${seen.overview}; ${seen.source}, the pattern ${seen.stage}`);
   check("the steps are tabs, one panel at a time", seen.before === "data" && seen.after === "index" && seen.done === "1", `${seen.before} → ${seen.after}`);
 
   // before anything is fitted or indexed, the selected pattern is indexed on the spot
@@ -434,11 +424,6 @@ try {
         said: document.getElementById("nlpar-readout").textContent, shares: document.getElementById("pat-shares").hidden ? 0 : document.getElementById("pat-shares").width };
     };`;
   const pre = await evaluate(`${setField("sweeps", 1)} ${look}
-    // Opening now previews stored pixels. This check measures the filtered stage.
-    const stage = document.getElementById("pat-stage");
-    stage.value = "filtered";
-    stage.dispatchEvent(new Event("change"));
-    await new Promise(r => setTimeout(r, 400));
     const c = document.getElementById("pat-exp");
     const plain = Array.from(c.getContext("2d").getImageData(0, 0, c.width, c.height).data.filter((_, i) => i % 4 === 0));
     ${setField("average with neighbours (NLPAR)", true)}

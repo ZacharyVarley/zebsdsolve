@@ -396,7 +396,6 @@ function afterOpen() {
   st.storedOverview = st.calculatedOverview = null;
   st.overviewSource = null;
   st.overviewLoading = true;
-  st.stage = "stored";
   updateOverviewControls();
   st.view = { k: 1, cx: s.cols / 2, cy: s.rows / 2, s: 1 };
   app.dataset.scan = "1";
@@ -475,12 +474,18 @@ async function loadStoredOverview() {
         st.overviewLoading = false;
         updateOverviewControls();
         if (!st.busy) showCell();
+        // a scan that stores no quality map shows its patterns' contrast instead
+        if (!st.storedOverview) runOverview();
       }
     }
   }
 }
 
-/** Explicit progressive contrast calculation. Each batch yields to other engine jobs. */
+/** The overview: every pattern's contrast, on a lattice of patterns when the map is large (at
+ *  most about 40 000 patterns or 1.5 GiB of them). Whole lattice rows are read, each once (a
+ *  file reads neighbours fastest), every fourth first and then the rows between: the whole map
+ *  shows at once and sharpens. It yields to the engine's jobs between pieces. It runs by itself
+ *  when the file stores no quality map, and on request when it does. */
 async function runOverview() {
   const run = ++st.overviewRun, ze = st.ze;
   const { rows, cols, patH, patW, pixel } = st.scan;
@@ -496,6 +501,7 @@ async function runOverview() {
   const budget = Math.max(1000, Math.min(40000, Math.floor((1.5 * 2 ** 30) / (patH * patW * [1, 2, 4][pixel]))));
   const stride = Math.max(1, Math.ceil(Math.sqrt((rows * cols) / budget)));
   const nr = Math.ceil(rows / stride);
+  // passes over the lattice rows at steps 2^top … 1, the first of about a dozen rows
   let top = 0;
   while (nr >> (top + 1) >= 12) top++;
   const t0 = performance.now();
@@ -505,6 +511,7 @@ async function runOverview() {
       const step = 1 << p, todo = [];
       for (let j = 0; j < nr; j += step) if (p === top || j % (2 * step) !== 0) todo.push(j);
       for (let i = 0; i < todo.length;) {
+        // as many lattice rows as make a batch of about 256 patterns
         const part = [];
         do {
           const r = todo[i++] * stride;
@@ -515,6 +522,7 @@ async function runOverview() {
         const res = await ze.patternStats(part);
         if (!current()) return;
         read += part.length;
+        // each value fills its lattice cell, and the rows below it no finer pass has read yet
         for (let k = 0; k < part.length; k++) {
           const r0 = Math.floor(part[k] / cols), c0 = part[k] % cols;
           const r1 = Math.min(rows, r0 + stride * step), c1 = Math.min(cols, c0 + stride);
@@ -525,7 +533,8 @@ async function runOverview() {
     }
     if (!current()) return;
     redraw();
-    log(`overview: ${read.toLocaleString()} patterns${stride > 1 ? ` (every ${stride}${stride === 2 ? "nd" : stride === 3 ? "rd" : "th"} each way)` : ""} in ${((performance.now() - t0) / 1000).toFixed(2)} s`);
+    const io = ze.stats();
+    log(`overview: ${read.toLocaleString()} patterns${stride > 1 ? ` (every ${stride}${stride === 2 ? "nd" : stride === 3 ? "rd" : "th"} each way)` : ""} in ${((performance.now() - t0) / 1000).toFixed(2)} s, ${(io.fileBytes / 2 ** 20).toFixed(0)} MiB in ${io.fileReads.toLocaleString()} reads`);
   } catch (e) {
     if (current()) log(String(e.message || e), true);
   } finally {
