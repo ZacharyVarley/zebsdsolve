@@ -30,7 +30,7 @@ class UpAng(unittest.TestCase):
         path.write_bytes(header + patterns.tobytes())
         return path, patterns
 
-    def ang(self, records=None):
+    def ang(self, records=None, pc_header=()):
         if records is None:
             records = [[.1, .2, .3, 10 + col * .025, 20 + row * .05,
                         100 * row + col, .9, 1, 123, 0]
@@ -38,15 +38,22 @@ class UpAng(unittest.TestCase):
         path = self.root / "scan.ang"
         header = ["# GRID: SqrGrid", "# XSTEP: .025", "# YSTEP: .05",
                   "# NCOLS_ODD: 3", "# NCOLS_EVEN: 3", "# NROWS: 2"]
-        path.write_text("\r\n".join(header + [" ".join(map(str, r)) for r in records]))
+        path.write_text("\r\n".join([*pc_header, *header] + [" ".join(map(str, r)) for r in records]))
         return path, np.asarray(records)
 
     def test_pair_preserves_geometry_iq_and_pattern_order(self):
-        ang, records = self.ang()
-        for version, bits in ((1, 8), (3, 16)):
+        for version, bits, producer_header, expected_pc in (
+            (1, 8, ["# HEADER: Start", "# VERSION 7"], [.43, .73, .61]),
+            (3, 16, ["# SOFTWARE: zebsdsolve 0.2.1"], [.43, .6625, .7625]),
+        ):
             with self.subTest(version=version, bits=bits):
                 up, patterns = self.up(version, bits)
+                ang, records = self.ang(pc_header=[
+                    *producer_header, "# x-star .43", "# y-star .27", "# z-star .61",
+                ])
                 self.s.open(up, ang)
+                self.assertTrue(self.s.scan["has_pc"])
+                np.testing.assert_allclose(self.s.geometry["pc"], expected_pc, atol=1e-14, rtol=0)
                 self.assertEqual((self.s.scan["rows"], self.s.scan["cols"]), (2, 3))
                 self.assertAlmostEqual(self.s.geometry["step_x_um"], .025)
                 self.assertAlmostEqual(self.s.geometry["step_y_um"], .05)
@@ -58,6 +65,7 @@ class UpAng(unittest.TestCase):
                 self.s.open(up)
                 self.assertEqual((self.s.scan["rows"], self.s.scan["cols"]), (1, 6) if version == 1 else (2, 3))
                 self.assertIsNone(self.s.stored_overview())
+                self.assertFalse(self.s.scan["has_pc"])
 
     def test_invalid_pair_preserves_current_scan(self):
         up, patterns = self.up()

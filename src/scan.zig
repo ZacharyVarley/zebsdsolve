@@ -56,6 +56,7 @@ pub const Info = struct {
     /// fractions of the pattern's width and height; z in fractions of its height): the mean of
     /// its values where it stores one per map cell
     pc: [3]f64 = @splat(std.math.nan(f64)),
+    pc_note: []const u8 = "",
 };
 
 pub const Scan = struct {
@@ -606,7 +607,7 @@ pub const Scan = struct {
                 if (nx == 0 or ny == 0 or @as(u64, nx) * ny != n) return if (extra != 0) error.AmbiguousUPExtraPatterns else error.UPPatternCountMismatch;
                 if (!validStep(dx) or !validStep(dy)) return error.InvalidUPStep;
             }
-            const ang = try @import("ang.zig").load(self.gpa, &self.files[k], n, if (version >= 3) .{ dx, dy } else null);
+            const ang = try @import("ang.zig").load(self.gpa, &self.files[k], n, if (version >= 3) .{ dx, dy } else null, w, hgt);
             errdefer self.gpa.free(ang.iq);
             if (version >= 3 and (nx != ang.cols or ny != ang.rows)) return error.ScanShapeMismatch;
             if (version >= 3 and (!sameStep(dx, ang.step_x_um) or !sameStep(dy, ang.step_y_um))) return error.UPANGStepMismatch;
@@ -615,6 +616,8 @@ pub const Scan = struct {
             info.cols = ang.cols;
             info.step_x_um = ang.step_x_um;
             info.step_y_um = ang.step_y_um;
+            if (ang.pc) |pc| info.pc = pc;
+            info.pc_note = ang.pc_note;
             self.overview_values = ang.iq;
             self.overview_kind = .image_quality;
             return;

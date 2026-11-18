@@ -409,7 +409,7 @@ function afterOpen() {
   const facts = [
     ["format", s.format], ["map", `${s.rows} × ${s.cols} (${(s.rows * s.cols).toLocaleString()} patterns)`],
     ["pattern", `${s.patH} × ${s.patW} ${s.dtype}`], ["size", gb >= 1 ? `${gb.toFixed(2)} GiB` : `${(s.bytes / 2 ** 20).toFixed(1)} MiB`],
-    ["static background", s.hasBackground ? "one in the file" : "none in the file"], ["pattern centre", s.hasPc ? "from the file" : "not in the file"],
+    ["static background", s.hasBackground ? "one in the file" : "none in the file"], ["pattern centre", s.hasPc ? "from the file" : "unavailable"],
     ["detector pixel", s.hasPx ? `${st.ze.geometry.pxUm.toFixed(1)} µm, from the file` : "not in the file"],
   ];
   if (s.voltageKv) facts.push(["voltage", `${s.voltageKv} kV`]);

@@ -13,7 +13,7 @@ EBSD pattern-centre fitting and indexing on the GPU, in the browser or from Pyth
 - **Handles several phases**, and writes `.ang` and `.ctf`.
 - **Reads** h5ebsd (kikuchipy, Bruker, EDAX, Oxford `.h5oina`), EDAX `.up1` / `.up2`, Oxford `.ebsp`, NORDIF `Pattern.dat`. Master patterns: [ebsdsim](https://github.com/ZacharyVarley/ebsdsim) `.npz` and EMsoft `.h5`.
 
-UP1/UP2 files can use a matching standard square-grid ANG file for scan dimensions, micrometre spacing and IQ. Choose an ANG file when prompted after selecting a UP file, select or drop both files together, or call `solver.open("scan.up1", "scan.ang")`. Raster registration is checked relative to the first ANG position; engine geometry remains scan-local. ANG headers can also carry pattern-centre calibration. Set the pattern centre under Geometry when needed.
+UP1/UP2 files can use a matching standard square-grid ANG file for scan dimensions, micrometre spacing and IQ. Choose an ANG file when prompted after selecting a UP file, select or drop both files together, or call `solver.open("scan.up1", "scan.ang")`. Raster registration is checked relative to the first ANG position; engine geometry remains scan-local. Pattern-centre calibration is imported when the ANG convention can be identified, or when the detector is square and the normalizations coincide.
 
 One engine (Zig and WGSL) runs natively through wgpu-native and as WebAssembly on WebGPU, so the app and the Python package do the same thing.
 

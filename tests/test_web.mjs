@@ -762,7 +762,8 @@ try {
     [1, 128, 156, 16].forEach((v, i) => header.setUint32(i * 4, v, true));
     for (let i = 16; i < bytes.length; i++) bytes[i] = (i * 17 + (i >> 8)) % 256;
     const up = new File([bytes], "guided.up1");
-    const lines = ["# GRID: SqrGrid", "# XSTEP: .025", "# YSTEP: .05", "# NCOLS_ODD: 3", "# NCOLS_EVEN: 3", "# NROWS: 2"];
+    const lines = ["# HEADER: Start", "# VERSION 7", "# x-star .43", "# y-star .27", "# z-star .61",
+      "# GRID: SqrGrid", "# XSTEP: .025", "# YSTEP: .05", "# NCOLS_ODD: 3", "# NCOLS_EVEN: 3", "# NROWS: 2"];
     for (let i = 0; i < 6; i++) lines.push([0, 0, 0, (i % 3) * .025, Math.floor(i / 3) * .05, i, .9, 1, 0, 0].join(" "));
     const ang = new File([lines.join("\\n")], "guided.ang");
     const select = (input, ...files) => {
@@ -784,6 +785,7 @@ try {
     select(dialog.querySelector('input[accept=".ang"]'), ang);
     for (let i = 0; i < 300 && window.ze.scan?.rows !== 2; i++) await wait(100);
     const paired = { scan: window.ze.scan, overview: await window.ze.storedOverview() };
+    const filePc = paired.scan.hasPc && window.ze.geometry.pc.every((v, i) => Math.abs(v - [.43, .73, .61 * 128 / 156][i]) < 1e-12);
     select(scanInput, up);
     dialog = document.querySelector(".up-scan-dialog");
     [...dialog.querySelectorAll("button")].find((b) => b.textContent === "Open without ANG").click();
@@ -800,9 +802,9 @@ try {
     const summary = ({ scan, overview }) => ({
       rows: scan.rows, cols: scan.cols, dtype: scan.dtype, values: Array.from(overview?.values || []),
     });
-    return { prompted, canceled, paired: summary(paired), raw, directPrompt, direct: summary(direct) };
+    return { prompted, canceled, filePc, paired: summary(paired), raw, directPrompt, direct: summary(direct) };
   `);
-  check("UP selection offers ANG, cancellation and opening without it", upGuide.prompted && upGuide.canceled && upGuide.paired.rows === 2 && upGuide.paired.cols === 3 && upGuide.paired.values.join() === "0,1,2,3,4,5" && upGuide.raw.rows === 1 && upGuide.raw.cols === 6, JSON.stringify(upGuide));
+  check("UP selection offers ANG, cancellation and opening without it", upGuide.prompted && upGuide.canceled && upGuide.filePc && upGuide.paired.rows === 2 && upGuide.paired.cols === 3 && upGuide.paired.values.join() === "0,1,2,3,4,5" && upGuide.raw.rows === 1 && upGuide.raw.cols === 6, JSON.stringify(upGuide));
 
   check("selecting UP2 and ANG together opens the pair without a prompt", !upGuide.directPrompt && upGuide.direct.rows === 2
     && upGuide.direct.cols === 3 && upGuide.direct.dtype === "uint16" && upGuide.direct.values.join() === "0,1,2,3,4,5", JSON.stringify(upGuide.direct));

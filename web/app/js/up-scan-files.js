@@ -13,7 +13,7 @@ export function createUpScanPrompt(onInvalid) {
       title.textContent = `Add an ANG file for ${file.name}?`;
       const detail = document.createElement("p");
       detail.id = "up-scan-detail";
-      detail.textContent = "Optional. If available, add the matching ANG file for the scan layout and image quality map.";
+      detail.textContent = "Optional. If available, add the matching ANG file for the scan layout, image quality map and any supported pattern-centre calibration.";
       dialog.setAttribute("aria-describedby", detail.id);
       const input = document.createElement("input");
       input.type = "file";

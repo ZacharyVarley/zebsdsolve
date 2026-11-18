@@ -772,6 +772,7 @@ pub const Engine = struct {
         self.source = .{ .file = s };
         try self.adoptInfo(s.info);
         self.events.log("opened {s}: {d} × {d} patterns of {d} × {d}", .{ s.formatName(), s.info.rows, s.info.cols, s.info.pat_h, s.info.pat_w });
+        if (s.info.pc_note.len != 0) self.events.log("{s}", .{s.info.pc_note});
     }
 
     /// Take patterns from memory: rows · cols patterns of h × w pixels, row-major, copied.
