@@ -695,17 +695,23 @@ try {
     on.raced = { errors: document.querySelectorAll("#log .err").length - errsBefore, engine: window.ze.phases.length, said: [...document.querySelectorAll("#log .err")].slice(errsBefore).map((e) => e.textContent).join(" | ") };
     document.querySelector("#tab-simulate").click();
     document.querySelector('#view-mode [data-view="globe"]').click();
-    await wait(500);
     const gc = document.querySelector("#master-well canvas");
     const inkOf = (c) => { const d = c.getContext("2d").getImageData(0, 0, c.width, c.height).data; let h = 0; for (let i = 0; i < d.length; i += 4) h = (h * 31 + d[i]) | 0; return h; };
+    // (the picture once it stops changing: on a slow GPU the step's switch and the phases put back
+    // above are still being drawn well after a fixed wait)
+    const settled = async () => { let a = inkOf(gc); for (let i = 0; i < 60; i++) { await wait(150); const b = inkOf(gc); if (b === a) return b; a = b; } return a; };
+    await wait(300);
+    await settled();
     const r = gc.getBoundingClientRect();
-    const zoomAt = async (fx) => { gc.dispatchEvent(new WheelEvent("wheel", { deltaY: -300, clientX: r.left + r.width * fx, clientY: r.top + r.height * 0.5, bubbles: true, cancelable: true })); await wait(500); return inkOf(gc); };
+    const zoomAt = async (fx) => { gc.dispatchEvent(new WheelEvent("wheel", { deltaY: -300, clientX: r.left + r.width * fx, clientY: r.top + r.height * 0.5, bubbles: true, cancelable: true })); await wait(300); return settled(); };
     const left = await zoomAt(0.1);
     gc.dispatchEvent(new WheelEvent("wheel", { deltaY: 300, bubbles: true, cancelable: true }));
-    await wait(500);
+    await wait(300);
+    await settled();
     const right = await zoomAt(0.9);
     gc.dispatchEvent(new WheelEvent("wheel", { deltaY: 300, bubbles: true, cancelable: true }));
     await wait(300);
+    await settled();
     const cell = document.querySelector("#cell-well canvas");
     const c1 = inkOf(cell);
     const sup = document.getElementById("cell-super");
