@@ -132,10 +132,22 @@ fn model(theta: [N]f64, c: f64, r: f64) struct { y: [3]f64, w: f64 } {
     return .{ .y = y, .w = w };
 }
 
+/// How far the projective row moves the plane's denominator, from the map's middle to its edge,
+/// before the points have to say so: the prior on its two slopes (θ's last two, in the frame's
+/// units). A beam swung from a pivot a working distance above a tilted sample lands where the
+/// denominator 1 + y tan(tilt) / (working distance) puts it: from the middle to the edge of a
+/// field 100 µm high at 15 mm, under a percent; of a millimetre, about nine.
+pub const slope_prior = 0.1;
+
 /// The plane through the points that are `used`, by weighted least squares: Σ rᵀ W r least,
 /// r a point's measured place less the plane's. Affine is one linear solve; projective starts
 /// there and takes Gauss–Newton steps (as Winkelmann: "starting from an affine transformation
-/// and minimizing the root mean square deviation"). Null with too few points, or none apart.
+/// and minimizing the root mean square deviation"), its two slopes held to `slope_prior` against
+/// the points' scatter: points that hardly move do not tell them (any slopes fit, the plane's
+/// other numbers making up for them), and would otherwise take whatever their noise says. Null
+/// with too few points, or none apart, or for a projective plane whose denominator falls below a
+/// tenth of its value at the map's middle somewhere on the map (where it reaches zero the
+/// source is at infinity).
 pub fn fit(kind: Kind, pts: []const Point, fr: Frame) ?[12]f64 {
     return fitModel(Model.of(kind), pts, fr);
 }
@@ -161,6 +173,9 @@ pub fn fitTheta(which: Model, pts: []const Point, fr: Frame) ?[N]f64 {
         const m = F.len;
         var A: [N * N]f64 = @splat(0);
         var g: [N]f64 = @splat(0);
+        // (Σ rᵀ W r where the plane stands, and Σ yᵀ W y to weigh it against)
+        var chi2: f64 = 0;
+        var yy: f64 = 0;
         for (pts) |p| {
             if (!p.used) continue;
             const c = (p.col - fr.c0) / fr.sc;
@@ -176,6 +191,10 @@ pub fn fitTheta(which: Model, pts: []const Point, fr: Frame) ?[N]f64 {
             }
             var res: [3]f64 = undefined;
             for (0..3) |k| res[k] = p.y[k] - f.y[k];
+            for (0..3) |k| for (0..3) |l| {
+                chi2 += res[k] * p.w[k * 3 + l] * res[l];
+                yy += p.y[k] * p.w[k * 3 + l] * p.y[l];
+            };
             for (F, 0..) |fi, i| {
                 var wj: [3]f64 = .{ 0, 0, 0 };
                 for (0..3) |k| for (0..3) |l| {
@@ -187,6 +206,20 @@ pub fn fitTheta(which: Model, pts: []const Point, fr: Frame) ?[N]f64 {
                 }
             }
         }
+        if (which == .projective and it > 0) {
+            // (points on a plane: the projective row they tell is zero, or, when they do not move,
+            // none; either way the affine plane is the fit)
+            if (chi2 <= 1e-20 * yy) break;
+            // the slopes' prior, against the points' scatter about the plane (W is their inverse
+            // covariance up to a factor, which Σ rᵀ W r over the degrees of freedom says)
+            const scatter = chi2 / @as(f64, @floatFromInt(count * 3 - all.len));
+            const lam = scatter / (slope_prior * slope_prior);
+            for (F, 0..) |fi, i| {
+                if (fi < 9) continue;
+                A[i * N + i] += lam;
+                g[i] -= lam * theta[fi];
+            }
+        }
         const d = solve(m, A, g) orelse return null;
         var moved: f64 = 0;
         for (F, 0..) |fi, i| {
@@ -195,6 +228,9 @@ pub fn fitTheta(which: Model, pts: []const Point, fr: Frame) ?[N]f64 {
         }
         if (it > 0 and moved < 1e-13) break;
     }
+    // (the denominator over the map, the frame's c and r running from −1 to 1, is at least
+    // 1 − |θ₉| − |θ₁₀|)
+    if (which == .projective and !(@abs(theta[9]) + @abs(theta[10]) <= 0.9)) return null;
     return theta;
 }
 
@@ -349,6 +385,33 @@ test "a plane is found again from its own points, affine and projective" {
         };
         const P = fit(kind, &pts, fr).?;
         for (P, truth) |got, want| try std.testing.expectApproxEqAbs(want, got, 1e-11);
+    }
+}
+
+test "a projective plane through points that hardly move keeps its slopes near zero" {
+    // nine points of a 55 × 75 map, all at one source, then with a little noise: the slopes are
+    // not told, and the plane at the map's middle (θ's constants, the denominator 1 there) stays
+    // near the points
+    const fr = Frame.of(55, 75, 1);
+    const y: [3]f64 = .{ 0.4233, 0.2136, 0.5021 };
+    var pts: [9]Point = undefined;
+    var seed: u64 = 7;
+    for ([_]f64{ 0, 1e-4 }) |noise| {
+        for (0..3) |i| for (0..3) |j| {
+            var p: Point = .{ .row = @floatFromInt(20 + i), .col = @floatFromInt(32 + j), .y = y };
+            for (&p.y) |*v| {
+                seed = seed *% 6364136223846793005 +% 1442695040888963407;
+                v.* += noise * (@as(f64, @floatFromInt(seed >> 11)) / 9007199254740992.0 - 0.5);
+            }
+            pts[i * 3 + j] = p;
+        };
+        const theta = fitTheta(.projective, &pts, fr).?;
+        if (noise == 0) {
+            try std.testing.expectEqual(@as(f64, 0), theta[9]);
+            try std.testing.expectEqual(@as(f64, 0), theta[10]);
+        }
+        try std.testing.expect(@abs(theta[9]) + @abs(theta[10]) < 0.01);
+        for (0..3) |k| try std.testing.expectApproxEqAbs(y[k], theta[3 * k + 2], 0.003);
     }
 }
 

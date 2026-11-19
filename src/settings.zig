@@ -221,8 +221,8 @@ pub const Settings = struct {
     /// The transformation of the scan's indices that the fit patterns' source points are
     /// fitted as: `affine` (nine numbers: the scan a parallelogram on a plane) or
     /// `projective` (eleven: the beam deflected from a pivot onto the tilted sample, so that
-    /// the scan's parallels need not stay parallel). Winkelmann et al. 2020; kikuchipy's
-    /// fit_pc.
+    /// the scan's parallels need not stay parallel; its two slopes held near zero unless the
+    /// points tell them, plane.slope_prior). Winkelmann et al. 2020; kikuchipy's fit_pc.
     plane_kind: PlaneKind = .affine,
     /// The sample frame orientations are in once a plane is fitted: `nominal` leaves it
     /// where the tilts and the detector's turn have it; `follow` takes it from the plane

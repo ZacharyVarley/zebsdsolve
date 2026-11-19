@@ -14,6 +14,15 @@ notes.
   pattern centre for every cell (no steps, no plane) (#11, by [Tijmenvermeij](https://github.com/Tijmenvermeij)).
 - `cell_under(c, pc=…)` after a plane fit kept the plane and so ignored the centre given; it now
   takes the centre as `set_geometry` would (#12, by [Tijmenvermeij](https://github.com/Tijmenvermeij)).
+- A projective plane through source points that hardly move (a small region of interest) took
+  its two slopes from their noise, the plane's other numbers making up for them where the points
+  were and nowhere else: on a 3 × 3 region of the nickel example the source at the map's middle
+  came out at (130857, −40056, 83901). The slopes are now held near zero unless the points tell
+  them (a prior of a tenth on how far they move the denominator from the map's middle to its
+  edge, against the points' own scatter), and a plane whose denominator falls below a tenth of
+  its middle's anywhere on the map is refused. Small regions now give the affine plane; the
+  nickel example's whole map barely moves, and what its plane says of the detector's turn
+  varies across blocks of the map by 15° at most instead of 199°.
 
 ## 0.2.2 — 2026-11-18
 

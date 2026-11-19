@@ -811,14 +811,9 @@ fn jointPlane(j: *const Joint, which: plane_mod.Model, theta: *[plane_mod.N]f64,
         const pc = Geometry.pcOf(j.R, fit.base[b], j.h, j.h * j.fr.aspect);
         pts[b] = .{ .row = rc[0], .col = rc[1], .y = .{ pc[0] * j.fr.aspect, pc[1], pc[2] } };
     }
-    // Reuse an existing projective geometry if its slopes can be determined.
-    // Otherwise start with a constant denominator and let the patterns constrain it.
-    const initial = if (which == .projective and fit.geo0.plane_kind == @intFromEnum(plane_mod.Kind.projective))
-        plane_mod.fitTheta(.projective, pts, j.fr)
-    else
-        null;
-    const seed: plane_mod.Model = if (which == .projective) .affine else which;
-    theta.* = initial orelse plane_mod.fitTheta(seed, pts, j.fr) orelse return error.TooFewFitPatterns;
+    // (from one centre for every cell the projective row is not told: the fit through the
+    // points keeps it at zero, and the patterns say it)
+    theta.* = plane_mod.fitTheta(which, pts, j.fr) orelse return error.TooFewFitPatterns;
     var rounds = try jointFit(j, which, theta, most);
     pseudoPoints(j, theta.*, pts);
     if (!(outlier > 0)) return rounds;
