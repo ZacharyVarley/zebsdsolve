@@ -805,7 +805,7 @@ def main():
     s.set_geometry(pc=pc_file)
     t = s.fit_geometry()
     P = np.array(s.geometry["plane"], dtype=np.float64).reshape(-1)
-    s.configure(roi_x=0, roi_y=0, roi_w=0, roi_h=0)
+    s.configure(roi_x=0, roi_y=0, roi_w=0, roi_h=0, plane_kind="affine")
     e_line = np.abs(np.array(t["pc"]) - pc_file).max()
     check("the automatic fit takes the simplest model the map supports: the plane, or on a narrow strip a tilt line",
           p["model"] == "affine" and set(p["models"]) == {"centre", "line", "affine"} and t["model"] == "line" and t["kind"] == s.geometry["plane_kind"] == "affine"
@@ -815,9 +815,10 @@ def main():
     ev = s.events()
     check("events are queued for the caller", any(x["kind"] == "pc" for x in ev) and any(x["kind"] == "progress" and x["stage"] == "plane" for x in ev))
 
-    # A square patch with no initial beam travel gives a constant starting centre.
+    # the joint projective fit from one pattern centre for every cell (no steps, no plane): the
+    # starting sources do not tell the projective row
     s.configure(roi_x=32, roi_y=20, roi_w=3, roi_h=3, plane_method="joint", plane_kind="projective", plane_stride=1, plane_iters=15)
-    s.set_geometry(pc=(0.5, 0.25, 0.5), plane_kind="none", sample_tilt_deg=0, detector_tilt_deg=0, step_x_um=0, step_y_um=0)
+    s.set_geometry(pc=(0.5, 0.25, 0.5), plane_kind="none", step_x_um=0, step_y_um=0)
     joint = s.fit_plane()
     check("the joint projective fit can start at a constant pattern centre",
           joint["kind"] == "projective" and np.isfinite(joint["plane"]).all() and joint["ncc"] > joint["start_ncc"])

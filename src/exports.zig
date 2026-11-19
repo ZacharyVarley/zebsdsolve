@@ -125,7 +125,9 @@ export fn ze_get_geometry(e: *Engine, out: *engine.Geometry) void {
     out.* = e.geo_home orelse e.geo;
 }
 
-fn geometryFor(e: *Engine, in: *const engine.Geometry, was: *const engine.Geometry) engine.Geometry {
+/// A geometry a caller gives (to set, or to index a cell under) as the engine takes it, against
+/// `was`, the one in use.
+fn asGiven(e: *Engine, in: *const engine.Geometry, was: *const engine.Geometry) engine.Geometry {
     var g = in.*;
     // (no pixel size: the scan's own, or the one its detector's width gives)
     if (!(g.px_um > 0)) g.px_um = e.defaultPx();
@@ -140,7 +142,7 @@ export fn ze_set_geometry(e: *Engine, in: *const engine.Geometry) void {
     // among it) is not
     const home = if (e.geo_home) |*h| h else &e.geo;
     const was = home.*;
-    const g = geometryFor(e, in, &was);
+    const g = asGiven(e, in, &was);
     if (!std.meta.eql(in.pc, was.pc)) e.geo_given.pc = in.pc;
     if (!std.meta.eql(in.rot, was.rot)) e.geo_given.rot = in.rot;
     if (in.sample_tilt_deg != was.sample_tilt_deg) e.geo_given.sample_tilt_deg = in.sample_tilt_deg;
@@ -664,7 +666,7 @@ export fn ze_cell_under(e: *Engine, cell: u64, geo: *const engine.Geometry, band
     if (n_ph == 0 or n_recs != n_ph * 8) return failed(e, "cell_under", error.BadLength);
     if (bandwidth < 8 or bandwidth > 256) return failed(e, "cell_under", error.BadSetting);
     const was = e.geo_home orelse e.geo;
-    const g = geometryFor(e, geo, &was);
+    const g = asGiven(e, geo, &was);
     const rs = @as([*]engine.Record, @ptrCast(@alignCast(recs)))[0..n_ph];
     const p = e.cellUnder(cell, g, bandwidth, e.viewLevel(full != 0), rs, sim[0..len]) catch |err| return failed(e, "cell_under", err);
     return @intCast(p);

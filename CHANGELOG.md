@@ -6,6 +6,15 @@ notes.
 
 ## Unreleased
 
+### Fixed
+
+- **Auto fit geometry**, asked for a projective plane, said projective when it took a tilt line
+  and installed it as the affine plane it is (#10, by [Tijmenvermeij](https://github.com/Tijmenvermeij)).
+- The joint fit of a projective plane stopped with `TooFewFitPatterns` when it started from one
+  pattern centre for every cell (no steps, no plane) (#11, by [Tijmenvermeij](https://github.com/Tijmenvermeij)).
+- `cell_under(c, pc=…)` after a plane fit kept the plane and so ignored the centre given; it now
+  takes the centre as `set_geometry` would (#12, by [Tijmenvermeij](https://github.com/Tijmenvermeij)).
+
 ## 0.2.2 — 2026-11-18
 
 ### Added
