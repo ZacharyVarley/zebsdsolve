@@ -811,6 +811,13 @@ def main():
           + "; strip: " + ", ".join(f"{m} ×{v['cv'] / min(x['cv'] for x in t['models'].values()):.2f}" for m, v in t["models"].items()) + f"; its centre {e_line:.4f} from kikuchipy's")
     ev = s.events()
     check("events are queued for the caller", any(x["kind"] == "pc" for x in ev) and any(x["kind"] == "progress" and x["stage"] == "plane" for x in ev))
+
+    # A square patch with no initial beam travel gives a constant starting centre.
+    s.configure(roi_x=32, roi_y=20, roi_w=3, roi_h=3, plane_method="joint", plane_kind="projective", plane_stride=1, plane_iters=15)
+    s.set_geometry(pc=(0.5, 0.25, 0.5), plane_kind="none", sample_tilt_deg=0, detector_tilt_deg=0, step_x_um=0, step_y_um=0)
+    joint = s.fit_plane()
+    check("the joint projective fit can start at a constant pattern centre",
+          joint["kind"] == "projective" and np.isfinite(joint["plane"]).all() and joint["ncc"] > joint["start_ncc"])
     s.close()
 
     # ── a master pattern simulated from a crystal ──
