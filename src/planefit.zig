@@ -1067,7 +1067,11 @@ fn finishPlane(e: *Engine, fit: *Fit, res_out: *PlaneResult, before_in: *const G
 
     // the geometry takes the plane (a tilt line is an affine plane; one centre leaves the
     // vote's geometry, its pattern centre and the scan's steps, as it is)
-    res.kind = if (model == .centre) 0 else @intFromEnum(kind);
+    res.kind = switch (model) {
+        .centre => 0,
+        .line, .affine => @intFromEnum(plane_mod.Kind.affine),
+        .projective => @intFromEnum(plane_mod.Kind.projective),
+    };
     res.frame = @intFromBool(s.plane_frame == .follow and model != .centre);
     res.plane = P;
     res.pc = if (model == .centre) before.pc else said.pc;
@@ -1076,7 +1080,7 @@ fn finishPlane(e: *Engine, fit: *Fit, res_out: *PlaneResult, before_in: *const G
     res.skew = said.skew;
     e.geo = before;
     if (model != .centre) {
-        e.geo.plane_kind = if (model == .projective) @intFromEnum(plane_mod.Kind.projective) else @intFromEnum(plane_mod.Kind.affine);
+        e.geo.plane_kind = res.kind;
         e.geo.plane = P;
         e.geo.pc = said.pc;
         if (s.plane_frame == .follow) e.geo.rot = said.rot;
@@ -1127,7 +1131,7 @@ fn finishPlane(e: *Engine, fit: *Fit, res_out: *PlaneResult, before_in: *const G
         .line => "a tilt line: PCx the same everywhere, PCy and PCz along the rows",
         else => "the plane",
     } });
-    e.events.log("plane of source points ({s}): {d} of {d} fit patterns used; about it they scatter by {d:.5} {d:.5} {d:.5} (PCx, PCy, PCz); mean NCC {d:.4} with each pattern at its own best (was {d:.4})", .{ @tagName(kind), res.n_used, res.n_patterns, res.rmsd[0], res.rmsd[1], res.rmsd[2], res.ncc, res.start_ncc });
+    e.events.log("plane of source points ({s}): {d} of {d} fit patterns used; about it they scatter by {d:.5} {d:.5} {d:.5} (PCx, PCy, PCz); mean NCC {d:.4} with each pattern at its own best (was {d:.4})", .{ @tagName(model), res.n_used, res.n_patterns, res.rmsd[0], res.rmsd[1], res.rmsd[2], res.ncc, res.start_ncc });
     e.events.log("plane: source at the map's middle {d:.5} {d:.5} {d:.5}; the sample's frame against the nominal one: swing {d:.2}° ± {d:.2}°, tilt {d:.2}° ± {d:.2}°, the scan turned in its plane {d:.2}° ± {d:.2}°; the beam's travel for a row {d:.3} ± {d:.3} and for a column {d:.3} ± {d:.3} of what the steps and the pixel size say; the scan's directions {d:.2}° ± {d:.2}° off square", .{ res.pc[0], res.pc[1], res.pc[2], said.rot[0] * deg, res.said_rot_se[0] * deg, said.rot[1] * deg, res.said_rot_se[1] * deg, said.rot[2] * deg, res.said_rot_se[2] * deg, said.step[0], res.step_se[0], said.step[1], res.step_se[1], said.skew * deg, res.skew_se * deg });
     return res;
 }
