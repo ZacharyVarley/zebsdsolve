@@ -798,14 +798,14 @@ def main():
     # the automatic fit checks the simpler models as well and takes the simplest the map
     # supports: over the whole map the plane; on a strip six columns wide, which says nothing
     # across its columns, a tilt line (PCx the same everywhere, PCy and PCz along the rows)
-    s.configure(roi_x=34, roi_y=0, roi_w=6, roi_h=55)
+    s.configure(roi_x=34, roi_y=0, roi_w=6, roi_h=55, plane_kind="projective")
     s.set_geometry(pc=pc_file)
     t = s.fit_geometry()
     P = np.array(s.geometry["plane"], dtype=np.float64).reshape(-1)
     s.configure(roi_x=0, roi_y=0, roi_w=0, roi_h=0)
     e_line = np.abs(np.array(t["pc"]) - pc_file).max()
     check("the automatic fit takes the simplest model the map supports: the plane, or on a narrow strip a tilt line",
-          p["model"] == "affine" and set(p["models"]) == {"centre", "line", "affine"} and t["model"] == "line" and s.geometry["plane_kind"] == "affine"
+          p["model"] == "affine" and set(p["models"]) == {"centre", "line", "affine"} and t["model"] == "line" and t["kind"] == s.geometry["plane_kind"] == "affine"
           and np.allclose(P[[0, 1, 3, 6]], 0) and not np.allclose(P[[4, 7]], 0) and e_line < 0.004,
           "whole map: " + ", ".join(f"{m} ×{v['cv'] / min(x['cv'] for x in p['models'].values()):.2f}" for m, v in p["models"].items())
           + "; strip: " + ", ".join(f"{m} ×{v['cv'] / min(x['cv'] for x in t['models'].values()):.2f}" for m, v in t["models"].items()) + f"; its centre {e_line:.4f} from kikuchipy's")
