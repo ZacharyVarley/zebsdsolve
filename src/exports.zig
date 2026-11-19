@@ -125,14 +125,22 @@ export fn ze_get_geometry(e: *Engine, out: *engine.Geometry) void {
     out.* = e.geo_home orelse e.geo;
 }
 
+fn geometryFor(e: *Engine, in: *const engine.Geometry, was: *const engine.Geometry) engine.Geometry {
+    var g = in.*;
+    // (no pixel size: the scan's own, or the one its detector's width gives)
+    if (!(g.px_um > 0)) g.px_um = e.defaultPx();
+    // (a pattern centre set by hand is one for the whole map again, the scan's steps saying how
+    // the beam went from it: the plane it was read from goes, unless a plane comes with it)
+    if (!std.meta.eql(in.pc, was.pc) and std.meta.eql(in.plane, was.plane) and in.plane_kind == was.plane_kind) g.plane_kind = 0;
+    return g;
+}
+
 export fn ze_set_geometry(e: *Engine, in: *const engine.Geometry) void {
     // what the caller changed is given; what it passed back as it read it (a fit's result
     // among it) is not
     const home = if (e.geo_home) |*h| h else &e.geo;
     const was = home.*;
-    var g = in.*;
-    // (no pixel size: the scan's own, or the one its detector's width gives)
-    if (!(g.px_um > 0)) g.px_um = e.defaultPx();
+    const g = geometryFor(e, in, &was);
     if (!std.meta.eql(in.pc, was.pc)) e.geo_given.pc = in.pc;
     if (!std.meta.eql(in.rot, was.rot)) e.geo_given.rot = in.rot;
     if (in.sample_tilt_deg != was.sample_tilt_deg) e.geo_given.sample_tilt_deg = in.sample_tilt_deg;
@@ -140,9 +148,6 @@ export fn ze_set_geometry(e: *Engine, in: *const engine.Geometry) void {
     if (g.px_um != was.px_um) e.geo_given.px_um = g.px_um;
     if (in.step_x_um != was.step_x_um) e.geo_given.step_x_um = in.step_x_um;
     if (in.step_y_um != was.step_y_um) e.geo_given.step_y_um = in.step_y_um;
-    // (a pattern centre set by hand is one for the whole map again, the scan's steps saying how
-    // the beam went from it: the plane it was read from goes, unless a plane comes with it)
-    if (!std.meta.eql(in.pc, was.pc) and std.meta.eql(in.plane, was.plane) and in.plane_kind == was.plane_kind) g.plane_kind = 0;
     home.* = g;
 }
 
@@ -658,8 +663,8 @@ export fn ze_cell_under(e: *Engine, cell: u64, geo: *const engine.Geometry, band
     const n_ph = e.phases.items.len;
     if (n_ph == 0 or n_recs != n_ph * 8) return failed(e, "cell_under", error.BadLength);
     if (bandwidth < 8 or bandwidth > 256) return failed(e, "cell_under", error.BadSetting);
-    var g = geo.*;
-    if (!(g.px_um > 0)) g.px_um = e.defaultPx();
+    const was = e.geo_home orelse e.geo;
+    const g = geometryFor(e, geo, &was);
     const rs = @as([*]engine.Record, @ptrCast(@alignCast(recs)))[0..n_ph];
     const p = e.cellUnder(cell, g, bandwidth, e.viewLevel(full != 0), rs, sim[0..len]) catch |err| return failed(e, "cell_under", err);
     return @intCast(p);

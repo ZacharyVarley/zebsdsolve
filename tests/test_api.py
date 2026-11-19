@@ -723,15 +723,18 @@ def main():
 
     # a cell under another pattern centre, the one in use staying: what setting that centre,
     # indexing the cell and simulating it would give
-    pc0 = np.array(s.geometry["pc"])
+    before = s.geometry
+    pc0 = np.array(before["pc"])
+    s.set_geometry(plane_kind="affine", plane=[[0, 0, v] for v in pc0] + [[0, 0, 1]])
+    with_plane = s.geometry
     other, cell = pc0 + [0.01, -0.01, 0.005], int(some[7])
     u = s.cell_under(cell, pc=other)
-    kept = np.array_equal(np.array(s.geometry["pc"]), pc0)
+    kept = s.geometry == with_plane
     s.set_geometry(pc=other)
     v = s.index_cells([cell], method="spherical", bandwidth=s.settings["fit_bandwidth"])
     sim_v = s.simulate(v["quaternions"][0, 0], cells=[cell], phase=0)
-    s.set_geometry(pc=pc0)
-    check("a cell can be indexed and simulated under another pattern centre, the one in use staying", kept and np.allclose(u["quaternion"], v["quaternions"][0, 0])
+    s.set_geometry(**before)
+    check("a cell can be indexed and simulated under another pattern centre, the fitted plane staying", kept and np.allclose(u["quaternion"], v["quaternions"][0, 0])
           and abs(u["ncc"] - float(v["ncc"][0, 0])) < 1e-6 and np.abs(u["simulation"].ravel() - np.asarray(sim_v).ravel()).max() < 1e-6,
           f"NCC {u['ncc']:.4f} there, as setting it gives")
 
