@@ -121,7 +121,7 @@ function gpuImports(state) {
   // ── operations, issued directly (or replayed from the backlog) ──
   // indirect: [buffer, byte offset] of the workgroup counts (3 × u32) instead of x, y, z
   const doDispatch = (p, x, y, z, entries, indirect) => {
-    if (!p.pipeline) return; // failed to compile: reported through takeError
+    if (state.deviceLoss || !p.pipeline) return; // compile failures are reported through takeError
     if (!pass) pass = encoder().beginComputePass();
     pass.setPipeline(p.pipeline);
     pass.setBindGroup(0, device.createBindGroup({ layout: p.layout, entries }));
@@ -141,18 +141,29 @@ function gpuImports(state) {
     return entries;
   };
   const doSubmit = () => {
-    endPass();
-    if (enc) { st.submits++; device.queue.submit([enc.finish()]); enc = null; }
+    if (!state.deviceLoss) {
+      endPass();
+      if (enc) { st.submits++; device.queue.submit([enc.finish()]); }
+    }
+    pass = enc = null;
     for (const b of recorded) b.destroy();
     recorded = [];
+    if (state.deviceLoss) return;
     for (const r of state.reads) {
       if (r.promise || !r.issued) continue;
-      r.promise = r.staging.mapAsync(GPUMapMode.READ).then(() => {
-        // wasm memory may have grown since the read was requested: take a fresh view.
-        new Uint8Array(mem(), r.dst, r.size).set(new Uint8Array(r.staging.getMappedRange(), 0, r.size));
-        r.staging.unmap();
-        r.staging.destroy();
-      });
+      r.promise = (async () => {
+        let mapped = false;
+        try {
+          await r.staging.mapAsync(GPUMapMode.READ);
+          mapped = true;
+          // wasm memory may have grown since the read was requested: take a fresh view.
+          new Uint8Array(mem(), r.dst, r.size).set(new Uint8Array(r.staging.getMappedRange(), 0, r.size));
+        } finally {
+          try { if (mapped) r.staging.unmap(); } finally { r.staging.destroy(); }
+        }
+      })();
+      // A rejection can arrive while wasm is suspended on the next batch's file read.
+      r.promise.catch(() => {});
     }
   };
   const doDestroy = (b) => { if (enc) recorded.push(b); else b.destroy(); }; // never under an open batch
@@ -182,7 +193,7 @@ function gpuImports(state) {
   // compile: their errors stay inside this error scope (not reported against a later call) and
   // they leave the list.
   const w = state.warm;
-  if (w?.saved) {
+  if (w?.saved && !state.deviceLoss) {
     w.list = w.saved.list.slice();
     device.pushErrorScope("validation");
     for (const [h, entry] of w.saved.list) {
@@ -234,8 +245,12 @@ function gpuImports(state) {
       if (backlog) defer(() => doDestroy(b)); else doDestroy(b);
     },
     writeBuffer(id, offset, ptr, len) {
+      if (state.deviceLoss) return;
       const b = bufs[id];
-      if (backlog) { const data = bytes(ptr, len).slice(); defer(() => device.queue.writeBuffer(b, offset, data)); }
+      if (backlog) {
+        const data = bytes(ptr, len).slice();
+        defer(() => { if (!state.deviceLoss) device.queue.writeBuffer(b, offset, data); });
+      }
       else device.queue.writeBuffer(b, offset, mem(), ptr, len);
     },
     // Starts compiling and returns at once; the first dispatch that needs it holds the queue
@@ -284,29 +299,37 @@ function gpuImports(state) {
     },
     clearBuffer(id, offset, size) {
       const b = bufs[id];
-      const op = () => { endPass(); encoder().clearBuffer(b, offset, size); };
+      const op = () => { if (!state.deviceLoss) { endPass(); encoder().clearBuffer(b, offset, size); } };
       if (backlog) defer(op); else op();
     },
     copyBuffer(src, soff, dst, doff, size) {
       const a = bufs[src];
       const b = bufs[dst];
-      const op = () => { endPass(); encoder().copyBufferToBuffer(a, soff, b, doff, size); };
+      const op = () => { if (!state.deviceLoss) { endPass(); encoder().copyBufferToBuffer(a, soff, b, doff, size); } };
       if (backlog) defer(op); else op();
     },
     readBuffer(src, offset, size, dst) {
+      if (state.deviceLoss) return;
       st.reads++;
       const a = bufs[src];
       const padded = Math.ceil(size / 4) * 4;
       const staging = device.createBuffer({ size: padded, usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST });
       const r = { staging, size, dst, promise: null, issued: false };
       state.reads.push(r);
-      const op = () => { endPass(); encoder().copyBufferToBuffer(a, offset, staging, 0, padded); r.issued = true; };
+      const op = () => {
+        if (state.deviceLoss) return;
+        endPass();
+        encoder().copyBufferToBuffer(a, offset, staging, 0, padded);
+        r.issued = true;
+      };
       if (backlog) defer(op); else op();
     },
     submit() {
       if (backlog) defer(doSubmit); else doSubmit();
     },
     takeError(ptr, cap) {
+      // Late adapter errors belong to the failed GPU operation. CPU exports can still succeed.
+      if (state.deviceLoss) { state.errors.length = 0; return 0; }
       if (!state.errors.length) return 0;
       const b = utf8enc.encode(state.errors.shift()).subarray(0, cap);
       bytes(ptr, b.length).set(b);
@@ -321,8 +344,14 @@ function gpuImports(state) {
         if (drained) { await drained.promise; st.compileWaitMs += performance.now() - t0; }
         const reads = state.reads;
         state.reads = [];
-        await Promise.all(reads.map((r) => r.promise));
-        return 0;
+        // Keep wasm's destinations alive until every mapping settles, even if one fails.
+        const settled = await Promise.allSettled(reads.map((r) => {
+          if (!r.promise) r.staging.destroy();
+          return r.promise;
+        }));
+        const failed = settled.find((r) => r.status === "rejected");
+        if (failed) throw failed.reason;
+        return state.deviceLoss ? 1 : 0;
       } catch (e) { state.errors.push(String(e)); return 1; } finally { st.waitMs += performance.now() - t0; }
     }),
   };
@@ -435,6 +464,7 @@ export class Zebsdsolve {
   /** Load the module and open a high-performance device with the limits the engine needs. */
   static async create({ wasm = new URL("../zig-out/web/zebsdsolve.wasm", import.meta.url), device = null, warm = true, onCompile = null } = {}) {
     let info = "";
+    let adapterInfo = {};
     if (!device) {
       const adapter = await navigator.gpu?.requestAdapter({ powerPreference: "high-performance" });
       if (!adapter) throw new Error("WebGPU is not available");
@@ -443,11 +473,19 @@ export class Zebsdsolve {
       const requiredFeatures = adapter.features.has("shader-f16") ? ["shader-f16"] : [];
       device = await adapter.requestDevice({ requiredLimits, requiredFeatures });
       const ai = adapter.info || {};
+      adapterInfo = Object.fromEntries(["vendor", "architecture", "device", "description"].map((k) => [k, String(ai[k] || "")]));
       info = `${ai.vendor || "gpu"} ${ai.architecture || ai.device || ""}`.trim();
     }
     const compiling = { done: 0, total: 0, listeners: onCompile ? [onCompile] : [] };
-    const state = { device, memory: null, reads: [], errors: [], info, listeners: [], stats: newStats(), compiling,
+    const state = { device, memory: null, reads: [], errors: [], info, adapterInfo: Object.freeze(adapterInfo), deviceLoss: null,
+      listeners: [], stats: newStats(), compiling,
       files: [null], io: { reads: 0, slices: 0, bytes: 0, ms: 0 } };
+    // An operation may be suspended. Let it unwind through wait and leave wasm alone here.
+    device.lost?.then(({ reason, message }) => {
+      state.deviceLoss = Object.freeze({ reason, message });
+      const ev = { kind: "deviceLost", ...state.deviceLoss };
+      for (const fn of state.listeners) try { fn(ev); } catch (e) { console.error(e); }
+    });
     const warmOn = warm && typeof localStorage !== "undefined";
     // This origin's own list when it belongs to this build; else the shipped one, downloaded
     // alongside the wasm on a first visit (or after the wasm changed).
@@ -491,6 +529,8 @@ export class Zebsdsolve {
   }
 
   get device() { return this.state.device; }
+  get deviceLost() { return this.state.deviceLoss; }
+  get adapterInfo() { return this.state.adapterInfo; }
   get mem() { return this.state.memory.buffer; }
 
   get version() {
@@ -516,7 +556,7 @@ export class Zebsdsolve {
     return s;
   }
 
-  /** Listen to progress events ({kind: "log" | "progress" | "pc", …}); returns an unsubscribe. */
+  /** Listen to progress and deviceLost events; returns an unsubscribe. */
   onEvent(fn) {
     this.state.listeners.push(fn);
     return () => { this.state.listeners = this.state.listeners.filter((f) => f !== fn); };
@@ -567,13 +607,28 @@ export class Zebsdsolve {
 
   _check(rc, what) {
     const err = this._error();
-    if (Number(rc) < 0 || err) throw new Error(`${what}: ${err || rc}`);
+    if (Number(rc) < 0) {
+      // A native failure can arrive before device.lost and take precedence in ze_error.
+      const detail = [err || rc, ...this.state.errors.splice(0)].join("; ");
+      throw new Error(`${what}: ${detail}`);
+    }
+    if (err) throw new Error(`${what}: ${err}`);
     return Number(rc);
+  }
+
+  _deviceLossError(detail = "") {
+    const { reason, message } = this.deviceLost;
+    const error = new Error(`GPU device lost (${reason})${message ? `: ${message}` : ""}.${detail ? ` ${detail}.` : ""} Export completed results before reloading.`);
+    error.name = "GPUDeviceLost";
+    return error;
   }
 
   /** Calls are serialized: one operation on the module at a time (only cancel() may interleave). */
   _serial(fn) {
-    const run = this._queue.then(fn, fn);
+    const run = this._queue.then(() => {
+      if (this.deviceLost) throw this._deviceLossError();
+      return fn();
+    });
     this._queue = run.catch(() => {});
     return run;
   }
@@ -1209,7 +1264,16 @@ export class Zebsdsolve {
       this._check(this.x.ze_tune_begin(this.e), "tune");
       for (let done = 1; ; done++) {
         const t0 = performance.now();
-        const rc = await this.x.ze_tune_trial(this.e);
+        let rc;
+        try { rc = await this.x.ze_tune_trial(this.e); }
+        catch (cause) {
+          if (!this.deviceLost) throw cause;
+          const error = this._deviceLossError(this._error());
+          error.cause = cause;
+          throw error;
+        }
+        // A lost device cannot run the next trial. Consume the failed trial's native error.
+        if (this.deviceLost) throw this._deviceLossError(this._error());
         let seconds = (performance.now() - t0) / 1000;
         if (rc !== 0) {
           // a value this machine cannot run just loses

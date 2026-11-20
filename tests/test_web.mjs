@@ -890,6 +890,43 @@ try {
     check("the pipelines it compiled", rec?.list?.length > 0, `${rec?.list?.length} pipelines → ${savePipelines}`);
     if (rec?.list?.length) writeFileSync(savePipelines, JSON.stringify(rec));
   }
+
+  // Losing the device is terminal for this page, so test it after the other WebGPU jobs.
+  const loss = await evaluate(`
+    document.getElementById("pat-live").checked = false;
+    ${job("btn-example")}
+    const ze = window.ze, index = document.getElementById("btn-index");
+    await ze._queue;
+    ze.configure({ static_background: "none", dynamic_background: "none", binning: 1, nlpar: false,
+      bandwidth: 16, fit_bandwidth: 8, master_smooth: 0, refine_iters: 1, method: "spherical",
+      sweeps: 2, sweep_method: "same", sweep_bandwidth: 8, roi_x: 0, roi_y: 0, roi_w: 4, roi_h: 2 });
+    ${setField("batch", 2)}
+    const step = ze.indexStep.bind(ze);
+    const nativeStep = ze.x.ze_index_step;
+    let attempts = 0, nativeCalls = 0, before;
+    const exportText = (format) => new TextDecoder().decode(ze.exportText(format));
+    ze.x.ze_index_step = (...args) => { nativeCalls++; return nativeStep(...args); };
+    ze.indexStep = async () => {
+      if (++attempts === 3) {
+        before = { ang: exportText("ang"), ctf: exportText("ctf") };
+        ze.device.destroy();
+        await ze.device.lost;
+      }
+      return step();
+    };
+    ${job("btn-index")}
+    return { reason: ze.deviceLost?.reason, attempts, nativeCalls,
+      retained: ze.results().phase.filter((p) => p >= 0).length,
+      exportsMatch: !!before && exportText("ang") === before.ang && exportText("ctf") === before.ctf,
+      exportsEnabled: !document.getElementById("btn-ang").disabled && !document.getElementById("btn-ctf").disabled,
+      indexDisabled: index.disabled, done: document.getElementById("tab-index").dataset.done,
+      loggedBandwidth: document.getElementById("log").textContent.includes('"bandwidth":8,"batch":2,"tile_mb":'),
+      status: document.getElementById("status").textContent };
+  `);
+  check("device loss stops indexing and preserves partial ANG and CTF exports",
+    loss.reason === "destroyed" && loss.attempts === 3 && loss.nativeCalls === 2 && loss.retained === 4
+    && loss.exportsMatch && loss.exportsEnabled && loss.indexDisabled && loss.done === "0" && loss.loggedBandwidth
+    && /GPU device lost.*4 indexed results retained.*Export before reloading/.test(loss.status), JSON.stringify(loss));
 } catch (e) {
   check("the browser run", false, String(e.stack || e));
 } finally {

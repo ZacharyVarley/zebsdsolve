@@ -65,7 +65,10 @@ const st = {
   tuned: "",
   busy: 0,
   stop: false,
+  gpuLost: false,
+  indexBandwidth: null,
   showRun: 0,
+  pcRun: 0,
   roiDrag: null,
   // the map's view: zoom (1: all of it), the cell at the well's centre, screen pixels per cell
   view: { k: 1, cx: 0, cy: 0, s: 1 },
@@ -74,11 +77,44 @@ const st = {
 
 // ── status, log, busy ──
 
+function indexedCount() {
+  return st.results?.phase.reduce((n, phase) => n + (phase >= 0), 0) || 0;
+}
+
 function status(text, err = false) {
+  if (st.gpuLost) {
+    const count = st.busy ? 0 : indexedCount();
+    text = st.busy ? "GPU device lost. Finishing the current operation…"
+      : count ? `GPU device lost. ${count.toLocaleString()} indexed results retained. Export before reloading.`
+      : "GPU device lost. Reload to continue.";
+    err = true;
+  }
   const el = $("status");
   el.textContent = text;
   el.title = text;
   el.classList.toggle("err", err);
+}
+
+// The engine may still be suspended. Only touch JavaScript and DOM state here.
+function deviceLost({ reason, message }) {
+  st.gpuLost = true;
+  ++st.showRun;
+  ++st.pcRun;
+  st.roiDrag = null;
+  invalidateOverview();
+  for (const id of ["btn-open", "btn-example", "btn-phase", "btn-toy", "btn-fit-auto", "btn-fit-pc", "btn-fit-plane",
+    "btn-simulate", "btn-sim-phase", "btn-index", "btn-tune", "btn-geo-undo", "btn-geo-file", "btn-geo-plane",
+    "btn-roi", "btn-roi-clear", "pat-live", "file-scan", "file-phase", "file-ang", "bin-choices", "btn-stop"]) $(id).disabled = true;
+  for (const control of document.querySelectorAll(".panel .fields input, .panel .fields select, .panel .tri input, #phases input, #phases button, #btn-add-ang")) control.disabled = true;
+  if (st.busy || !st.results?.phase.some((phase) => phase >= 0)) {
+    for (const id of ["btn-ang", "btn-ctf"]) $(id).disabled = true;
+  }
+  const { batch, tile_mb } = st.settings;
+  const bandwidth = st.indexBandwidth ?? st.settings.bandwidth;
+  log(`GPU device lost: ${JSON.stringify({ reason, message, adapter: st.ze.adapterInfo, bandwidth, batch, tile_mb })}`, true);
+  $("compile").hidden = true;
+  progress(null);
+  status("");
 }
 
 function log(text, err = false) {
@@ -122,8 +158,9 @@ function progress(frac) {
 /** Run one engine job: the actions and the settings are off and Stop is on while it runs. The
  *  selected pattern is shown again when it is done (a job changes what there is to show). */
 async function busy(label, fn) {
-  if (st.busy) return;
+  if (st.busy || st.gpuLost) return;
   st.busy = 1;
+  st.indexBandwidth = null;
   st.stop = false;
   app.dataset.busy = "1";
   $("btn-stop").hidden = false;
@@ -131,18 +168,20 @@ async function busy(label, fn) {
   const t0 = performance.now();
   try {
     await fn();
+    if (st.gpuLost) return;
     status(`${label.replace(/…$/, "")}: done in ${((performance.now() - t0) / 1000).toFixed(2)} s`);
     return true;
   } catch (e) {
     const msg = String(e.message || e);
-    if (/Cancelled/.test(msg)) status("stopped"); else { status(msg, true); log(msg, true); console.error(e); }
+    if (!st.gpuLost && /Cancelled/.test(msg)) status("stopped"); else { status(msg, true); log(msg, true); console.error(e); }
   } finally {
     st.busy = 0;
     app.dataset.busy = "0";
     $("btn-stop").hidden = true;
     progress(null);
     st.live.clear();
-    showCell();
+    if (st.gpuLost) { updateEnabled(); status(""); }
+    else showCell();
   }
 }
 
@@ -200,6 +239,7 @@ const METHOD_NAMES = { spherical: "spherical", dictionary: "dictionary", pca: "d
 const sweepLabel = (p) => (p.method === "spherical" ? `spherical ${p.bandwidth}` : `${METHOD_NAMES[p.method]} ${p.dictGrid}`);
 
 async function applySetting(key, value) {
+  if (st.gpuLost) return;
   try {
     st.ze.configure({ [key]: value });
   } catch (e) {
@@ -303,7 +343,7 @@ function showGeometry() {
     const v = input.dataset.i !== undefined ? g[input.dataset.geo][+input.dataset.i] : g[input.dataset.geo];
     input.value = String(+(v * per[input.dataset.geo]).toFixed(6));
   }
-  $("btn-geo-undo").disabled = !st.geoBefore;
+  $("btn-geo-undo").disabled = !st.geoBefore || st.gpuLost;
   $("btn-geo-undo").textContent = st.geoIsBefore ? "redo fit" : "undo fit";
   $("btn-geo-file").disabled = !st.geoOpened;
   // (with a plane in use, it says where the beam stood for each map cell: the steps and the pixel size do not)
@@ -540,9 +580,9 @@ function updateOverviewControls() {
     selector.add(empty);
   }
   selector.add(new Option("pattern contrast", "calculated"));
-  selector.disabled = !st.scan || st.overviewLoading;
+  selector.disabled = !st.scan || st.overviewLoading || st.gpuLost;
   selector.value = st.overviewSource || "none";
-  $("btn-overview").disabled = !st.scan || st.overviewLoading;
+  $("btn-overview").disabled = !st.scan || st.overviewLoading || st.gpuLost;
   $("btn-overview").textContent = st.overviewCalculating ? "stop" : "calculate contrast";
 }
 
@@ -582,6 +622,7 @@ async function loadStoredOverview() {
  *  shows at once and sharpens. It yields to the engine's jobs between pieces. It runs by itself
  *  when the file stores no quality map, and on request when it does. */
 async function runOverview() {
+  if (st.gpuLost) return;
   const run = ++st.overviewRun, ze = st.ze;
   const { rows, cols, patH, patW, pixel } = st.scan;
   const values = new Float32Array(rows * cols).fill(NaN);
@@ -723,6 +764,7 @@ function showPhases() {
     li.querySelector(".dot").style.background = entry.on ? PHASE_COLORS[idx % PHASE_COLORS.length] : "#3a3a41";
     li.querySelector(".nm").textContent = p.name;
     li.querySelector(".pg").textContent = p.pointGroupName;
+    li.querySelector(".on").disabled = li.querySelector("button").disabled = st.gpuLost;
     li.querySelector(".on").addEventListener("click", (ev) => { ev.stopPropagation(); });
     li.querySelector(".on").addEventListener("change", () => togglePhase(k));
     li.addEventListener("click", () => { if (idx < 0) return; st.phase = idx; st.masterSrc = idx; showPhases(); if ($("dock-master").hidden) selectDock("master"); else showMaster(); });
@@ -1387,7 +1429,7 @@ function sizeCompare() {
  *  its simulation under the file's centre and under the one in use, in turn (or one held), with
  *  both centres and their scores. */
 async function showPcCompare() {
-  if ($("dock-votes").hidden || !st.scan || st.cell < 0 || st.cell >= st.scan.rows * st.scan.cols || st.overviewLoading) return;
+  if (st.gpuLost || $("dock-votes").hidden || !st.scan || st.cell < 0 || st.cell >= st.scan.rows * st.scan.cols || st.overviewLoading) return;
   const run = st.pcRun = (st.pcRun || 0) + 1, cell = st.cell, scan = st.scan;
   // (another scan, or another call since, makes this one's answer stale)
   const stale = () => run !== st.pcRun || scan !== st.scan;
@@ -1467,7 +1509,7 @@ function showNlpar(a) {
 }
 
 async function showCell() {
-  if (!st.scan || st.cell < 0 || st.overviewLoading) return;
+  if (st.gpuLost || !st.scan || st.cell < 0 || st.overviewLoading) return;
   const run = ++st.showRun;
   const cell = st.cell;
   const { cols } = st.scan;
@@ -1716,43 +1758,60 @@ function remainingTime(seconds) {
 
 async function runIndex() {
   await busy("indexing…", async () => {
-    await st.ze.indexBegin();
-    st.resultsGeo = JSON.stringify(st.ze.geometry);
-    if (st.mapKind === "overview") setMapKind("ipf");
-    const t0 = performance.now();
-    let last = 0, visited = 0, sweepStart = t0, s = null;
-    for (;;) {
-      const before = st.ze.indexStatus;
-      s = await st.ze.indexStep();
-      visited += Math.min(before.total - before.done, st.settings.batch);
-      const now = performance.now();
-      const dt = (now - t0) / 1000;
-      if (s.sweep !== before.sweep) sweepStart = now;
-      const eta = s.left > 0 && s.done > 0 ? remainingTime(((now - sweepStart) / 1000) * s.left / s.done) : "";
-      if (!st.stop) status(eta ? `indexing… · ~${eta} left${s.sweeps > 1 ? " this sweep" : ""}` : "indexing…");
-      progress(s.done / Math.max(s.total, 1));
-      showKv($("index-readout"), [...(s.sweeps > 1 ? [["sweep", `${s.sweep + 1} / ${s.sweeps} · ${sweepLabel(s)}`, "wide"]] : []),
-        ["indexed", `${s.done.toLocaleString()} / ${s.total.toLocaleString()}`], ["rate", `${Math.round(visited / Math.max(dt, 1e-6)).toLocaleString()}/s`],
-        ...(eta ? [["left", `~${eta}${s.sweeps > 1 ? " this sweep" : ""}`, "wide"]] : []),
-        ["accepted", `${s.accepted.toLocaleString()} / ${s.region.toLocaleString()} (${acceptText()})`, "wide"]]);
-      if (performance.now() - last > 250 || s.left === 0) { st.results = st.ze.results(); drawMap(); last = performance.now(); await sleep(0); }
-      if (s.left === 0 || st.stop) break;
+    try {
+      await st.ze.indexBegin();
+      st.resultsGeo = JSON.stringify(st.ze.geometry);
+      if (st.mapKind === "overview") setMapKind("ipf");
+      const t0 = performance.now();
+      let last = 0, visited = 0, sweepStart = t0, s = null;
+      for (;;) {
+        const before = st.ze.indexStatus;
+        st.indexBandwidth = before.bandwidth;
+        s = await st.ze.indexStep();
+        visited += Math.min(before.total - before.done, st.settings.batch);
+        const now = performance.now();
+        const dt = (now - t0) / 1000;
+        if (s.sweep !== before.sweep) sweepStart = now;
+        const eta = s.left > 0 && s.done > 0 ? remainingTime(((now - sweepStart) / 1000) * s.left / s.done) : "";
+        if (!st.stop) status(eta ? `indexing… · ~${eta} left${s.sweeps > 1 ? " this sweep" : ""}` : "indexing…");
+        progress(s.done / Math.max(s.total, 1));
+        showKv($("index-readout"), [...(s.sweeps > 1 ? [["sweep", `${s.sweep + 1} / ${s.sweeps} · ${sweepLabel(s)}`, "wide"]] : []),
+          ["indexed", `${s.done.toLocaleString()} / ${s.total.toLocaleString()}`], ["rate", `${Math.round(visited / Math.max(dt, 1e-6)).toLocaleString()}/s`],
+          ...(eta ? [["left", `~${eta}${s.sweeps > 1 ? " this sweep" : ""}`, "wide"]] : []),
+          ["accepted", `${s.accepted.toLocaleString()} / ${s.region.toLocaleString()} (${acceptText()})`, "wide"]]);
+        if (performance.now() - last > 250 || s.left === 0) { st.results = st.ze.results(); drawMap(); last = performance.now(); await sleep(0); }
+        if (s.left === 0 || st.stop) break;
+      }
+      st.results = st.ze.results();
+      const truth = againstTruth();
+      if (truth.length) showKv($("index-readout"), [...[...$("index-readout").children].reduce((rows, e, i, all) => (i % 2 ? rows : [...rows, [e.textContent, all[i + 1].textContent, e.className]]), []), ...truth]);
+      // what chance gives on this scan: the scale z is read on, measured once for the run
+      try { st.chance = await st.ze.chance(0); }
+      catch (error) { st.chance = null; if (st.gpuLost) throw error; }
+      showSweeps();
+      done("index");
+      drawMap();
+      // (with no search to show, the dock shows how the matches stand)
+      if (!st.votes) selectDock("z"); else drawZ();
+      updateEnabled();
+      const R = st.results;
+      let n = 0, sum = 0;
+      for (let i = 0; i < R.ncc.length; i++) if (R.phase[i] >= 0) { n++; sum += R.ncc[i]; }
+      log(`indexed ${n.toLocaleString()} patterns in ${((performance.now() - t0) / 1000).toFixed(2)} s${s.sweeps > 1 ? ` (${visited.toLocaleString()} pattern visits over ${s.sweep + 1} sweeps)` : ""}: mean NCC ${(sum / Math.max(n, 1)).toFixed(4)}, ${s.accepted.toLocaleString()} accepted`);
+      st.indexBandwidth = null;
+    } catch (error) {
+      // The last rendered map may predate batches committed before the failure.
+      done("index", false);
+      try {
+        st.results = st.ze.results();
+        drawMap();
+      } catch (secondary) {
+        log(`Result display: ${secondary.message || secondary}`, true);
+      }
+      updateEnabled();
+      showKv($("index-readout"), [["Interrupted", `${indexedCount().toLocaleString()} indexed results retained`, "warn wide"]]);
+      throw error;
     }
-    st.results = st.ze.results();
-    const truth = againstTruth();
-    if (truth.length) showKv($("index-readout"), [...[...$("index-readout").children].reduce((rows, e, i, all) => (i % 2 ? rows : [...rows, [e.textContent, all[i + 1].textContent, e.className]]), []), ...truth]);
-    // what chance gives on this scan: the scale z is read on, measured once for the run
-    try { st.chance = await st.ze.chance(0); } catch { st.chance = null; }
-    showSweeps();
-    done("index");
-    drawMap();
-    // (with no search to show, the dock shows how the matches stand)
-    if (!st.votes) selectDock("z"); else drawZ();
-    updateEnabled();
-    const R = st.results;
-    let n = 0, sum = 0;
-    for (let i = 0; i < R.ncc.length; i++) if (R.phase[i] >= 0) { n++; sum += R.ncc[i]; }
-    log(`indexed ${n.toLocaleString()} patterns in ${((performance.now() - t0) / 1000).toFixed(2)} s${s.sweeps > 1 ? ` (${visited.toLocaleString()} pattern visits over ${s.sweep + 1} sweeps)` : ""}: mean NCC ${(sum / Math.max(n, 1)).toFixed(4)}, ${s.accepted.toLocaleString()} accepted`);
   });
 }
 
@@ -1906,6 +1965,7 @@ function showRoi() {
 }
 
 function setRoi(set) {
+  if (st.gpuLost) return;
   try { st.ze.configure(set); } catch (err) { status(String(err.message || err), true); }
   st.fit = null;
   afterSettings(Object.keys(set));
@@ -1913,8 +1973,9 @@ function setRoi(set) {
 
 function updateEnabled() {
   const ready = !!st.scan && st.ze.phases.length > 0;
-  for (const id of ["btn-fit-auto", "btn-fit-pc", "btn-fit-plane", "btn-index", "btn-tune"]) $(id).disabled = !ready;
-  for (const b of document.querySelectorAll(".needs-results")) b.disabled = !st.results;
+  for (const id of ["btn-fit-auto", "btn-fit-pc", "btn-fit-plane", "btn-index", "btn-tune"]) $(id).disabled = !ready || st.gpuLost;
+  const canExport = st.results && (!st.gpuLost || st.results.phase.some((phase) => phase >= 0));
+  for (const b of document.querySelectorAll(".needs-results")) b.disabled = !canExport;
   for (const b of $("map-kind").children) if (RESULT_KINDS.includes(b.dataset.kind)) b.disabled = !st.results;
   $("btn-json").disabled = !st.scan;
   done("data", ready);
@@ -1929,6 +1990,7 @@ function isMaster(f) {
  *  side files, master patterns. The project's settings go in before the scan opens (they may
  *  say how to read it) and its geometry after (over what the scan's file gives). */
 async function takeFiles(files) {
+  if (st.gpuLost) return;
   const cifs = files.filter((f) => /\.cif$/i.test(f.name));
   if (cifs.length) {
     loadCif(await cifs[0].text(), cifs[0].name);
@@ -1949,6 +2011,7 @@ async function takeFiles(files) {
       status(`${projects[0].name}: not a zebsdsolve project (${e.message || e})`, true);
       return;
     }
+    if (st.gpuLost) return;
     if (project.settings) {
       // (a project saved by another version may hold settings this one does not have)
       const have = st.ze.settings;
@@ -1970,7 +2033,7 @@ async function takeFiles(files) {
   }
   if (scans.length && !(await openScan(scans, roi))) return;
   if (masters.length) await addPhases(masters);
-  if (project) {
+  if (project && !st.gpuLost) {
     if (project.geometry) { beforeFit(); st.ze.setGeometry(project.geometry); geometryChanged(); }
     log(`project ${projects[0].name}: ${[project.settings && "settings", project.geometry && "geometry"].filter(Boolean).join(" and ")} taken`);
     if (!st.busy) status(`${projects[0].name}: ${[project.settings && "settings", project.geometry && "geometry"].filter(Boolean).join(" and ")} taken`);
@@ -2035,9 +2098,11 @@ async function loadExample() {
     const [scan, master] = await Promise.all([get("patterns_v2.h5"), get("Ni_master_20kV.npz")]);
     invalidateOverview();
     await st.ze.openScan([scan]);
-    st.scanName = scan.name;
     forgetPhases();
+    done("index", false);
+    st.scanName = scan.name;
     st.ze.clearPhases();
+    updateEnabled();
     await st.ze.addPhase(master);
     st.phaseFiles = [{ file: master, on: true, info: null }];
     afterOpen();
@@ -2057,18 +2122,19 @@ async function main() {
   votes = createVotes({
     geometry: () => st.ze.geometry,
     // the candidate under the cross-hair becomes the pattern centre, to fit again from there
-    setPc: (pc) => { beforeFit(); st.ze.setGeometry({ pc }); geometryChanged(); },
+    setPc: (pc) => { if (!st.gpuLost) { beforeFit(); st.ze.setGeometry({ pc }); geometryChanged(); } },
   });
   planeView = createPlaneView();
   // the master view (a phase's master or the last simulation's) and the crystal's cell, both
   // rendered by the engine (nothing until there is one to show)
   st.masterView = new MasterView($("master-well"), (o) => {
+    if (st.gpuLost) return null;
     const source = st.ze ? masterSource() : null;
     if (source === null) return null;
     return st.ze.sphereView({ ...o, source, stored: source >= 0 && st.masterStage === "stored", bin: source < 0 ? st.simBin : null, site: source < 0 ? st.simSite : null });
   }, (rot) => { if (st.link) st.cellView.setRotation(rot); });
   // (the cell and the master share the crystal's Cartesian frame: linked, one rotation turns both)
-  st.cellView = new CellView($("cell-well"), (o) => (st.ze && st.crystal ? st.ze.cellView(o) : null), (rot) => { if (st.link) st.masterView.setRotation(rot); });
+  st.cellView = new CellView($("cell-well"), (o) => (st.ze && st.crystal && !st.gpuLost ? st.ze.cellView(o) : null), (rot) => { if (st.link) st.masterView.setRotation(rot); });
   let projection = "globe";
   try { projection = localStorage.getItem("zebsdsolve.projection") || "globe"; } catch { /* private window */ }
   setProjection(projection);
@@ -2090,10 +2156,13 @@ async function main() {
   showSweeps();
   showStage();
   ze.onCompile(({ done: n, total }) => {
+    if (st.gpuLost) return;
     $("compile").hidden = n >= total;
     $("compile").textContent = `compiling shaders ${n}/${total}`;
   });
   ze.onEvent((ev) => {
+    if (ev.kind === "deviceLost") { deviceLost(ev); return; }
+    if (st.gpuLost) return;
     if (ev.kind === "log") { log(ev.text); if (ev.text.startsWith("tuned on")) st.tuned = ev.text; }
     else if (ev.kind === "progress" && ev.stage === "pca") { progress(ev.done / Math.max(ev.total, 1)); status(`learning the dictionary's components: step ${ev.done} of ${ev.total}`); }
     else if (ev.kind === "progress" && ev.stage === "tune") { progress(ev.done / Math.max(ev.total, 1)); if (ev.done < ev.total) status(`tuning: ${TUNE_MOVES[ev.done]}…`); }
@@ -2103,6 +2172,7 @@ async function main() {
     }
     else if (ev.kind === "pc") status(`pattern centre, level ${ev.level + 1}: ${ev.pc.map((v) => v.toFixed(4)).join("  ")}   mean NCC ${ev.score.toFixed(4)}${ev.at_border ? "  (at the border: moving the grid)" : ""}`);
   });
+  if (ze.deviceLost) deviceLost(ze.deviceLost);
   updateEnabled();
   showMaster();
   // the example scan is served by the site and by a checkout, not carried in the wheels
@@ -2349,7 +2419,7 @@ function updateWiring() {
     if (!st.scan || e.button !== 0) return;
     well.focus({ preventScroll: true });
     const p = mapCellAt(e);
-    if (e.shiftKey || st.roiTool) {
+    if (!st.gpuLost && (e.shiftKey || st.roiTool)) {
       if (p) { st.roiDrag = { r0: p.r, c0: p.c, r1: p.r, c1: p.c }; drawMapOverlay(); }
       e.preventDefault();
       return;
