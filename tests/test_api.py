@@ -805,7 +805,7 @@ def main():
     s.set_geometry(pc=pc_file)
     t = s.fit_geometry()
     P = np.array(s.geometry["plane"], dtype=np.float64).reshape(-1)
-    s.configure(roi_x=0, roi_y=0, roi_w=0, roi_h=0)
+    s.configure(roi_x=0, roi_y=0, roi_w=0, roi_h=0, plane_kind="affine")
     e_line = np.abs(np.array(t["pc"]) - pc_file).max()
     check("the automatic fit takes the simplest model the map supports: the plane, or on a narrow strip a tilt line",
           p["model"] == "affine" and set(p["models"]) == {"centre", "line", "affine"} and t["model"] == "line" and t["kind"] == s.geometry["plane_kind"] == "affine"
@@ -815,12 +815,42 @@ def main():
     ev = s.events()
     check("events are queued for the caller", any(x["kind"] == "pc" for x in ev) and any(x["kind"] == "progress" and x["stage"] == "plane" for x in ev))
 
-    # A square patch with no initial beam travel gives a constant starting centre.
+    # a projective plane through the source points of a 3 × 3 patch, which hardly move: they do
+    # not tell its slopes, which stay near zero, and the source at the map's middle near the
+    # affine plane's (it was 10⁵ away)
+    mid = {}
+    for kind in ("affine", "projective"):
+        s.set_geometry(pc=pc_file, plane_kind="none")
+        s.configure(roi_x=32, roi_y=20, roi_w=3, roi_h=3, plane_method="points", plane_kind=kind, plane_stride=1)
+        mid[kind] = np.array(s.fit_plane()["pc"])
+    w = np.array(s.geometry["plane"])[3]
+    swing = max(abs(w @ (c, r, 1) / (w @ (37, 27, 1)) - 1) for c in (0, 74) for r in (0, 54))
+    gap = np.abs(mid["projective"] - mid["affine"]).max()
+    check("a projective plane through points that hardly move keeps its slopes near zero", swing < 0.02 and gap < 0.003,
+          f"the denominator {swing:.4f} from the middle at the corners; the middle's source {gap:.5f} from the affine plane's")
+    # the joint fit holds them as well: its denominator moved half its value on the 3 × 3 patch,
+    # and on a 12 × 12 one went through zero inside the map (there the points' fit moves it 0.06)
+    swing, gap = {}, {}
+    for patch in ((32, 20, 3), (30, 20, 12)):
+        mid = {}
+        for kind in ("affine", "projective"):
+            s.set_geometry(pc=pc_file, plane_kind="none")
+            s.configure(roi_x=patch[0], roi_y=patch[1], roi_w=patch[2], roi_h=patch[2], plane_method="joint", plane_kind=kind, plane_stride=1)
+            mid[kind] = np.array(s.fit_plane()["pc"])
+        w = np.array(s.geometry["plane"])[3]
+        swing[patch[2]] = max(abs(w @ (c, r, 1) / (w @ (37, 27, 1)) - 1) for c in (0, 74) for r in (0, 54))
+        gap[patch[2]] = np.abs(mid["projective"] - mid["affine"]).max()
+    check("the joint fit keeps a projective plane's slopes near zero too", swing[3] < 0.02 and swing[12] < 0.2 and max(gap.values()) < 0.003,
+          "; ".join(f"{k} × {k}: the denominator {swing[k]:.4f} from the middle at the corners, the middle's source {gap[k]:.5f} from the affine plane's" for k in swing))
+
+    # the joint projective fit from one pattern centre for every cell (no steps, no plane): the
+    # starting sources do not tell the projective row
     s.configure(roi_x=32, roi_y=20, roi_w=3, roi_h=3, plane_method="joint", plane_kind="projective", plane_stride=1, plane_iters=15)
-    s.set_geometry(pc=(0.5, 0.25, 0.5), plane_kind="none", sample_tilt_deg=0, detector_tilt_deg=0, step_x_um=0, step_y_um=0)
+    s.set_geometry(pc=(0.5, 0.25, 0.5), plane_kind="none", step_x_um=0, step_y_um=0)
     joint = s.fit_plane()
     check("the joint projective fit can start at a constant pattern centre",
           joint["kind"] == "projective" and np.isfinite(joint["plane"]).all() and joint["ncc"] > joint["start_ncc"])
+
     s.close()
 
     # ── a master pattern simulated from a crystal ──

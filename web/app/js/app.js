@@ -1642,7 +1642,7 @@ function planeReadout(r, before = []) {
   const pm = (v, se) => `${signed(deg(v), 2)}° ± ${deg(se).toFixed(2)}°`;
   const g = st.ze.geometry;
   const model = PLANE_MODELS[r.model];
-  const shown = [["model", model === "line" ? "tilt line" : model === "centre" ? "centre" : r.kind === 2 ? "projective" : "affine"],
+  const shown = [["model", model === "line" ? "tilt line" : model],
     ["used", `${r.nUsed.toLocaleString()} / ${r.nPatterns.toLocaleString()}`], ["NCC", r.ncc.toFixed(4)], ["start", r.startNcc.toFixed(4)]];
   const more = [...before, ["scatter", r.rmsd.map((v) => v.toFixed(5)).join(" "), "wide"]];
   // the automatic fit: each model's misfit on blocks of the map left out of its fit, against the best one's

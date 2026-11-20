@@ -489,7 +489,8 @@ class Solver:
         the detector, six unknowns a pattern, from the geometry as it stands (a source may
         move `plane_trust` pattern heights). Then the transformation of the scan's indices
         that passes through those points is fitted by least squares: `plane_kind` "affine"
-        (nine numbers) or "projective" (eleven). `plane_weights` "information" weighs each
+        (nine numbers) or "projective" (eleven, its two slopes held near zero unless the
+        points tell them). `plane_weights` "information" weighs each
         point by how sharply its own pattern tells it, which is what lets thousands of small
         patterns stand in for a few large calibration patterns; "equal" weighs them alike, as
         kikuchipy does. Points further than `plane_outlier` robust standard deviations from

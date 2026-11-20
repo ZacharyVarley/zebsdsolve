@@ -6,6 +6,29 @@ notes.
 
 ## Unreleased
 
+### Fixed
+
+- **Auto fit geometry**, asked for a projective plane, said projective when it took a tilt line
+  and installed it as the affine plane it is (#10, by [Tijmenvermeij](https://github.com/Tijmenvermeij)).
+- The joint fit of a projective plane stopped with `TooFewFitPatterns` when it started from one
+  pattern centre for every cell (no steps, no plane) (#11, by [Tijmenvermeij](https://github.com/Tijmenvermeij)).
+- `cell_under(c, pc=…)` after a plane fit kept the plane and so ignored the centre given; it now
+  takes the centre as `set_geometry` would (#12, by [Tijmenvermeij](https://github.com/Tijmenvermeij)).
+- A projective plane through source points that hardly move (a small region of interest) took
+  its two slopes from their noise, the plane's other numbers making up for them where the points
+  were and nowhere else: on a 3 × 3 region of the nickel example the source at the map's middle
+  came out at (130857, −40056, 83901). The slopes are now held near zero unless the points tell
+  them (a prior of a tenth on how far they move the denominator from the map's middle to its
+  edge, against the points' own scatter), and a plane whose denominator falls below a tenth of
+  its middle's anywhere on the map is refused. Small regions now give the affine plane; the
+  nickel example's whole map barely moves, and what its plane says of the detector's turn
+  varies across blocks of the map by 15° at most instead of 199°.
+- The joint fit (`plane_method="joint"`) of a projective plane had no such hold: on a 12 × 12
+  region of the nickel example (CLAHE on) its denominator went through zero inside the map. It
+  now holds the slopes the same way, the prior weighed against its pseudo-points' scatter, and
+  takes no step past the same bound; the denominator moves under 2 % there, and 15 % rather
+  than 17 % over the whole map.
+
 ## 0.2.2 — 2026-11-18
 
 ### Added

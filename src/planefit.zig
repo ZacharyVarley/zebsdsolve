@@ -640,6 +640,23 @@ const Joint = struct {
         }
     }
 
+    /// A used pattern's pseudo-point (pseudoPoints) as a step from where the model puts its
+    /// source, dy = W⁻¹ p, with its weight W. Null where its pattern does not tell it.
+    fn ownStep(self: *const Joint, b: usize) ?struct { dy: [3]f64, W: [9]f64 } {
+        if (!self.fit.use[b] or !self.fit.keep[b].ok) return null;
+        const pr = profiled(&self.fit.keep[b]) orelse return null;
+        var W = rot.matMul(rot.transpose(self.M), rot.matMul(pr.S, self.M));
+        for (&W) |*w| w.* *= self.h * self.h;
+        const tr = W[0] + W[4] + W[8];
+        if (!(tr > 0)) return null;
+        const p = rot.scale(rot.matVec(rot.transpose(self.M), pr.g), self.h);
+        var Wr: [9]f64 = W;
+        for (0..3) |i| Wr[i * 3 + i] += 1e-6 * tr;
+        const dy = solve(3, Wr, p) orelse return null;
+        for (0..3) |i| W[i * 3 + i] += 1e-9 * tr;
+        return .{ .dy = dy, .W = W };
+    }
+
     /// d(t)/d(y) for a column of y's Jacobian: h M J.
     fn jt(self: *const Joint, J: [3 * plane_mod.N]f64) [3 * plane_mod.N]f64 {
         const N = plane_mod.N;
@@ -685,13 +702,17 @@ fn profiled(l: *const Local) ?struct { S: [9]f64, g: [3]f64 } {
 /// The model's numbers fitted to all the used fit patterns at once: Levenberg–Marquardt on
 /// their mean NCC, the unknowns the model's (plane.Model.free), each pattern's orientation
 /// profiled out of the step and then taken along with it (δq = H_qq⁻¹ (g_q − H_qt δt)). No
-/// pattern has a source of its own: each is where the model puts it. Returns the rounds taken;
+/// pattern has a source of its own: each is where the model puts it. A projective plane's two
+/// slopes are held near zero as the points' fit holds them (plane.fitTheta; the scatter is the
+/// pseudo-points' about the plane), and a step whose denominator would fall below a tenth of
+/// its middle's somewhere on the map is not taken (plane.bounded). Returns the rounds taken;
 /// leaves the patterns' orientations, their systems (`keep`) and the mean NCC in the fit.
 fn jointFit(j: *const Joint, which: plane_mod.Model, theta: *[plane_mod.N]f64, most: u32) !u32 {
     const N = plane_mod.N;
     const fit = j.fit;
     const n = fit.n;
     const F = which.free();
+    const used: f64 = @floatFromInt(@max(fit.n_used, 1));
     j.sourcesOf(theta.*, fit.shift);
     fit.ncc = try fit.eval(fit.q, fit.shift);
     @memcpy(fit.keep, fit.locals);
@@ -717,6 +738,26 @@ fn jointFit(j: *const Joint, which: plane_mod.Model, theta: *[plane_mod.N]f64, m
                 }
             }
         }
+        // the projective row's prior, as the fit through the pseudo-points has it
+        // (plane.fitTheta): its weight from their scatter about the plane, and ½ λ (θ₉² + θ₁₀²)
+        // taken from the patterns' summed score
+        var prior: f64 = 0;
+        if (which == .projective) {
+            var chi2: f64 = 0;
+            var told: usize = 0;
+            for (0..n) |b| {
+                const own = j.ownStep(b) orelse continue;
+                for (0..3) |k| for (0..3) |l| {
+                    chi2 += own.dy[k] * own.W[k * 3 + l] * own.dy[l];
+                };
+                told += 1;
+            }
+            if (told * 3 > F.len) prior = plane_mod.slopeWeight(chi2, told * 3 - F.len);
+            for (F) |fi| if (fi >= 9) {
+                A[fi * N + fi] += prior;
+                v[fi] -= prior * theta[fi];
+            };
+        }
         // the damped system over the model's own unknowns
         var Am: [N * N]f64 = @splat(0);
         var vm: [N]f64 = @splat(0);
@@ -730,6 +771,12 @@ fn jointFit(j: *const Joint, which: plane_mod.Model, theta: *[plane_mod.N]f64, m
         const d = plane_mod.solve(F.len, Am, vm) orelse break;
         var trial = theta.*;
         for (F, 0..) |fi, a| trial[fi] += d[a];
+        if (which == .projective and !plane_mod.bounded(trial)) {
+            // (a step that would take the denominator near zero somewhere on the map, a shorter one)
+            lam *= 5;
+            if (lam > 1e8) break;
+            continue;
+        }
         j.sourcesOf(trial, fit.shift_t);
         for (0..n) |b| {
             fit.q_t[b] = fit.q[b];
@@ -748,8 +795,12 @@ fn jointFit(j: *const Joint, which: plane_mod.Model, theta: *[plane_mod.N]f64, m
         }
         const now = try fit.eval(fit.q_t, fit.shift_t);
         fit.e.events.emit(.{ .kind = "progress", .stage = "plane", .done = it + 1, .total = most });
-        if (now > fit.ncc) {
-            const gain = now - fit.ncc;
+        // (what the fit takes: the mean NCC less the prior's share of it)
+        const share = prior / (2 * used);
+        const after = now - share * (trial[9] * trial[9] + trial[10] * trial[10]);
+        const before = fit.ncc - share * (theta[9] * theta[9] + theta[10] * theta[10]);
+        if (after > before) {
+            const gain = after - before;
             theta.* = trial;
             @memcpy(fit.q, fit.q_t);
             @memcpy(fit.shift, fit.shift_t);
@@ -783,19 +834,9 @@ fn pseudoPoints(j: *const Joint, theta: [plane_mod.N]f64, pts: []plane_mod.Point
         const rc = j.cellOf(b);
         const y = plane_mod.modelAt(theta, j.fr, rc[0], rc[1]).y;
         pts[b] = .{ .row = rc[0], .col = rc[1], .y = y, .used = false };
-        if (!fit.use[b] or !fit.keep[b].ok) continue;
-        const pr = profiled(&fit.keep[b]) orelse continue;
-        var W = rot.matMul(rot.transpose(j.M), rot.matMul(pr.S, j.M));
-        for (&W) |*w| w.* *= j.h * j.h;
-        const tr = W[0] + W[4] + W[8];
-        if (!(tr > 0)) continue;
-        const p = rot.scale(rot.matVec(rot.transpose(j.M), pr.g), j.h);
-        var Wr: [9]f64 = W;
-        for (0..3) |i| Wr[i * 3 + i] += 1e-6 * tr;
-        const dy = solve(3, Wr, p) orelse continue;
-        for (0..3) |i| W[i * 3 + i] += 1e-9 * tr;
-        pts[b].y = .{ y[0] + dy[0], y[1] + dy[1], y[2] + dy[2] };
-        pts[b].w = W;
+        const own = j.ownStep(b) orelse continue;
+        pts[b].y = .{ y[0] + own.dy[0], y[1] + own.dy[1], y[2] + own.dy[2] };
+        pts[b].w = own.W;
         pts[b].used = true;
     }
 }
@@ -811,14 +852,9 @@ fn jointPlane(j: *const Joint, which: plane_mod.Model, theta: *[plane_mod.N]f64,
         const pc = Geometry.pcOf(j.R, fit.base[b], j.h, j.h * j.fr.aspect);
         pts[b] = .{ .row = rc[0], .col = rc[1], .y = .{ pc[0] * j.fr.aspect, pc[1], pc[2] } };
     }
-    // Reuse an existing projective geometry if its slopes can be determined.
-    // Otherwise start with a constant denominator and let the patterns constrain it.
-    const initial = if (which == .projective and fit.geo0.plane_kind == @intFromEnum(plane_mod.Kind.projective))
-        plane_mod.fitTheta(.projective, pts, j.fr)
-    else
-        null;
-    const seed: plane_mod.Model = if (which == .projective) .affine else which;
-    theta.* = initial orelse plane_mod.fitTheta(seed, pts, j.fr) orelse return error.TooFewFitPatterns;
+    // (from one centre for every cell the projective row is not told: the fit through the
+    // points keeps it at zero, and the patterns say it)
+    theta.* = plane_mod.fitTheta(which, pts, j.fr) orelse return error.TooFewFitPatterns;
     var rounds = try jointFit(j, which, theta, most);
     pseudoPoints(j, theta.*, pts);
     if (!(outlier > 0)) return rounds;
