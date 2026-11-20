@@ -119,14 +119,13 @@ function progress(frac) {
   if (frac !== null) $("progress-bar").style.width = `${(100 * Math.max(0, Math.min(1, frac))).toFixed(1)}%`;
 }
 
-/** Run one engine job: the actions and the settings are off and Stop is on while it runs. The
- *  selected pattern is shown again when it is done (a job changes what there is to show). */
-async function busy(label, fn) {
+/** Run one job with the actions and settings disabled. Show the selected pattern again after the job. */
+async function busy(label, fn, { cancellable = true } = {}) {
   if (st.busy) return;
   st.busy = 1;
   st.stop = false;
   app.dataset.busy = "1";
-  $("btn-stop").hidden = false;
+  $("btn-stop").hidden = !cancellable;
   status(label);
   const t0 = performance.now();
   try {
@@ -1916,6 +1915,8 @@ function updateEnabled() {
   for (const id of ["btn-fit-auto", "btn-fit-pc", "btn-fit-plane", "btn-index", "btn-tune"]) $(id).disabled = !ready;
   for (const b of document.querySelectorAll(".needs-results")) b.disabled = !st.results;
   for (const b of $("map-kind").children) if (RESULT_KINDS.includes(b.dataset.kind)) b.disabled = !st.results;
+  $("btn-h5oina").disabled = !(st.scan?.format === "Oxford h5oina" && st.scanFiles?.[0] &&
+    st.results?.phase.some((phase) => phase >= 0));
   $("btn-json").disabled = !st.scan;
   done("data", ready);
   done("patterns", ready);
@@ -1971,9 +1972,15 @@ async function takeFiles(files) {
   if (scans.length && !(await openScan(scans, roi))) return;
   if (masters.length) await addPhases(masters);
   if (project) {
-    if (project.geometry) { beforeFit(); st.ze.setGeometry(project.geometry); geometryChanged(); }
-    log(`project ${projects[0].name}: ${[project.settings && "settings", project.geometry && "geometry"].filter(Boolean).join(" and ")} taken`);
-    if (!st.busy) status(`${projects[0].name}: ${[project.settings && "settings", project.geometry && "geometry"].filter(Boolean).join(" and ")} taken`);
+    const oxfordScan = st.scan?.format === "Oxford h5oina";
+    const oxfordProject = project.geometry_convention === "oxford-calibrated-v3";
+    const incompatible = project.geometry && oxfordScan !== oxfordProject;
+    if (project.geometry && !incompatible) { beforeFit(); st.ze.setGeometry(project.geometry); geometryChanged(); }
+    const taken = [project.settings && "settings", project.geometry && !incompatible && "geometry"].filter(Boolean).join(" and ");
+    const message = incompatible ? "Project geometry uses a different calibration convention. Using the scan geometry."
+      : `project ${projects[0].name}: ${taken} taken`;
+    log(message);
+    if (!st.busy) status(message);
   }
 }
 
@@ -2045,8 +2052,32 @@ async function loadExample() {
   });
 }
 
+async function downloadOxford() {
+  const source = st.scanFiles[0];
+  let warnings;
+  const saved = await busy("exporting H5OINA…", async () => {
+    const snapshot = st.ze.exportOxfordSnapshot();
+    warnings = snapshot.oxford_frame.warnings;
+    const worker = new Worker(new URL("./hdf5-export-worker.js", import.meta.url), { type: "module" });
+    try {
+      const bytes = await new Promise((resolve, reject) => {
+        worker.onmessage = ({ data }) => data.error ? reject(new Error(data.error)) : resolve(data.bytes);
+        worker.onerror = (event) => { event.preventDefault(); reject(new Error(event.message || "Oxford export worker failed.")); };
+        worker.onmessageerror = () => reject(new Error("Unreadable Oxford export worker response."));
+        worker.postMessage({ source, snapshot });
+      });
+      download(source.name.replace(/\.[^.]+$/, "") + "-indexed.h5oina", bytes, "application/x-hdf5");
+    } finally {
+      worker.terminate();
+    }
+  }, { cancellable: false });
+  if (saved && warnings.length) status(warnings.join(" "));
+}
+
 function projectJson() {
-  return JSON.stringify({ zebsdsolve: st.ze.version, scan: st.scanName, geometry: st.ze.geometry, settings: st.ze.settings, phases: st.ze.phases.map((p) => p.name) }, null, 2);
+  return JSON.stringify({ zebsdsolve: st.ze.version, scan: st.scanName,
+    ...(st.scan?.format === "Oxford h5oina" && { geometry_convention: "oxford-calibrated-v3" }),
+    geometry: st.ze.geometry, settings: st.ze.settings, phases: st.ze.phases.map((p) => p.name) }, null, 2);
 }
 
 // ── start ──
@@ -2214,6 +2245,7 @@ function updateWiring() {
   $("btn-stop").addEventListener("click", () => { st.stop = true; st.ze.cancel(); status("stopping…"); });
   $("btn-ang").addEventListener("click", () => download(st.scanName.replace(/\.[^.]+$/, "") + ".ang", st.ze.exportText("ang"), "text/plain"));
   $("btn-ctf").addEventListener("click", () => download(st.scanName.replace(/\.[^.]+$/, "") + ".ctf", st.ze.exportText("ctf"), "text/plain"));
+  $("btn-h5oina").addEventListener("click", downloadOxford);
   $("btn-overview").addEventListener("click", () => {
     if (st.overviewCalculating) { invalidateOverview(); updateOverviewControls(); }
     else if (st.scan && !st.overviewLoading) runOverview();

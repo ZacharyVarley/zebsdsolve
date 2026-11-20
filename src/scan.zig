@@ -16,6 +16,7 @@ const std = @import("std");
 const file_mod = @import("io/file.zig");
 const File = file_mod.File;
 const hdf5 = @import("io/hdf5.zig");
+const oxford = @import("oxford.zig");
 
 const Allocator = std.mem.Allocator;
 
@@ -40,6 +41,7 @@ pub const Hints = struct {
 
 /// Metadata as the file gives it; NaN where it gives none.
 pub const Info = struct {
+    calibration: oxford.Calibration = .{},
     rows: u32 = 0,
     cols: u32 = 0,
     pat_h: u32 = 0,
@@ -489,6 +491,18 @@ pub const Scan = struct {
                 const y = num.mean(h, gpa, data, "Pattern Center Y");
                 const z = num.mean(h, gpa, data, "Detector Distance");
                 info.pc = .{ x, 1 - y * ratio, z * ratio };
+                var metadata: oxford.Metadata = .{
+                    .tilt_axis = num.get(h, header, "Tilt Axis"),
+                    .scanning_rotation = num.get(h, header, "Scanning Rotation Angle"),
+                    .original_tilt = info.sample_tilt_deg,
+                };
+                for ([_][]const u8{ "Detector Orientation Euler", "Specimen Orientation Euler" }, [_]*[3]f64{ &metadata.detector_euler, &metadata.specimen_euler }) |name, euler| {
+                    if (try h.child(header, name)) |addr| {
+                        var angles: [4]f64 = undefined;
+                        if ((h.numbers(addr, &angles) catch 0) == 3) euler.* = angles[0..3].*;
+                    }
+                }
+                info.calibration = .{ .metadata = metadata };
                 info.sample_tilt_deg = std.math.radiansToDegrees(info.sample_tilt_deg);
                 info.voltage_kv = num.get(h, header, "Beam Voltage");
             },

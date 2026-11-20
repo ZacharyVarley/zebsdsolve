@@ -158,6 +158,7 @@ _SIGS = {
     "ze_results": ([P, U32, P, SZ], I64),
     "ze_map": ([P, U32, u8p, SZ], I32),
     "ze_ipf_key": ([P, U32, U32, U32, u8p, SZ, f32p], I32),
+    "ze_export_oxford_snapshot": ([P, f64p, P, SZ], I64),
     "ze_export": ([P, U32, P, SZ], I64),
     "ze_reduce": ([P, U32, f32p, f64p], None),
     "ze_disorientation": ([P, U32, f32p, f32p], F64),

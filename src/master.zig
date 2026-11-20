@@ -20,6 +20,20 @@ const crystal = @import("sim/crystal.zig");
 
 const Allocator = std.mem.Allocator;
 
+/// Cartesian axes of the stored master directions, established from the file
+/// format's implementation, independently of the container/producer name.
+pub const CrystalFrame = enum {
+    unknown,
+    x_a_z_cstar,
+
+    pub fn label(self: CrystalFrame) []const u8 {
+        return switch (self) {
+            .unknown => "unknown",
+            .x_a_z_cstar => "X||a,Z||c*",
+        };
+    }
+};
+
 pub const Master = struct {
     gpa: Allocator,
     name: []u8,
@@ -40,6 +54,8 @@ pub const Master = struct {
     voltage_kv: f64 = 0,
     /// "ebsdsim" or "emsoft"
     source: []const u8 = "",
+    crystal_frame: CrystalFrame = .unknown,
+    source_format_version: ?u32 = null,
     /// the point-group operators the master itself obeys (row-major 3 × 3 each), measured
     /// from the raw sheets by `measureSymmetry`; before that, the ones its file gives (or that
     /// its crystal implies), which are what is measured
@@ -47,6 +63,16 @@ pub const Master = struct {
     /// its symmetry as measured, in its own crystal frame: the rotations every orientation is
     /// reduced by, and the frame they are about (`measureSymmetry`)
     setting: sym.Setting = .{},
+
+    /// File headers retain the declared phase class independently of the symmetry
+    /// measured for native indexing. This derives metadata only; no operators change.
+    pub fn exportLaue(self: *const Master) sym.Laue {
+        if (sym.laueOfPointGroup(self.point_group)) |laue| return laue;
+        if (sym.pointGroupOfSpaceGroup(self.space_group)) |pg| {
+            if (sym.laueOfPointGroup(pg)) |laue| return laue;
+        }
+        return self.laue;
+    }
 
     /// The rotations that leave this master unchanged, in its crystal frame: g · q and q are
     /// the same orientation (the same pattern) for these g, and only for these.
@@ -273,6 +299,42 @@ fn ebsdsimLattice(gpa: Allocator, meta: []const u8) !?[6]f64 {
     return if (validLattice(lattice)) lattice else null;
 }
 
+const FrameInfo = struct { frame: CrystalFrame = .unknown, version: ?u32 = null, source: []const u8 = "ebsdsim" };
+
+fn ebsdsimFrameInfo(gpa: Allocator, meta: []const u8) !FrameInfo {
+    const compatible = try compatibleJson(gpa, meta);
+    defer gpa.free(compatible);
+    const parsed = std.json.parseFromSlice(std.json.Value, gpa, compatible, .{}) catch return .{};
+    defer parsed.deinit();
+    if (parsed.value != .object) return .{};
+    const format = parsed.value.object.get("format") orelse return .{};
+    const version = parsed.value.object.get("format_version") orelse return .{};
+    if (format != .string or !std.mem.eql(u8, format.string, "ebsdsim-master-pattern")) return .{};
+    if (version != .integer or version.integer < 0 or version.integer > std.math.maxInt(u32)) return .{};
+    const number: u32 = @intCast(version.integer);
+    // ebsdsim v3 save.py writes Cartesian khat unchanged; crystal/build.py
+    // defines the triangular direct structure matrix with X||a, Z||c*.
+    // A producer name or an unverified archive version is insufficient.
+    const producer = parsed.value.object.get("source");
+    const native = if (producer) |v| v == .string and std.mem.eql(u8, v.string, "zebsdsolve") else false;
+    return .{ .version = number, .frame = if (number == 3) .x_a_z_cstar else .unknown, .source = if (native and number == 3) "zebsdsolve" else "ebsdsim" };
+}
+
+test "ebsdsim archive metadata identifies only source-verified crystal conventions" {
+    const gpa = std.testing.allocator;
+    const known = try ebsdsimFrameInfo(gpa, "{\"format\":\"ebsdsim-master-pattern\",\"format_version\":3}");
+    try std.testing.expectEqual(CrystalFrame.x_a_z_cstar, known.frame);
+    try std.testing.expectEqual(@as(?u32, 3), known.version);
+    inline for (.{
+        "{}",
+        "{\"format\":\"ebsdsim-master-pattern\",\"format_version\":2}",
+        "{\"format\":\"ebsdsim-master-pattern\",\"format_version\":4}",
+        "{\"format\":\"other-master\",\"format_version\":3}",
+        "{\"format\":\"ebsdsim-master-pattern\",\"format_version\":\"3\"}",
+        "not json",
+    }) |meta| try std.testing.expectEqual(CrystalFrame.unknown, (try ebsdsimFrameInfo(gpa, meta)).frame);
+}
+
 fn loadEbsdsim(gpa: Allocator, f: *File) !Master {
     return loadEbsdsimBy(gpa, f, true);
 }
@@ -291,6 +353,7 @@ fn loadEbsdsimBy(gpa: Allocator, f: *File, by_grid: bool) !Master {
     var meta_a = try z.array("meta_json");
     defer if (meta_a) |*a| a.deinit(gpa);
     const meta: []const u8 = if (meta_a) |a| a.data else "";
+    const frame_info = try ebsdsimFrameInfo(gpa, meta);
 
     // values per direction: energy 0 and site 0 are the integrated slices of format 2; the
     // legacy array is (direction, site)
@@ -331,11 +394,22 @@ fn loadEbsdsimBy(gpa: Allocator, f: *File, by_grid: bool) !Master {
         .space_group = if (metaNumber(meta, "space_group")) |v| @intFromFloat(v) else 0,
         .voltage_kv = metaNumber(meta, "voltage_kv") orelse 0,
         .lattice = try ebsdsimLattice(gpa, meta),
+        .source = frame_info.source,
+        .crystal_frame = frame_info.frame,
+        .source_format_version = frame_info.version,
     }, by_grid);
 }
 
 /// (`lattice`: a, b, c in Å and α, β, γ in degrees, when known)
-pub const SectorInfo = struct { point_group: u32 = 0, space_group: u32 = 0, voltage_kv: f64 = 0, lattice: ?[6]f64 = null };
+pub const SectorInfo = struct {
+    point_group: u32 = 0,
+    space_group: u32 = 0,
+    voltage_kv: f64 = 0,
+    lattice: ?[6]f64 = null,
+    source: []const u8 = "ebsdsim",
+    crystal_frame: CrystalFrame = .unknown,
+    source_format_version: ?u32 = null,
+};
 
 /// A master from intensities on a point group's fundamental sector (ebsdsim's layout): `vals`
 /// per direction, `kij` the Lambert pixel each is at (column, row from −hw, and the
@@ -468,7 +542,9 @@ fn fromSectorBy(gpa: Allocator, vals: []const f64, kij: []const [3]i32, hw: usiz
         .name = try gpa.dupe(u8, ""),
         .side = @intCast(side),
         .raw = sheets,
-        .source = "ebsdsim",
+        .source = info.source,
+        .crystal_frame = info.crystal_frame,
+        .source_format_version = info.source_format_version,
         .point_group = info.point_group,
         .space_group = info.space_group,
         .voltage_kv = info.voltage_kv,
@@ -636,6 +712,7 @@ fn loadEmsoft(gpa: Allocator, f: *File) !Master {
         .side = @intCast(side),
         .raw = sheets,
         .source = "emsoft",
+        .crystal_frame = .x_a_z_cstar,
     };
     errdefer gpa.free(m.name);
     if (try h.find("CrystalData/LatticeParameters")) |a| {
@@ -847,4 +924,15 @@ test "the nickel master expands to a symmetric, normalized sphere" {
     try std.testing.expectEqual(@as(u32, 4), hm.rules.n_fold);
     try std.testing.expect(hm.rules.mirror and hm.rules.inversion);
     try std.testing.expect(sh.power(24, hm.f) > 0.05);
+}
+
+test "export class uses declarations without changing native measured symmetry" {
+    var m: Master = .{ .gpa = std.testing.allocator, .name = &.{}, .raw = &.{}, .side = 0, .point_group = 3, .space_group = 225, .laue = .c1 };
+    try std.testing.expectEqual(sym.Laue.c2, m.exportLaue());
+    try std.testing.expectEqual(sym.Laue.c1, m.laue);
+    m.point_group = 0;
+    m.space_group = 3;
+    try std.testing.expectEqual(sym.Laue.c2, m.exportLaue());
+    m.space_group = 0;
+    try std.testing.expectEqual(sym.Laue.c1, m.exportLaue());
 }

@@ -6,3 +6,6 @@
 *.h5 binary
 *.npz binary
 *.f32 binary
+
+# Preserve the pinned h5wasm distribution and its license byte for byte.
+web/app/js/vendor/h5wasm/* -text whitespace=-trailing-space linguist-vendored

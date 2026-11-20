@@ -1,0 +1,15 @@
+{
+  "name": "h5wasm",
+  "version": "0.10.3",
+  "source": "https://registry.npmjs.org/h5wasm/-/h5wasm-0.10.3.tgz",
+  "upstream": "https://github.com/usnistgov/h5wasm",
+  "license": "NIST license statement (see LICENSE.txt; includes third-party notices)",
+  "npm_integrity": "sha512-W4Jy5ExtX/VNbyD8GdOBckDuj6AL16TemppVNxZsV3rJZEWCv2sxlCzOttZLer3zkMttbDYsWHl0qt1z3Bln+Q==",
+  "archive_sha256": "2a9f35ab25c000c164e9dec5e61a0909d0884163ed5dc793e775603805d9570b",
+  "files_sha256": {
+    "hdf5_hl.js": "fe46fdd39690a348a61561d627f7d9feb81b92d805cde992cfa23866f1c1a8e1",
+    "hdf5_util.js": "c41874d94e9523f4c7d498c951d7707f278f62040155ee8525aafce46ce1e2c8",
+    "LICENSE.txt": "f3ba6b8afe2a0d6f482f29a46672f88668ae02b16dfc4a2e878fd50a4f34fa6a"
+  },
+  "modifications": "None. ESM runtime vendored verbatim; HDF5 WebAssembly is embedded in hdf5_util.js."
+}

@@ -381,7 +381,7 @@ pub fn run(e: *Engine) !Result {
                 const c = c0 + @as(u32, @intCast(j));
                 var geo = e.geo;
                 geo.pc = .{ axes[0][c % steps[0]], axes[1][(c / steps[0]) % steps[1]], axes[2][c / (steps[0] * steps[1])] };
-                const t = geo.translation(sz[0], sz[1]);
+                const t = e.calibration.translation(&geo, sz[0], sz[1]);
                 windows[j] = .{ @floatCast(t[0]), @floatCast(t[1]), @floatCast(t[2]), 0 };
                 for (0..n_pat) |b| {
                     items[j * n_pat + b] = .{ @floatCast(t[0] - offs[b][0]), @floatCast(t[1] - offs[b][1]), @floatCast(t[2] - offs[b][2]), @floatFromInt(b) };

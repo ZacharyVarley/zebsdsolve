@@ -879,7 +879,7 @@ fn fitPlane(e: *Engine, compare: bool) !PlaneResult {
     var res: PlaneResult = .{ .start_pc = before.pc, .start_ncc = fit.ncc, .n_patterns = @intCast(fit.n_used) };
     const trust = s.plane_trust * sz[0];
     const pts = try a.alloc(plane_mod.Point, n);
-    const R = before.rotation();
+    const R = e.calibration.rotation(&before);
     // a source's place, t, against (PCx · aspect, PCy, PCz): t = H R D y + const (geometry.translationFor)
     const M: rot.Mat3 = .{ -R[1], -R[0], R[2], -R[4], -R[3], R[5], -R[7], -R[6], R[8] };
     const kind: plane_mod.Kind = if (s.plane_kind == .projective) .projective else .affine;
@@ -914,7 +914,8 @@ fn fitPlane(e: *Engine, compare: bool) !PlaneResult {
             P = plane_mod.toPlane(model, theta, fr) orelse return error.TooFewFitPatterns;
         } else P = plane_mod.fitModel(model, pts, fr) orelse return error.TooFewFitPatterns;
     }
-    const said = plane_mod.said(P, &before, info.rows, info.cols, aspect, h_px, s.scan_x_sign, s.scan_y_sign);
+    const signs = e.calibration.scanSigns(s.scan_x_sign, s.scan_y_sign);
+    const said = plane_mod.saidWithNominal(P, &before, e.calibration.nominal(&before), info.rows, info.cols, aspect, h_px, signs[0], signs[1]);
     return finishPlane(e, fit, &res, &before, P, model, full, kind, pts, fr, aspect, said, info);
 }
 
@@ -926,7 +927,7 @@ fn pointsPlane(fit: *Fit, pts: []plane_mod.Point, M: rot.Mat3, kind: plane_mod.K
     const s = &e.set;
     const n = fit.n;
     const sz = fit.sz;
-    const R = fit.geo0.rotation();
+    const R = e.calibration.rotation(&fit.geo0);
     const info_cols = cols;
     for (0..n) |b| {
         const pc = Geometry.pcOf(R, rot.add(fit.base[b], fit.shift[b]), sz[0], sz[1]);
@@ -1027,6 +1028,7 @@ fn finishPlane(e: *Engine, fit: *Fit, res_out: *PlaneResult, before_in: *const G
     var res = res_out.*;
     const compare = res.compared != 0;
     const h_px: f64 = @floatFromInt(info.pat_h);
+    const signs = e.calibration.scanSigns(s.scan_x_sign, s.scan_y_sign);
 
     // each one's standard error: the plane fitted again without the points of one block of the map, block by block
     {
@@ -1045,7 +1047,7 @@ fn finishPlane(e: *Engine, fit: *Fit, res_out: *PlaneResult, before_in: *const G
             }
             if (!any) continue;
             const Pg = plane_mod.fitModel(model, pts, fr) orelse continue;
-            const w = plane_mod.said(Pg, &before, info.rows, info.cols, aspect, h_px, s.scan_x_sign, s.scan_y_sign);
+            const w = plane_mod.saidWithNominal(Pg, &before, e.calibration.nominal(&before), info.rows, info.cols, aspect, h_px, signs[0], signs[1]);
             val[got] = .{ w.rot[0], w.rot[1], w.rot[2], w.step[0], w.step[1], w.skew, w.pc[0], w.pc[1], w.pc[2] };
             for (0..9) |i| mean[i] += val[got][i];
             got += 1;
@@ -1109,7 +1111,7 @@ fn finishPlane(e: *Engine, fit: *Fit, res_out: *PlaneResult, before_in: *const G
     const quats = try gpa.alloc(f32, 4 * n);
     errdefer gpa.free(quats);
     const nccs = try gpa.alloc(f32, n);
-    const R0 = before.nominal();
+    const R0 = e.calibration.nominal(&before);
     const turn = rot.qmul(rot.so3Exp(rot.matVec(R0, before.rot)), rot.qconj(rot.so3Exp(rot.matVec(R0, e.geo.rot))));
     for (0..n) |k| {
         const p: usize = @intCast(fit.phase[k]);
