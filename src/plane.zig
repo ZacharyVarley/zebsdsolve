@@ -297,6 +297,11 @@ pub const Said = struct {
 /// `rows`, `cols`: the map's; `h_px`: the stored pattern's height in pixels; `sx`, `sy`: the
 /// scan's signs (settings.scan_x_sign, scan_y_sign).
 pub fn said(P: [12]f64, geo: *const Geometry, rows: u32, cols: u32, aspect: f64, h_px: f64, sx: i32, sy: i32) Said {
+    return saidWithNominal(P, geo, geo.nominal(), rows, cols, aspect, h_px, sx, sy);
+}
+
+/// As `said`, measured against an acquisition's full calibrated nominal attitude.
+pub fn saidWithNominal(P: [12]f64, geo: *const Geometry, nominal: rot.Mat3, rows: u32, cols: u32, aspect: f64, h_px: f64, sx: i32, sy: i32) Said {
     const c0 = 0.5 * @as(f64, @floatFromInt(cols - 1));
     const r0 = 0.5 * @as(f64, @floatFromInt(rows - 1));
     // the source in the detector's axes (down its rows, across its columns, along its normal),
@@ -322,9 +327,8 @@ pub fn said(P: [12]f64, geo: *const Geometry, rows: u32, cols: u32, aspect: f64,
     const x = rot.scale(xs, 1 / lx);
     // (a tilt line says nothing across the rows: the sample's y is then the nominal one, made
     // square to the x the line gives, and the scan is square)
-    const R0 = geo.nominal();
     const yn = if (ly > 0) rot.scale(ys, 1 / ly) else blk: {
-        const y0: rot.Vec3 = .{ R0[3], R0[4], R0[5] };
+        const y0: rot.Vec3 = .{ nominal[3], nominal[4], nominal[5] };
         const v = rot.sub(y0, rot.scale(x, rot.dot(y0, x)));
         const lv = @sqrt(rot.dot(v, v));
         if (!(lv > 1e-9)) return out;
@@ -337,7 +341,7 @@ pub fn said(P: [12]f64, geo: *const Geometry, rows: u32, cols: u32, aspect: f64,
     const y = rot.cross(z, x);
     // R takes the detector's coordinates to the sample's: its rows are the sample's axes there
     const R: rot.Mat3 = .{ x[0], x[1], x[2], y[0], y[1], y[2], z[0], z[1], z[2] };
-    out.rot = rot.so3Log(rot.fromMat(rot.matMul(rot.transpose(R0), R)));
+    out.rot = rot.so3Log(rot.fromMat(rot.matMul(rot.transpose(nominal), R)));
     out.skew = std.math.asin(std.math.clamp(rot.dot(x, yn), -1, 1));
     return out;
 }

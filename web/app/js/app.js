@@ -1971,9 +1971,15 @@ async function takeFiles(files) {
   if (scans.length && !(await openScan(scans, roi))) return;
   if (masters.length) await addPhases(masters);
   if (project) {
-    if (project.geometry) { beforeFit(); st.ze.setGeometry(project.geometry); geometryChanged(); }
-    log(`project ${projects[0].name}: ${[project.settings && "settings", project.geometry && "geometry"].filter(Boolean).join(" and ")} taken`);
-    if (!st.busy) status(`${projects[0].name}: ${[project.settings && "settings", project.geometry && "geometry"].filter(Boolean).join(" and ")} taken`);
+    const oxfordScan = st.scan?.format === "Oxford h5oina";
+    const oxfordProject = project.geometry_convention === "oxford-calibrated-v3";
+    const incompatible = project.geometry && oxfordScan !== oxfordProject;
+    if (project.geometry && !incompatible) { beforeFit(); st.ze.setGeometry(project.geometry); geometryChanged(); }
+    const taken = [project.settings && "settings", project.geometry && !incompatible && "geometry"].filter(Boolean).join(" and ");
+    const message = incompatible ? "Project geometry uses a different calibration convention. Using the scan geometry."
+      : `project ${projects[0].name}: ${taken} taken`;
+    log(message);
+    if (!st.busy) status(message);
   }
 }
 
@@ -2046,7 +2052,9 @@ async function loadExample() {
 }
 
 function projectJson() {
-  return JSON.stringify({ zebsdsolve: st.ze.version, scan: st.scanName, geometry: st.ze.geometry, settings: st.ze.settings, phases: st.ze.phases.map((p) => p.name) }, null, 2);
+  return JSON.stringify({ zebsdsolve: st.ze.version, scan: st.scanName,
+    ...(st.scan?.format === "Oxford h5oina" && { geometry_convention: "oxford-calibrated-v3" }),
+    geometry: st.ze.geometry, settings: st.ze.settings, phases: st.ze.phases.map((p) => p.name) }, null, 2);
 }
 
 // ── start ──

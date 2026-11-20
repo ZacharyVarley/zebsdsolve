@@ -48,3 +48,21 @@ export fn ze_destroy(e: ?*Engine) void {
     self.destroy();
     dev.deinit();
 }
+
+/// Oxford CS1 export snapshot. A null buffer queries its size.
+export fn ze_export_oxford_snapshot(e: *Engine, frame: ?[*]const f64, buf: ?[*]u8, cap: usize) i64 {
+    const requested = if (frame) |p| p[0..4].* else null;
+    const bytes = @import("oxford_snapshot.zig").snapshot(e, requested) catch |err| {
+        e.fail("export_oxford_snapshot: {s}", .{@errorName(err)});
+        return -1;
+    };
+    defer e.gpa.free(bytes);
+    if (buf) |p| {
+        if (cap < bytes.len) {
+            e.fail("export_oxford_snapshot: BufferTooSmall", .{});
+            return -1;
+        }
+        @memcpy(p[0..bytes.len], bytes);
+    }
+    return @intCast(bytes.len);
+}

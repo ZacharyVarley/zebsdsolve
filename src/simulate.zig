@@ -172,7 +172,7 @@ pub const Simulation = struct {
         const normals = try gpa.alloc(rot.Vec3, self.normals.len);
         defer gpa.free(normals);
         for (self.normals, 0..) |v, i| normals[i] = v;
-        var m = try master_mod.fromSector(gpa, vals, self.grid.kij, self.grid.halfw, self.pg_ops, normals, .{ .point_group = self.point_group, .space_group = self.space_group, .voltage_kv = self.voltage_kv, .lattice = self.lattice });
+        var m = try master_mod.fromSector(gpa, vals, self.grid.kij, self.grid.halfw, self.pg_ops, normals, .{ .point_group = self.point_group, .space_group = self.space_group, .voltage_kv = self.voltage_kv, .lattice = self.lattice, .crystal_frame = .x_a_z_cstar });
         errdefer m.deinit();
         gpa.free(m.name);
         m.name = &.{};

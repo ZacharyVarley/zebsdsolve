@@ -23,6 +23,7 @@ row-major.
 import ctypes
 import json
 import os
+from pathlib import Path
 
 import numpy as np
 
@@ -68,6 +69,7 @@ class Solver:
     def __init__(self):
         lib = _load()
         self._lib = lib
+        self._oxford_source = None
         self._e = lib.ze_create(_wgpu.encode())
         if not self._e:
             buf = ctypes.create_string_buffer(512)
@@ -224,7 +226,9 @@ class Solver:
             if os.path.isfile(side):
                 paths.append(side)
         joined = "\n".join(paths).encode()
+        reference = Path(paths[0]).resolve() if paths and paths[0].lower().endswith(".h5oina") else None
         self._check(self._lib.ze_open_scan(self._e, joined, len(joined)), "open")
+        self._oxford_source = reference
         return self
 
     def synthesize(self, **settings):
@@ -252,6 +256,7 @@ class Solver:
         geometry = self.geometry
         i32p = ctypes.POINTER(ctypes.c_int32)
         self._check(self._lib.ze_synthesize(self._e, _ptr(q, _n.f32p), ph.ctypes.data_as(i32p), gr.ctypes.data_as(i32p), n), "synthesize")
+        self._oxford_source = None
         return {"quaternions": q.reshape(rows, cols, 4), "phase": ph.reshape(rows, cols), "grain": gr.reshape(rows, cols), "geometry": geometry}
 
     def set_patterns(self, patterns):
@@ -271,6 +276,7 @@ class Solver:
         a = np.ascontiguousarray(a)
         rows, cols, h, w = a.shape
         self._check(self._lib.ze_set_patterns(self._e, a.ctypes.data, a.nbytes, pixel, rows, cols, h, w), "set_patterns")
+        self._oxford_source = None
         return self
 
     @property
@@ -807,10 +813,26 @@ class Solver:
         return out.reshape(size, size, 4), tuple(float(v) for v in box[:4])
 
     def export(self, path):
-        """Write the results as an EDAX .ang or an HKL .ctf file, by the path's extension."""
-        kind = {"ang": 0, "ctf": 1}.get(str(path).rsplit(".", 1)[-1].lower())
+        """Write ANG or CTF results, or H5OINA from an original Oxford acquisition.
+
+        H5OINA export uses the acquisition's calibration and omits raw signals.
+        Install the optional HDF5 writer with `pip install 'zebsdsolve[hdf5]'`.
+        """
+        suffix = Path(path).suffix.lower()
+        if suffix == ".h5oina":
+            from .oxford_export import write_oxford
+
+            reference = self._oxford_source
+            if reference is None:
+                raise Error("H5OINA export requires opening the original Oxford .h5oina")
+            fn = self._lib.ze_export_oxford_snapshot
+            n = self._check(fn(self._e, None, None, 0), "export_oxford_snapshot")
+            buf = ctypes.create_string_buffer(n)
+            self._check(fn(self._e, None, buf, n), "export_oxford_snapshot")
+            return write_oxford(path, reference, json.loads(buf.raw))
+        kind = {".ang": 0, ".ctf": 1}.get(suffix)
         if kind is None:
-            raise Error("export writes .ang or .ctf")
+            raise Error("export writes .ang, .ctf or .h5oina")
         n = self._check(self._lib.ze_export(self._e, kind, None, 0), "export")
         buf = ctypes.create_string_buffer(n)
         self._check(self._lib.ze_export(self._e, kind, buf, n), "export")

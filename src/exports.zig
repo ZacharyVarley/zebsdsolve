@@ -130,10 +130,14 @@ export fn ze_get_geometry(e: *Engine, out: *engine.Geometry) void {
 fn asGiven(e: *Engine, in: *const engine.Geometry, was: *const engine.Geometry) engine.Geometry {
     var g = in.*;
     // (no pixel size: the scan's own, or the one its detector's width gives)
-    if (!(g.px_um > 0)) g.px_um = e.defaultPx();
+    if (!(g.px_um > 0) and e.calibration.metadata == null) g.px_um = e.defaultPx();
     // (a pattern centre set by hand is one for the whole map again, the scan's steps saying how
     // the beam went from it: the plane it was read from goes, unless a plane comes with it)
-    if (!std.meta.eql(in.pc, was.pc) and std.meta.eql(in.plane, was.plane) and in.plane_kind == was.plane_kind) g.plane_kind = 0;
+    const plane_changed = in.plane_kind != was.plane_kind or !std.meta.eql(in.plane, was.plane);
+    if (!std.meta.eql(in.pc, was.pc) and !plane_changed) g.plane_kind = 0;
+    if (e.calibration.metadata != null and plane_changed) {
+        if (e.info()) |i| g.adoptPlaneReference(i.rows, i.cols) else |_| {}
+    }
     return g;
 }
 
@@ -143,7 +147,11 @@ export fn ze_set_geometry(e: *Engine, in: *const engine.Geometry) void {
     const home = if (e.geo_home) |*h| h else &e.geo;
     const was = home.*;
     const g = asGiven(e, in, &was);
-    if (!std.meta.eql(in.pc, was.pc)) e.geo_given.pc = in.pc;
+    if (!std.meta.eql(g.pc, was.pc)) e.geo_given.pc = g.pc;
+    if (e.calibration.metadata != null and (g.plane_kind != was.plane_kind or !std.meta.eql(g.plane, was.plane))) {
+        e.geo_given.plane_kind = g.plane_kind;
+        e.geo_given.plane = g.plane;
+    }
     if (!std.meta.eql(in.rot, was.rot)) e.geo_given.rot = in.rot;
     if (in.sample_tilt_deg != was.sample_tilt_deg) e.geo_given.sample_tilt_deg = in.sample_tilt_deg;
     if (in.detector_tilt_deg != was.detector_tilt_deg) e.geo_given.detector_tilt_deg = in.detector_tilt_deg;

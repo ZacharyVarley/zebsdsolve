@@ -13,6 +13,14 @@ EBSD pattern-centre fitting and indexing on the GPU, in the browser or from Pyth
 - **Handles several phases**, and writes `.ang` and `.ctf`.
 - **Reads** h5ebsd (kikuchipy, Bruker, EDAX, Oxford `.h5oina`), EDAX `.up1` / `.up2` (with the scan's `.ang` for the map's shape, steps, image quality and pattern centre: `solver.open("scan.up1", "scan.ang")`), Oxford `.ebsp`, NORDIF `Pattern.dat`. Master patterns: [ebsdsim](https://github.com/ZacharyVarley/ebsdsim) `.npz` and EMsoft `.h5`.
 
+Python can also write `.h5oina` results from a rectangular Oxford acquisition
+with nonzero X and Y steps.
+Install `zebsdsolve[hdf5]`, open the original scan, index it, and call
+`solver.export("results.h5oina")`. Export uses the acquisition's calibration
+and writes orientations in Oxford's CS1 frame. The output keeps acquisition
+metadata and maps and omits raw patterns and spectra. Fitted source-plane
+centres are stored separately from the original Oxford centre fields.
+
 One engine (Zig and WGSL) runs natively through wgpu-native and as WebAssembly on WebGPU, so the app and the Python package do the same thing.
 
 ## Python

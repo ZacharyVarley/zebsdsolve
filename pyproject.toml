@@ -18,6 +18,9 @@ classifiers = [
 ]
 dependencies = ["numpy"]
 
+[project.optional-dependencies]
+hdf5 = ["h5py>=3.10"]
+
 [project.urls]
 Source = "https://github.com/ZacharyVarley/zebsdsolve"
 Issues = "https://github.com/ZacharyVarley/zebsdsolve/issues"
