@@ -8,6 +8,7 @@ import { createPlaneView } from "./planeview.js";
 import { MasterView, PROJECTIONS } from "./masterview.js";
 import { CellView } from "./cellview.js";
 import { drawEnergy } from "./energy.js";
+import { createConventions } from "./conventions.js";
 
 const $ = (id) => document.getElementById(id);
 const app = $("app");
@@ -61,6 +62,7 @@ const st = {
   keys: new Map(),     // Laue class → its inverse pole figure key
   legendFolded: false,
   chance: null,        // what NMI chance gives on this scan (the last indexing run's calibration)
+  frameFound: null,    // the frame the scan file's own orientations were found in (identifyFrame)
   truth: null,         // a toy scan's own answer: { quaternions, phase } per cell
   tuned: "",
   busy: 0,
@@ -108,6 +110,7 @@ function deviceLost({ reason, message }) {
   for (const control of document.querySelectorAll(".panel .fields input, .panel .fields select, .panel .tri input, #phases input, #phases button, #btn-add-ang")) control.disabled = true;
   if (st.busy || !st.results?.phase.some((phase) => phase >= 0)) {
     for (const id of ["btn-ang", "btn-ctf"]) $(id).disabled = true;
+    $("btn-h5oina").disabled = true;
   }
   const { batch, tile_mb } = st.settings;
   const bandwidth = st.indexBandwidth ?? st.settings.bandwidth;
@@ -494,6 +497,8 @@ function afterOpen(roi = null) {
   st.scan = s;
   st.truth = null;
   st.results = null;
+  st.frameFound = null;
+  showFrame();
   st.fit = null;
   st.votes = null;
   st.plane = null;
@@ -761,7 +766,7 @@ function showPhases() {
     li.title = entry.info ? `${p.name}: point group ${p.pointGroupName}, Laue class ${p.laue}, ${p.side} × ${p.side} per hemisphere${p.voltageKv ? `, ${p.voltageKv} kV` : ""}${entry.on ? "" : ". Off: not fitted or indexed with, nor shown; switch it on with the box"}` : p.name;
     li.innerHTML = `<input type="checkbox" class="on" title="On: a candidate phase for the fits and the indexing. Off: kept here, set aside"><span class="dot"></span><span class="nm"></span><span class="pg"></span><button type="button" class="ghost" title="Remove this phase"><svg><use href="#i-x"/></svg></button>`;
     li.querySelector(".on").checked = entry.on;
-    li.querySelector(".dot").style.background = entry.on ? PHASE_COLORS[idx % PHASE_COLORS.length] : "#3a3a41";
+    li.querySelector(".dot").style.background = entry.on ? PHASE_COLORS[idx % PHASE_COLORS.length] : "var(--track)";
     li.querySelector(".nm").textContent = p.name;
     li.querySelector(".pg").textContent = p.pointGroupName;
     li.querySelector(".on").disabled = li.querySelector("button").disabled = st.gpuLost;
@@ -1788,6 +1793,7 @@ async function runIndex() {
       // what chance gives on this scan: the scale z is read on, measured once for the run
       try { st.chance = await st.ze.chance(0); }
       catch (error) { st.chance = null; if (st.gpuLost) throw error; }
+      await identifyFrame();
       showSweeps();
       done("index");
       drawMap();
@@ -1976,6 +1982,8 @@ function updateEnabled() {
   for (const id of ["btn-fit-auto", "btn-fit-pc", "btn-fit-plane", "btn-index", "btn-tune"]) $(id).disabled = !ready || st.gpuLost;
   const canExport = st.results && (!st.gpuLost || st.results.phase.some((phase) => phase >= 0));
   for (const b of document.querySelectorAll(".needs-results")) b.disabled = !canExport;
+  // (an .h5oina is made from the acquisition it was opened from, read again: not after a lost device)
+  $("btn-h5oina").disabled = !canExport || st.gpuLost || st.scan?.format !== "Oxford h5oina";
   for (const b of $("map-kind").children) if (RESULT_KINDS.includes(b.dataset.kind)) b.disabled = !st.results;
   $("btn-json").disabled = !st.scan;
   done("data", ready);
@@ -2035,8 +2043,13 @@ async function takeFiles(files) {
   if (masters.length) await addPhases(masters);
   if (project && !st.gpuLost) {
     if (project.geometry) { beforeFit(); st.ze.setGeometry(project.geometry); geometryChanged(); }
-    log(`project ${projects[0].name}: ${[project.settings && "settings", project.geometry && "geometry"].filter(Boolean).join(" and ")} taken`);
-    if (!st.busy) status(`${projects[0].name}: ${[project.settings && "settings", project.geometry && "geometry"].filter(Boolean).join(" and ")} taken`);
+    if (project.frame) {
+      try { st.ze.frame = project.frame; } catch (e) { log(`project frame: ${e.message || e}`, true); }
+      showFrame();
+    }
+    const taken = [project.settings && "settings", project.geometry && "geometry", project.frame && "frame"].filter(Boolean).join(" and ");
+    log(`project ${projects[0].name}: ${taken} taken`);
+    if (!st.busy) status(`${projects[0].name}: ${taken} taken`);
   }
 }
 
@@ -2111,7 +2124,104 @@ async function loadExample() {
 }
 
 function projectJson() {
-  return JSON.stringify({ zebsdsolve: st.ze.version, scan: st.scanName, geometry: st.ze.geometry, settings: st.ze.settings, phases: st.ze.phases.map((p) => p.name) }, null, 2);
+  const { text: _, ...frame } = st.ze.frame;
+  return JSON.stringify({ zebsdsolve: st.ze.version, scan: st.scanName, geometry: st.ze.geometry, settings: st.ze.settings, frame, phases: st.ze.phases.map((p) => p.name) }, null, 2);
+}
+
+// ── the frame the exports write in ──
+
+const isEngineFrame = (f) => f.axes.join() === "1,2,3" && !f.active && f.crystal === "x_a_z_cstar";
+const sameFrame = (a, b) => a.axes.join() === b.axes.join() && a.active === b.active && a.crystal === b.crystal;
+const degOf = (v) => (180 / Math.PI) * Math.hypot(...v);
+
+/** After indexing: the frame the scan file's own orientations are in, when it stores any. */
+async function identifyFrame() {
+  st.frameFound = null;
+  try { st.frameFound = await st.ze.identifyFrame(); }
+  catch (e) {
+    const msg = String(e.message || e);
+    if (st.gpuLost) throw e;
+    if (!/NoStoredOrientations|TooFewCommonCells/.test(msg)) log(`frame: ${msg}`, true);
+  }
+  showFrame();
+}
+
+function showFrame() {
+  const f = st.ze.frame, found = st.frameFound;
+  const pick = $("frame-pick");
+  pick.options[1].disabled = !found;
+  pick.value = isEngineFrame(f) ? "engine" : "file";
+  const rows = [["frame", f.text, "wide"]];
+  if (found) {
+    rows.push(["vs file", `median ${found.median_deg.toFixed(2)}° · ${Math.round(100 * found.within)} % ≤ 2° · next ${found.runner_up_deg.toFixed(1)}°`, "wide"]);
+    const m = found.misorientation, d = (180 / Math.PI) * Math.hypot(...m);
+    const axis = d > 0 ? m.map((v) => (v / Math.hypot(...m)).toFixed(2)).join(", ") : "";
+    rows.push(["misorientation", `${d.toFixed(2)}°${axis ? ` about (${axis})` : ""} · rows ${degOf(found.misorientation_rows).toFixed(2)}° · cols ${degOf(found.misorientation_cols).toFixed(2)}°`, "wide"]);
+  }
+  if (!isEngineFrame(f) && found && !sameFrame(f, found.frame)) rows.push(["", "set, not the file's", "wide"]);
+  showKv($("frame-readout"), rows);
+  conventions?.refresh();
+}
+
+// ── the File menu: what opens and saves, the theme, the conventions ──
+
+let conventions = null;
+
+/** The theme: "dark", "light", or "system" (as the system is set, following it). */
+function setTheme(choice) {
+  const dark = choice === "system" ? matchMedia("(prefers-color-scheme: dark)").matches : choice !== "light";
+  document.documentElement.dataset.theme = dark ? "dark" : "light";
+  for (const b of $("theme-pick").querySelectorAll("button")) b.setAttribute("aria-pressed", String(b.dataset.theme === choice));
+  try { localStorage.setItem("zebsdsolve.theme", choice); } catch { /* private window */ }
+}
+
+function themeChoice() {
+  try { return localStorage.getItem("zebsdsolve.theme") || "dark"; } catch { return "dark"; }
+}
+
+function buildMenu() {
+  const btn = $("btn-file"), menu = $("file-menu-list");
+  const close = () => { menu.hidden = true; btn.setAttribute("aria-expanded", "false"); };
+  const open = () => {
+    // each item as able as the control it stands for
+    for (const item of menu.querySelectorAll("[data-click]")) item.disabled = $(item.dataset.click).disabled || app.dataset.busy === "1";
+    menu.hidden = false;
+    btn.setAttribute("aria-expanded", "true");
+    menu.querySelector("button:not(:disabled)")?.focus();
+  };
+  btn.addEventListener("click", () => (menu.hidden ? open() : close()));
+  menu.addEventListener("click", (e) => {
+    const item = e.target.closest("button");
+    if (!item || item.disabled) return;
+    if (item.dataset.theme) { setTheme(item.dataset.theme); return; }
+    close();
+    if (item.dataset.click) $(item.dataset.click).click();
+    if (item.id === "btn-conventions") conventions.open();
+  });
+  document.addEventListener("pointerdown", (e) => { if (!menu.hidden && !$("file-menu").contains(e.target)) close(); });
+  menu.addEventListener("keydown", (e) => {
+    const items = [...menu.querySelectorAll('[role="menuitem"]:not(:disabled), [role="radio"]')];
+    const at = items.indexOf(document.activeElement);
+    if (e.key === "Escape") { e.preventDefault(); close(); btn.focus(); }
+    else if (e.key === "ArrowDown" || e.key === "ArrowUp") { e.preventDefault(); items[(at + (e.key === "ArrowDown" ? 1 : items.length - 1)) % items.length]?.focus(); }
+  });
+  setTheme(themeChoice());
+  matchMedia("(prefers-color-scheme: dark)").addEventListener("change", () => { if (themeChoice() === "system") setTheme("system"); });
+  conventions = createConventions({
+    dialog: $("conv-dialog"), list: $("conv-list"), lab: $("conv-lab"), pattern: $("conv-pat"), kv: $("conv-kv"), title: $("conv-title"),
+    current: () => {
+      if (!st.ze || app.dataset.scan !== "1") return null;
+      const s = st.ze.scan, g = st.ze.geometry, set = st.ze.settings;
+      const turned = (180 / Math.PI) * Math.hypot(...g.rot);
+      return {
+        format: s.format, found: st.frameFound, sampleTilt: g.sampleTiltDeg, detectorTilt: g.detectorTiltDeg, pc: g.pc,
+        shape: [s.patH, s.patW], signs: [set.scan_x_sign, set.scan_y_sign],
+        detector: turned > 0.005 ? `the tilts, then rotated ${turned.toFixed(2)}° (as the file stores it, or as fitted)` : "sample and detector tilts",
+      };
+    },
+  });
+  $("conv-close").addEventListener("click", () => $("conv-dialog").close());
+  $("conv-dialog").addEventListener("click", (e) => { if (e.target === $("conv-dialog")) $("conv-dialog").close(); });
 }
 
 // ── start ──
@@ -2139,6 +2249,7 @@ async function main() {
   try { projection = localStorage.getItem("zebsdsolve.projection") || "globe"; } catch { /* private window */ }
   setProjection(projection);
   app.dataset.crystal = "0";
+  buildMenu();
   updateWiring();
   try {
     st.ze = await Zebsdsolve.create({ wasm: new URL("../zebsdsolve/zebsdsolve.wasm", import.meta.url) });
@@ -2175,6 +2286,7 @@ async function main() {
   if (ze.deviceLost) deviceLost(ze.deviceLost);
   updateEnabled();
   showMaster();
+  showFrame();
   // the example scan is served by the site and by a checkout, not carried in the wheels
   fetch("./presets/nickel/Ni_master_20kV.npz", { method: "HEAD" }).then((r) => { $("btn-example").hidden = !r.ok; }, () => { $("btn-example").hidden = true; });
   status(`ready · zebsdsolve ${ze.version}`);
@@ -2284,6 +2396,15 @@ function updateWiring() {
   $("btn-stop").addEventListener("click", () => { st.stop = true; st.ze.cancel(); status("stopping…"); });
   $("btn-ang").addEventListener("click", () => download(st.scanName.replace(/\.[^.]+$/, "") + ".ang", st.ze.exportText("ang"), "text/plain"));
   $("btn-ctf").addEventListener("click", () => download(st.scanName.replace(/\.[^.]+$/, "") + ".ctf", st.ze.exportText("ctf"), "text/plain"));
+  $("btn-h5oina").addEventListener("click", () => busy("exporting .h5oina…", async () => {
+    const bytes = await st.ze.exportH5oina();
+    download(st.scanName.replace(/\.[^.]+$/, "") + "-indexed.h5oina", bytes, "application/x-hdf5");
+    showFrame();
+  }));
+  $("frame-pick").addEventListener("change", (e) => {
+    st.ze.frame = e.target.value === "file" && st.frameFound ? st.frameFound.frame : null;
+    showFrame();
+  });
   $("btn-overview").addEventListener("click", () => {
     if (st.overviewCalculating) { invalidateOverview(); updateOverviewControls(); }
     else if (st.scan && !st.overviewLoading) runOverview();

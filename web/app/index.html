@@ -5,6 +5,14 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>zebsdsolve · EBSD pattern centre and indexing</title>
   <link rel="stylesheet" href="./css/app.css">
+  <script>
+    // the theme before the first paint (File › theme; kept in this browser only)
+    try {
+      const t = localStorage.getItem("zebsdsolve.theme") || "dark";
+      const dark = t === "system" ? matchMedia("(prefers-color-scheme: dark)").matches : t !== "light";
+      document.documentElement.dataset.theme = dark ? "dark" : "light";
+    } catch { document.documentElement.dataset.theme = "dark"; }
+  </script>
   <link rel="modulepreload" href="./zebsdsolve/zebsdsolve.js">
 </head>
 <body>
@@ -25,6 +33,25 @@
       <header class="rail-head">
         <div class="brand-row">
           <span class="brand"><svg><use href="#i-logo"/></svg>zebsdsolve</span>
+          <div class="menu" id="file-menu">
+            <button type="button" class="ghost menu-btn" id="btn-file" aria-haspopup="menu" aria-expanded="false" aria-controls="file-menu-list">File</button>
+            <div class="menu-list" id="file-menu-list" role="menu" hidden>
+              <button type="button" role="menuitem" data-click="btn-open">Open scan…</button>
+              <button type="button" role="menuitem" data-click="btn-example">Open the example</button>
+              <button type="button" role="menuitem" data-click="btn-phase">Add master pattern…</button>
+              <button type="button" role="menuitem" data-click="btn-json">Save project .json</button>
+              <hr>
+              <div class="menu-row" title="Dark, light, or as the system is set; kept in this browser">theme
+                <div class="seg" id="theme-pick" role="radiogroup">
+                  <button type="button" role="radio" data-theme="dark" aria-pressed="false">dark</button>
+                  <button type="button" role="radio" data-theme="light" aria-pressed="false">light</button>
+                  <button type="button" role="radio" data-theme="system" aria-pressed="false">system</button>
+                </div>
+              </div>
+              <hr>
+              <button type="button" role="menuitem" id="btn-conventions" title="Each reference frame and pattern-centre convention drawn: the sample's axes, the detector, where the pattern centre is measured from; the scan's own, once identified">View conventions…</button>
+            </div>
+          </div>
           <span class="adapter" id="adapter" title="GPU adapter"></span>
         </div>
         <div class="scan-meta" id="scan-meta">no scan open</div>
@@ -168,8 +195,16 @@
           </details>
           <h4>Export</h4>
           <div class="row">
-            <button type="button" class="needs-results" id="btn-ang" title="EDAX .ang: Bunge angles in the sample frame of the geometry (x down the tilted surface toward the detector, z along the surface normal), each orientation's representative in its phase's fundamental zone; the region of interest's cells"><svg><use href="#i-down"/></svg>.ang</button>
+            <select id="frame-pick" title="The reference frame convention orientations are written in: the engine's own (kikuchipy's: x on the surface toward the detector, z out of it, the masters' crystal axes), or the one the scan file's stored orientations were found in after indexing. The misorientation left between those and these results is shown, never applied. File › View conventions draws them.">
+              <option value="engine">frame: engine (kikuchipy)</option>
+              <option value="file" disabled>frame: file's</option>
+            </select>
+          </div>
+          <dl class="kv" id="frame-readout"></dl>
+          <div class="row">
+            <button type="button" class="needs-results" id="btn-ang" title="EDAX .ang: Bunge angles in the frame above, each orientation's representative in its phase's fundamental zone; the region of interest's cells"><svg><use href="#i-down"/></svg>.ang</button>
             <button type="button" class="needs-results" id="btn-ctf" title="Oxford .ctf: Bunge angles as for the .ang, with each phase's lattice"><svg><use href="#i-down"/></svg>.ctf</button>
+            <button type="button" class="needs-results" id="btn-h5oina" title="Oxford .h5oina, for a scan opened from one: the acquisition's header, maps and images copied (not its patterns), its indexing replaced by these results in the frame found from its own orientations, each cell's pattern centre, and this engine's scores under /zebsdsolve"><svg><use href="#i-down"/></svg>.h5oina</button>
             <button type="button" id="btn-json" title="The geometry and every setting, as JSON. Dropped on the window (or opened with a scan), it brings them back."><svg><use href="#i-down"/></svg>project .json</button>
           </div>
         </section>
@@ -477,6 +512,22 @@
 
   </div>
 
+  <dialog class="conv" id="conv-dialog" aria-labelledby="conv-title">
+    <header class="conv-head">
+      <span class="ttl">Conventions</span><span class="meta" id="conv-title"></span>
+      <button type="button" class="ghost icon" id="conv-close" title="Close (Esc)"><svg><use href="#i-x"/></svg></button>
+    </header>
+    <div class="conv-body">
+      <nav class="conv-list" id="conv-list" role="listbox" aria-label="Conventions"></nav>
+      <div class="conv-view">
+        <div class="conv-figs">
+          <figure><svg id="conv-lab" role="img" aria-label="The lab: beam, sample with its axes, detector and pattern centre"></svg><figcaption>lab · dashed: the engine's x y z</figcaption></figure>
+          <figure><svg id="conv-pat" role="img" aria-label="The pattern as stored and where its pattern centre is measured from"></svg><figcaption>pattern as stored</figcaption></figure>
+        </div>
+        <dl class="kv conv-kv" id="conv-kv"></dl>
+      </div>
+    </div>
+  </dialog>
   <div class="dropveil" id="dropveil" hidden><div>Drop a scan (and its side files), master patterns (.npz, EMsoft .h5 named *master*), a crystal (.cif) to simulate, or a project .json</div></div>
   <script type="module" src="./js/app.js"></script>
 </body>

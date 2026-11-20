@@ -418,7 +418,7 @@ function ioImports(state) {
 const SYNC_EXPORTS = new Set(["ze_alloc", "ze_free", "ze_version", "ze_create", "ze_destroy", "ze_adapter", "ze_error",
   "ze_configure", "ze_settings", "ze_events", "ze_cancel", "ze_close_scan", "ze_scan_info", "ze_scan_format", "ze_scan_overview_kind",
   "ze_get_geometry", "ze_set_geometry", "ze_clear_phases", "ze_phase_count", "ze_phase_info", "ze_pattern_shape", "ze_nlpar_view",
-  "ze_pc_scores", "ze_fit_patterns", "ze_results", "ze_map", "ze_ipf_key", "ze_export", "ze_reduce", "ze_disorientation", "ze_shader",
+  "ze_pc_scores", "ze_fit_patterns", "ze_results", "ze_map", "ze_ipf_key", "ze_export", "ze_frame", "ze_set_frame", "ze_reduce", "ze_disorientation", "ze_shader",
   "ze_index_status", "ze_tune_begin", "ze_tune_report", "ze_pixel_angle", "ze_lattice", "ze_sweep", "ze_pc_level_count", "ze_pc_level", "ze_pc_level_ballots",
   "ze_gpu_counts", "ze_profile", "ze_profile_report", "ze_compile_wgsl", "ze_plane_points",
   "ze_sim_read_cif", "ze_sim_set_crystal", "ze_sim_edit_crystal", "ze_sim_crystal", "ze_sim_sheets", "ze_sim_add_phase", "ze_sim_npz",
@@ -1356,6 +1356,60 @@ export class Zebsdsolve {
       const p = f.alloc(n);
       this._check(this.x.ze_export(this.e, k, p, n), "export");
       return new Uint8Array(this.mem, p, n).slice();
+    });
+  }
+
+  /** The results as an Oxford .h5oina made from the acquisition the scan was opened from
+   *  (python: Solver.export): its header and maps copied, not its patterns; its indexing
+   *  replaced by these results, in the convention found from its own orientations. Resolves to
+   *  a Uint8Array. */
+  exportH5oina() {
+    return this._serial(() => this._frame(async (f) => {
+      const n = this._check(await this.x.ze_export_h5oina(this.e, 0, 0), "export");
+      const p = f.alloc(n);
+      this._check(await this.x.ze_export_h5oina(this.e, p, n), "export");
+      return new Uint8Array(this.mem, p, n).slice();
+    }));
+  }
+
+  /** The reference frame convention a maker's orientations are in, found against the results:
+   *  from `euler` (Bunge, radians, 3 per map cell) and `phase` (a label per cell, negative: not
+   *  indexed), or with neither the scan file's own. Resolves to { frame, cells, within,
+   *  median_deg, runner_up_deg, matched, installed, misorientation, misorientation_rows,
+   *  misorientation_cols, misorientation_cells } (python: Solver.identify_frame); the exports
+   *  take the convention when it was told clearly. The misorientation left (a rotation vector,
+   *  radians, about the engine's sample axes, and how it changes over the rows and the columns)
+   *  is reported, never applied. */
+  identifyFrame(euler = null, phase = null) {
+    return this._serial(() => this._frame(async (f) => {
+      const cap = 8192, out = f.alloc(cap);
+      let ep = 0, pp = 0, n = 0;
+      if (euler) {
+        n = phase.length;
+        ep = f.alloc(n * 24);
+        new Float64Array(this.mem, ep, 3 * n).set(euler);
+        pp = f.alloc(n * 4);
+        new Int32Array(this.mem, pp, n).set(phase);
+      }
+      const len = this._check(await this.x.ze_identify_frame(this.e, ep, pp, BigInt(n), out, cap), "identify frame");
+      return JSON.parse(utf8.decode(new Uint8Array(this.mem, out, len)));
+    }));
+  }
+
+  /** The convention the exports write orientations in: { axes, active, crystal, text }
+   *  (python: Solver.frame); the engine's own (kikuchipy's) until identified or set. */
+  get frame() {
+    return this._frame((f) => {
+      const p = f.alloc(1024), n = this.x.ze_frame(this.e, p, 1024);
+      return JSON.parse(utf8.decode(new Uint8Array(this.mem, p, n)));
+    });
+  }
+
+  /** Set it: { axes, active, crystal }, or null for the engine's own. */
+  set frame(value) {
+    this._frame((f) => {
+      const [p, n] = value ? f.str(JSON.stringify({ axes: value.axes, active: value.active, crystal: value.crystal })) : [0, 0];
+      this._check(this.x.ze_set_frame(this.e, p, n), "set frame");
     });
   }
 

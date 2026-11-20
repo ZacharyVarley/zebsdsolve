@@ -61,11 +61,16 @@ class UpAng(unittest.TestCase):
                 overview = self.s.stored_overview()
                 self.assertEqual(overview["kind"], 2)
                 np.testing.assert_array_equal(overview["values"], records[:, 5].reshape(2, 3))
+                # the maker's orientations and phases, as written
+                stored = self.s.stored_orientations()
+                np.testing.assert_array_equal(stored["euler"].reshape(-1, 3), records[:, :3])
+                np.testing.assert_array_equal(stored["phase"].reshape(-1), records[:, 7])
                 for cell in (0, 4, 5):
                     np.testing.assert_array_equal(self.s.pattern(cell, processed=False, full=True), patterns[cell])
                 self.s.open(up)
                 self.assertEqual((self.s.scan["rows"], self.s.scan["cols"]), (1, 6) if version == 1 else (2, 3))
                 self.assertIsNone(self.s.stored_overview())
+                self.assertIsNone(self.s.stored_orientations())
                 self.assertFalse(self.s.scan["has_pc"])
 
     def test_unknown_writer_leaves_a_rectangular_pattern_centre(self):

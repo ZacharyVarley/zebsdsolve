@@ -138,13 +138,23 @@ fn tslSymmetry(laue: sym.Laue) u32 {
 }
 
 /// The results as text (caller frees): kind 0 EDAX/TSL .ang, 1 HKL .ctf. Orientations are
-/// Bunge angles in the engine's sample frame (x down the tilted surface toward the detector,
-/// z the surface normal), those of the stored quaternions (each in its phase's fundamental
-/// zone); cells not indexed carry the formats' own markers.
+/// Bunge angles of the stored quaternions (each in its phase's fundamental zone), written in
+/// the engine's convention (`Engine.convention`, convention.zig): its own frame (kikuchipy's: x
+/// on the surface toward the detector, z out of it, each master's crystal axes) unless one was
+/// identified from the maker's own orientations or set; the header names it. Cells not indexed
+/// carry the formats' own markers.
 pub fn exportText(e: *Engine, kind: u32) ![]u8 {
     for (e.phases.items) |p| if (p.master.lattice == null) return error.MissingPhaseLattice;
     const i = try e.info();
     const gpa = e.gpa;
+    const frame = e.convention;
+    const crystal = try gpa.alloc(rot.Quat, e.phases.items.len);
+    defer gpa.free(crystal);
+    for (e.phases.items, crystal) |*p, *c| c.* = frame.crystalOf(p.master.lattice) orelse return error.MissingPhaseLattice;
+    var named: [256]u8 = undefined;
+    var nw = std.Io.Writer.fixed(&named);
+    try frame.describe(&nw);
+    const frame_text = nw.buffered();
     var out: std.Io.Writer.Allocating = .init(gpa);
     errdefer out.deinit();
     const w = &out.writer;
@@ -159,7 +169,7 @@ pub fn exportText(e: *Engine, kind: u32) ![]u8 {
             for (e.phases.items, 0..) |*p, pi| {
                 try w.print("# Phase {d}\n# MaterialName  \t{s}\n# Formula     \t\n# Info \t\t\n# Symmetry              {d}\n# LatticeConstants      {d:.8} {d:.8} {d:.8}  {d:.8}  {d:.8}  {d:.8}\n# NumberFamilies        0\n#\n", .{ pi + 1, p.master.name, tslSymmetry(p.master.laue), p.master.lattice.?[0], p.master.lattice.?[1], p.master.lattice.?[2], p.master.lattice.?[3], p.master.lattice.?[4], p.master.lattice.?[5] });
             }
-            try w.print("# GRID: SqrGrid\n# XSTEP: {d:.6}\n# YSTEP: {d:.6}\n# NCOLS_ODD: {d}\n# NCOLS_EVEN: {d}\n# NROWS: {d}\n#\n# SOFTWARE: zebsdsolve {s} (EDAX pattern centre)\n# COLUMNS: phi1 PHI phi2 x y IQ(NMI) CI(NCC) Phase SEM Fit\n", .{ g.step_x_um, g.step_y_um, i.cols, i.cols, i.rows, engine.version });
+            try w.print("# GRID: SqrGrid\n# XSTEP: {d:.6}\n# YSTEP: {d:.6}\n# NCOLS_ODD: {d}\n# NCOLS_EVEN: {d}\n# NROWS: {d}\n#\n# SOFTWARE: zebsdsolve {s} (EDAX pattern centre)\n# FRAME: {s}\n# COLUMNS: phi1 PHI phi2 x y IQ(NMI) CI(NCC) Phase SEM Fit\n", .{ g.step_x_um, g.step_y_um, i.cols, i.cols, i.rows, engine.version, frame_text });
             for (0..i.rows) |r| for (0..i.cols) |c| {
                 const at = r * i.cols + c;
                 const x = @as(f64, @floatFromInt(c)) * g.step_x_um;
@@ -170,14 +180,14 @@ pub fn exportText(e: *Engine, kind: u32) ![]u8 {
                     continue;
                 }
                 const q = e.res.quat[4 * at ..][0..4];
-                const b = rot.toBunge(.{ q[0], q[1], q[2], q[3] });
+                const b = rot.toBunge(frame.toFrame(.{ q[0], q[1], q[2], q[3] }, crystal[@intCast(ph)]));
                 // single-phase files number the phase 0
                 const pid: i32 = if (n_ph == 1) 0 else ph + 1;
                 try w.print("{d:10.5} {d:10.5} {d:10.5} {d:12.5} {d:12.5} {d:8.4} {d:7.4} {d:2} {d:6} {d:6.3}\n", .{ b[0], b[1], b[2], x, y, e.res.nmi[at], e.res.ncc[at], pid, 0, 0.0 });
             };
         },
         1 => {
-            try w.print("Channel Text File\nPrj\tzebsdsolve\nAuthor\t\nJobMode\tGrid\nXCells\t{d}\nYCells\t{d}\nXStep\t{d:.6}\nYStep\t{d:.6}\nAcqE1\t0\nAcqE2\t0\nAcqE3\t0\n", .{ i.cols, i.rows, g.step_x_um, g.step_y_um });
+            try w.print("Channel Text File\nPrj\tzebsdsolve; frame {s}\nAuthor\t\nJobMode\tGrid\nXCells\t{d}\nYCells\t{d}\nXStep\t{d:.6}\nYStep\t{d:.6}\nAcqE1\t0\nAcqE2\t0\nAcqE3\t0\n", .{ frame_text, i.cols, i.rows, g.step_x_um, g.step_y_um });
             try w.print("Euler angles refer to Sample Coordinate system (CS0)!\tMag\t0\tCoverage\t100\tDevice\t0\tKV\t{d:.1}\tTiltAngle\t{d:.2}\tTiltAxis\t0\n", .{ if (std.math.isNan(i.voltage_kv)) 0 else i.voltage_kv, g.sample_tilt_deg });
             try w.print("Phases\t{d}\n", .{n_ph});
             for (e.phases.items) |*p| {
@@ -195,7 +205,7 @@ pub fn exportText(e: *Engine, kind: u32) ![]u8 {
                     continue;
                 }
                 const q = e.res.quat[4 * at ..][0..4];
-                const b = rot.toBunge(.{ q[0], q[1], q[2], q[3] });
+                const b = rot.toBunge(frame.toFrame(.{ q[0], q[1], q[2], q[3] }, crystal[@intCast(ph)]));
                 const bc: u32 = @intFromFloat(@round(255 * std.math.clamp(e.res.ncc[at], 0, 1)));
                 const bs: u32 = @intFromFloat(@round(255 * std.math.clamp(e.res.nmi[at], 0, 1)));
                 try w.print("{d}\t{d:.4}\t{d:.4}\t0\t0\t{d:.4}\t{d:.4}\t{d:.4}\t0.0000\t{d}\t{d}\n", .{ ph + 1, x, y, b[0] * deg, b[1] * deg, b[2] * deg, bc, bs });

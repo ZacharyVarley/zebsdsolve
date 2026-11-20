@@ -225,6 +225,7 @@ class Solver:
                 paths.append(side)
         joined = "\n".join(paths).encode()
         self._check(self._lib.ze_open_scan(self._e, joined, len(joined)), "open")
+        self._opened = [os.path.abspath(p) for p in paths]
         return self
 
     def synthesize(self, **settings):
@@ -806,11 +807,93 @@ class Solver:
         self._check(self._lib.ze_ipf_key(self._e, int(phase), int(size), int(bool(lower)), _ptr(out, _n.u8p), out.size, _ptr(box, _n.f32p)), "ipf_key")
         return out.reshape(size, size, 4), tuple(float(v) for v in box[:4])
 
+    def stored_orientations(self):
+        """The orientations the scan file stores from its maker's indexing, as it stores them:
+        {"euler": (rows, cols, 3) Bunge angles in radians, "phase": (rows, cols) labels, −1 where
+        not indexed}, or None when it stores none. Which frame they are in is
+        `identify_frame`'s to find."""
+        s = self.scan
+        n = s["rows"] * s["cols"]
+        e = np.empty((n, 3), np.float64)
+        ph = np.empty(n, np.int32)
+        if not self._check(self._lib.ze_stored_orientations(self._e, _ptr(e, _n.f64p), _ptr(ph, _n.i32p), n), "stored_orientations"):
+            return None
+        return {"euler": e.reshape(s["rows"], s["cols"], 3), "phase": ph.reshape(s["rows"], s["cols"])}
+
+    def identify_frame(self, euler=None, phase=None):
+        """The reference frame convention a maker's orientations are in, found against the
+        results: from `euler` (Bunge angles, radians, (rows, cols, 3) or (n, 3), one per map
+        cell) and `phase` (a label per cell, any integers, negative where not indexed), or with
+        neither the scan file's own. Every convention of the sample's axes, the rotation's sense
+        and the crystal's axes on the lattice is tried, cell by cell under each phase's own
+        symmetry.
+
+        Returns a dict: `frame` (as `frame` has it), `cells` compared, `within` (the fraction
+        within 2°), `median_deg`, `runner_up_deg` (the best other convention's median: how
+        clearly this one was told), `matched` (the reference's label for each phase),
+        `installed` (the exports take the convention when it was told clearly: median under 5°,
+        and the best other's at least twice that and 5° more), and the misorientation left
+        between the reference and these results, which no convention removes and nothing
+        applies: `misorientation` (rotation vector, radians, about the engine's x toward the
+        detector, y the tilt axis, z out of the surface: the rotation of the sample axes that
+        takes these results closest to the reference, at the map's middle),
+        `misorientation_rows` and `misorientation_cols` (how much it changes from the first row
+        to the last and from the first column to the last) and `misorientation_cells` (the cells
+        it was measured on, those within a few degrees). A misorientation that changes over the
+        map says the two geometries place the pattern centre differently as the beam moves; one
+        that does not, that their detector orientations or pattern centres differ, or that
+        either indexed less well."""
+        cap = 8192
+        buf = ctypes.create_string_buffer(cap)
+        if euler is None:
+            n = self._check(self._lib.ze_identify_frame(self._e, None, None, 0, buf, cap), "identify_frame")
+        else:
+            e = np.ascontiguousarray(np.asarray(euler, np.float64).reshape(-1, 3))
+            ph = np.ascontiguousarray(np.asarray(phase, np.int32).reshape(-1))
+            if len(ph) != len(e):
+                raise Error("identify_frame: euler and phase differ in length")
+            n = self._check(self._lib.ze_identify_frame(self._e, _ptr(e, _n.f64p), _ptr(ph, _n.i32p), len(ph), buf, cap), "identify_frame")
+        return json.loads(buf.raw[:n].decode())
+
+    @property
+    def frame(self):
+        """The reference frame convention the exports write orientations in: `axes` (the
+        convention's sample X, Y, Z as the engine's axes, 1 x on the surface toward the
+        detector, 2 y the tilt axis, 3 z out of the surface, negative reversed), `active`,
+        `crystal` (x_a_z_cstar, the masters' own; x_astar_z_c; y_b_z_cstar; y_bstar_z_c) and
+        `text`, a line naming it. The engine's own (kikuchipy's) until identified
+        (`identify_frame`) or set; a new scan resets it."""
+        buf = ctypes.create_string_buffer(1024)
+        n = self._lib.ze_frame(self._e, buf, 1024)
+        return json.loads(buf.raw[:n].decode())
+
+    @frame.setter
+    def frame(self, value):
+        j = b"" if value is None else json.dumps({k: v for k, v in dict(value).items() if k != "text"}).encode()
+        self._check(self._lib.ze_set_frame(self._e, j, len(j)), "set_frame")
+
     def export(self, path):
-        """Write the results as an EDAX .ang or an HKL .ctf file, by the path's extension."""
-        kind = {"ang": 0, "ctf": 1}.get(str(path).rsplit(".", 1)[-1].lower())
+        """Write the results by the path's extension: an EDAX .ang or an HKL .ctf, their
+        orientations in `frame`; or, for a scan opened from an Oxford .h5oina, an .h5oina made
+        from it: its header, maps and other data copied (not its patterns, nor anything else of
+        more than 64 values a map cell), its indexing replaced by these results, their
+        orientations in the convention found from its own (`identify_frame`, done here when no
+        convention is set), each cell's pattern centre in Oxford's convention, and this engine's
+        scores under /zebsdsolve."""
+        ext = str(path).rsplit(".", 1)[-1].lower()
+        if ext == "h5oina":
+            target = os.path.abspath(str(path))
+            if any(os.path.exists(target) and os.path.exists(p) and os.path.samefile(target, p) for p in getattr(self, "_opened", [])):
+                raise Error("export: the .h5oina would replace the acquisition it is made from")
+            n = self._check(self._lib.ze_export_h5oina(self._e, None, 0), "export")
+            buf = ctypes.create_string_buffer(n)
+            self._check(self._lib.ze_export_h5oina(self._e, buf, n), "export")
+            with open(path, "wb") as f:
+                f.write(buf.raw[:n])
+            return
+        kind = {"ang": 0, "ctf": 1}.get(ext)
         if kind is None:
-            raise Error("export writes .ang or .ctf")
+            raise Error("export writes .ang, .ctf or .h5oina")
         n = self._check(self._lib.ze_export(self._e, kind, None, 0), "export")
         buf = ctypes.create_string_buffer(n)
         self._check(self._lib.ze_export(self._e, kind, buf, n), "export")

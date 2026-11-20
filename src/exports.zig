@@ -15,6 +15,7 @@ const rot = @import("rot.zig");
 const pcfit = @import("pcfit.zig");
 const planefit = @import("planefit.zig");
 const output = @import("output.zig");
+const convention = @import("convention.zig");
 
 const Engine = engine.Engine;
 
@@ -748,6 +749,113 @@ export fn ze_export(e: *Engine, kind: u32, buf: ?[*]u8, cap: usize) i64 {
     defer e.gpa.free(text);
     if (buf) |b| if (cap >= text.len) @memcpy(b[0..text.len], text);
     return @intCast(text.len);
+}
+
+/// The results as an Oxford .h5oina made from the acquisition the scan was opened from
+/// (h5oina.zig). With a null buf it makes the file and returns its size, holding it for the
+/// next call, which copies it into buf (when cap suffices) and lets it go.
+export fn ze_export_h5oina(e: *Engine, buf: ?[*]u8, cap: usize) i64 {
+    if (buf == null or e.export_held.len == 0) {
+        e.gpa.free(e.export_held);
+        e.export_held = &.{};
+        e.export_held = @import("h5oina.zig").write(e) catch |err| return failed(e, "export_h5oina", err);
+    }
+    const n = e.export_held.len;
+    if (buf) |b| {
+        if (cap < n) return failed(e, "export_h5oina", error.BufferTooSmall);
+        @memcpy(b[0..n], e.export_held);
+        e.gpa.free(e.export_held);
+        e.export_held = &.{};
+    }
+    return @intCast(n);
+}
+
+fn frameJson(w: *std.Io.Writer, f: convention.Frame) !void {
+    try w.writeAll("{\"axes\":");
+    try std.json.Stringify.value(f.axes, .{}, w);
+    try w.print(",\"active\":{},\"crystal\":\"{s}\",\"text\":", .{ f.active, @tagName(f.crystal) });
+    var line: [256]u8 = undefined;
+    var lw = std.Io.Writer.fixed(&line);
+    try f.describe(&lw);
+    try std.json.Stringify.value(lw.buffered(), .{}, w);
+    try w.writeByte('}');
+}
+
+/// The frame a maker's orientations are in, found against the results (convention.zig): from
+/// `euler` (Bunge, radians, 3 per map cell) and `phase` (a label per cell, negative: not
+/// indexed), or with null the scan file's own. Writes JSON (under 1 KB) into buf and returns its
+/// length: the frame, how well it holds, and whether the exports took it.
+export fn ze_identify_frame(e: *Engine, euler: ?[*]const f64, phase: ?[*]const i32, n: u64, buf: [*]u8, cap: usize) i64 {
+    const ref: ?convention.Reference = if (euler) |eu| blk: {
+        const ph = phase orelse return failed(e, "identify_frame", error.MissingPhases);
+        const m: usize = @intCast(n);
+        break :blk .{ .euler = eu[0 .. 3 * m], .phase = ph[0..m] };
+    } else null;
+    const got = e.identifyFrame(ref) catch |err| return failed(e, "identify_frame", err);
+    const f = got.found;
+    var out: std.Io.Writer.Allocating = .init(e.gpa);
+    defer out.deinit();
+    const w = &out.writer;
+    (blk: {
+        w.writeAll("{\"frame\":") catch |err| break :blk err;
+        frameJson(w, f.frame) catch |err| break :blk err;
+        w.print(",\"cells\":{d},\"within\":{d},\"median_deg\":{d},\"runner_up_deg\":{d},\"installed\":{},\"misorientation_cells\":{d},\"misorientation\":", .{ f.cells, f.within, f.median_deg, f.runner_up_deg, got.installed, f.misorientation_cells }) catch |err| break :blk err;
+        std.json.Stringify.value(f.misorientation, .{}, w) catch |err| break :blk err;
+        w.writeAll(",\"misorientation_rows\":") catch |err| break :blk err;
+        std.json.Stringify.value(f.misorientation_rows, .{}, w) catch |err| break :blk err;
+        w.writeAll(",\"misorientation_cols\":") catch |err| break :blk err;
+        std.json.Stringify.value(f.misorientation_cols, .{}, w) catch |err| break :blk err;
+        w.writeAll(",\"matched\":") catch |err| break :blk err;
+        std.json.Stringify.value(f.matched[0..@min(e.phases.items.len, convention.max_phases)], .{}, w) catch |err| break :blk err;
+        w.writeByte('}') catch |err| break :blk err;
+    }) catch |err| return failed(e, "identify_frame", err);
+    const text = out.written();
+    if (cap < text.len) return failed(e, "identify_frame", error.BufferTooSmall);
+    @memcpy(buf[0..text.len], text);
+    return @intCast(text.len);
+}
+
+/// The orientations the scan file stores from its maker's indexing, as it stores them (scan.zig
+/// storedOrientations): Bunge angles (radians, 3 per map cell) into `euler` and a phase label
+/// per cell (−1: not indexed) into `phase`, n cells each. Returns 1, or 0 when the file stores
+/// none.
+export fn ze_stored_orientations(e: *Engine, euler: [*]f64, phase: [*]i32, n: u64) i32 {
+    const s = switch (e.source) {
+        .file => |s| s,
+        else => return 0,
+    };
+    var got = (s.storedOrientations(e.gpa) catch |err| return failed(e, "stored_orientations", err)) orelse return 0;
+    defer got.deinit(e.gpa);
+    if (got.phase.len != n) return failed(e, "stored_orientations", error.BadLength);
+    @memcpy(euler[0 .. 3 * got.phase.len], got.euler);
+    @memcpy(phase[0..got.phase.len], got.phase);
+    return 1;
+}
+
+/// The convention the exports write orientations in, as JSON (axes, turn, active, crystal and a
+/// line describing it); returns its length (copied when cap suffices).
+export fn ze_frame(e: *Engine, buf: [*]u8, cap: usize) usize {
+    var line: [1024]u8 = undefined;
+    var w = std.Io.Writer.fixed(&line);
+    frameJson(&w, e.convention) catch return 0;
+    const text = w.buffered();
+    @memcpy(buf[0..@min(cap, text.len)], text[0..@min(cap, text.len)]);
+    return text.len;
+}
+
+/// Set the convention the exports write in: JSON as `ze_frame` gives it (axes, active,
+/// crystal; others, such as the "turn" older projects carry, ignored), or empty for the
+/// engine's own.
+export fn ze_set_frame(e: *Engine, json: [*]const u8, len: usize) i32 {
+    if (len == 0) {
+        e.convention = .{};
+        return 0;
+    }
+    const parsed = std.json.parseFromSlice(convention.Frame, e.gpa, json[0..len], .{ .ignore_unknown_fields = true }) catch |err| return failed(e, "set_frame", err);
+    defer parsed.deinit();
+    if (!parsed.value.valid()) return failed(e, "set_frame", error.InvalidFrame);
+    e.convention = parsed.value;
+    return 0;
 }
 
 /// An orientation as the results store one: `q` is replaced by its representative in the

@@ -6,7 +6,49 @@ notes.
 
 ## Unreleased
 
+### Added
+
+- **Reference frames found from the data.** A convention (the sample's axes as signed axes of
+  the frame the engine computes in, kikuchipy's; passive or active angles; the crystal's axes
+  on the lattice, X ∥ a or X ∥ a\* and the like) is described as data, never by a maker's name,
+  and `identify_frame()` finds the one a scan file's own stored orientations are in. What is
+  left is a misorientation (`misorientation`, and how it changes over the rows and the
+  columns), reported and never applied: it is where the two geometries or indexings differ.
+  On an Oxford, a Bruker and an EDAX acquisition the makers' orientations lie a median 0.20°,
+  1.16° and 0.76° from the engine's. Oxford's sample and crystal axes come out as #13 (by
+  [Tijmenvermeij](https://github.com/Tijmenvermeij)) had them from Oxford's documentation and
+  MTEX. `.ang` and `.ctf` write in the convention found (or set: `Solver.frame`, the selector
+  under Export, a project file) and name it in their headers; `stored_orientations()` gives a
+  file's own as stored. The readers keep them for Oxford, Bruker and EDAX h5ebsd and the `.ang`
+  beside a UP file. See [docs/conventions.md](docs/conventions.md).
+- **The detector orientation an Oxford file stores** (`Detector Orientation Euler`) is read
+  into the geometry, as #13 read it. Left out, the engine's orientations on an AZtec map lay
+  3.4° from AZtec's; with it, 0.10°.
+- **A File menu** in the app: opening and saving, the theme (dark, light, or as the system is
+  set), and **View conventions**, which draws each reference frame and pattern-centre
+  convention (the lab with the sample's axes over the engine's, and the pattern as stored with
+  where its pattern centre is measured from), the scan's own once identified among them.
+- **`.h5oina` export** of a scan opened from an Oxford acquisition (`solver.export("x.h5oina")`,
+  and a button under Export): the acquisition's groups, datasets and attributes copied (not its
+  patterns, nor spectra), its indexing replaced by these results in the convention found from
+  its own orientations, each cell's pattern centre in Oxford's convention, and the engine's
+  scores under `/zebsdsolve`. On an Oxford zirconium map its orientations lie a median 0.20°
+  from AZtec's, and its header's detector orientation is the geometry's. The file is written by the engine's own HDF5 writer, in both the browser and
+  Python, so neither needs an HDF5 library; the HDF5 reader now reads attributes. After #13 (by
+  [Tijmenvermeij](https://github.com/Tijmenvermeij)), which wrote it from the front ends.
+
 ### Fixed
+
+- `.ctf` and `.ang` wrote a hexagonal phase with the masters' crystal axes (X ∥ a), 30° about c
+  from Oxford's (X ∥ a\*), and in a sample frame turned 90° from Oxford's and Bruker's: on an
+  Oxford map of zirconium the `.ctf` lay a median 84° from AZtec's own orientations. A scan
+  that stores its maker's orientations now exports in the convention found from them (0.20°
+  there, with the file's detector orientation read); the header says which.
+- A Bruker h5ebsd whose patterns were clipped (`UnClippedPatternHeight` above `PatternHeight`)
+  has its PCY read as a fraction of the height before clipping, from the top: Esprit's own
+  per-pattern pattern centres agree with its tilts and step only so, and the patterns put
+  their pattern centre 2 px from it (9 px from the reading before). On a ferrite map the
+  misorientation to Esprit's orientations fell from 1.75° to 1.02°.
 
 - **Auto fit geometry**, asked for a projective plane, said projective when it took a tilt line
   and installed it as the affine plane it is (#10, by [Tijmenvermeij](https://github.com/Tijmenvermeij)).
@@ -14,6 +56,10 @@ notes.
   pattern centre for every cell (no steps, no plane) (#11, by [Tijmenvermeij](https://github.com/Tijmenvermeij)).
 - `cell_under(c, pc=…)` after a plane fit kept the plane and so ignored the centre given; it now
   takes the centre as `set_geometry` would (#12, by [Tijmenvermeij](https://github.com/Tijmenvermeij)).
+- In the browser, a GPU device lost during indexing failed a pending readback with a `mapAsync`
+  error and left the page working on a dead device. The app now says the device is lost, stops
+  GPU work and keeps the orientations already indexed for `.ang` and `.ctf` export; the log
+  records the adapter, bandwidth, batch and tile size (#14, by [Tijmenvermeij](https://github.com/Tijmenvermeij)).
 - A projective plane through source points that hardly move (a small region of interest) took
   its two slopes from their noise, the plane's other numbers making up for them where the points
   were and nowhere else: on a 3 × 3 region of the nickel example the source at the map's middle

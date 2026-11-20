@@ -532,6 +532,23 @@ def main():
         mk = ok_ph & (found == k)
         dt[mk] = np.degrees(s.disorientation(rt["quaternions"].reshape(-1, 4)[mk], toy["quaternions"].reshape(-1, 4)[mk], phase=k))
     grains = len(np.unique(toy["quaternions"].reshape(-1, 4), axis=0))
+    # the convention the exports write in, and finding it again from what they wrote: one planted
+    # (the sample's axes exchanged, active angles, GaN's crystal axes on a*), written to an .ang,
+    # read back and identified against the results; nickel and GaN told apart by their labels
+    planted = {"axes": [2, -1, 3], "active": True, "crystal": "x_astar_z_c"}
+    s.frame = planted
+    with tempfile.TemporaryDirectory() as d:
+        s.export(os.path.join(d, "planted.ang"))
+        header = [l for l in open(os.path.join(d, "planted.ang"), encoding="utf-8") if l.startswith("# FRAME:")]
+        cols_ang = np.loadtxt(os.path.join(d, "planted.ang"), comments="#", usecols=(0, 1, 2, 7), ndmin=2)
+    written = s.frame["text"]
+    s.frame = None
+    labels = np.where((cols_ang[:, :3] > 2 * np.pi + 0.01).any(1), -1, cols_ang[:, 3]).astype(np.int32)
+    pf = s.identify_frame(cols_ang[:, :3], labels)
+    check("a planted convention is found again from the .ang it was written in", pf["frame"]["axes"] == planted["axes"] and pf["frame"]["active"]
+          and pf["frame"]["crystal"] == "x_astar_z_c" and pf["installed"] and np.degrees(np.linalg.norm(pf["misorientation"])) < 0.01
+          and s.frame["axes"] == planted["axes"] and pf["matched"] == [1, 2] and header == [f"# FRAME: {written}\n"] and pf["median_deg"] < 0.01 and pf["runner_up_deg"] > 5,
+          f"{pf['frame']['text']}; median {pf['median_deg']:.4f}°, misorientation left {np.degrees(np.linalg.norm(pf['misorientation'])):.4f}°, the next convention {pf['runner_up_deg']:.1f}°, phases matched to labels {pf['matched']}")
     # counted electrons: whole numbers, 20 a pixel on average, as noisy as counts are
     raw = np.stack([s.pattern(c, processed=False) for c in range(0, 560, 7)])
     counted = np.array_equal(raw, np.round(raw)) and raw.min() >= 0 and abs(raw.mean() - 20) < 1.5
@@ -644,6 +661,14 @@ def main():
     check("the nickel scan indexes as kikuchipy refined it", np.median(dis) < 0.6 and (dis < 3).mean() > 0.97 and r["ncc"].mean() > 0.45,
           f"median {np.median(dis):.3f}° apart, within 3°: {100 * (dis < 3).mean():.1f} %, mean NCC {r['ncc'].mean():.3f}, {4125 / dt:.0f} patterns/s")
     check("progress is reported per batch", len(seen) == int(np.ceil(4125 / 256)) and seen[-1] == (4125, 4125))
+    # kikuchipy's orientations are in the frame this engine computes in: identified, they take
+    # its axes with next to no misorientation left, and nothing else comes close
+    kf = s.identify_frame(s.reduce(q_ref)[1], np.zeros(len(q_ref), np.int32))
+    s.frame = None
+    k_mis = np.degrees(np.linalg.norm(kf["misorientation"]))
+    check("kikuchipy's orientations are found in the engine's frame", kf["frame"]["axes"] == [1, 2, 3] and not kf["frame"]["active"] and kf["installed"]
+          and k_mis < 0.3 and kf["median_deg"] < 0.6 and kf["runner_up_deg"] > 10,
+          f"{kf['frame']['text']}; median {kf['median_deg']:.3f}°, misorientation left {k_mis:.3f}° (changing {np.degrees(np.linalg.norm(kf['misorientation_rows'])):.3f}° over the rows, {np.degrees(np.linalg.norm(kf['misorientation_cols'])):.3f}° over the columns), the next convention {kf['runner_up_deg']:.1f}°")
     check("nearly every match is accepted", (r["sweep"] >= 0).mean() > 0.98 and np.median(r["z"]) > 30, f"{100 * (r['sweep'] >= 0).mean():.1f} % at z ≥ {s.settings['accept_z']:g}, median z {np.median(r['z']):.1f}")
     # acceptance: one threshold for the scan. Chance is measured once, on a sample; z is the
     # NMI on that scale whatever the batch; and an absolute NMI can be the threshold instead

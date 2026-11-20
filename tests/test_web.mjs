@@ -381,6 +381,69 @@ try {
   check("the orientations are the ones kikuchipy refined", idx.median < 0.6 && idx.within3 > 0.97 && idx.ncc > 0.45, `median ${idx.median.toFixed(3)}° apart, within 3°: ${(100 * idx.within3).toFixed(1)} %, mean NCC ${idx.ncc.toFixed(3)}`);
   check("the export has every cell", idx.ang === 4125, `${idx.ang} lines`);
   check("the map says what its colours mean", idx.key.w > 20 && idx.key.names === "001 101 111", `an inverse pole figure key ${idx.key.w} px wide, corners ${idx.key.names}`);
+  // the frame the exports write in: the engine's own, named beside the export buttons (the
+  // example stores no orientations of its own to find another); kikuchipy's orientations found
+  // in it; one set by hand written into the .ang and found again from it, no misorientation left
+  const fr = await evaluate(`
+    const ze = window.ze;
+    const readout0 = document.getElementById("frame-readout").textContent;
+    const fileOff = document.getElementById("frame-pick").options[1].disabled;
+    const ref = new Float32Array(await (await fetch("./presets/nickel/reference_quaternions.f32")).arrayBuffer());
+    const euler = [], zeros = [];
+    for (let i = 0; i < ref.length / 4; i++) { euler.push(...ze.reduced(0, ref.subarray(4 * i, 4 * i + 4)).euler); zeros.push(0); }
+    const kik = await ze.identifyFrame(euler, zeros);
+    ze.frame = { axes: [2, -1, 3], active: true, crystal: "x_a_z_cstar" };
+    const text = new TextDecoder().decode(ze.exportText("ang"));
+    const line = text.split("\\n").find((l) => l.startsWith("# FRAME:"));
+    const rows = text.split("\\n").filter((l) => l && !l.startsWith("#")).map((l) => l.trim().split(/\\s+/).map(Number));
+    ze.frame = null;
+    const back = await ze.identifyFrame(rows.flatMap((r) => r.slice(0, 3)), rows.map((r) => (r[0] > 6.3 ? -1 : r[7])));
+    const pick = document.getElementById("frame-pick");
+    pick.value = "engine";
+    pick.dispatchEvent(new Event("change"));
+    // an .h5oina is made only from an Oxford acquisition: not from this one
+    let h5oina = "";
+    try { await ze.exportH5oina(); } catch (e) { h5oina = String(e.message || e); }
+    return { readout0, fileOff, kik: { axes: kik.frame.axes, median: kik.median_deg, mis: Math.hypot(...kik.misorientation) * 180 / Math.PI }, line, back: { axes: back.frame.axes, active: back.frame.active, turn: "turn" in back.frame, mis: Math.hypot(...back.misorientation), median: back.median_deg }, after: ze.frame.text,
+      h5oina, h5oinaOff: document.getElementById("btn-h5oina").disabled };`);
+  check("the exports' frame is named, found from orientations, and written into the .ang",
+    /^frameX \+x Y \+y Z \+z, passive, X\|\|a Z\|\|c\*$/.test(fr.readout0) && fr.fileOff && fr.kik.axes.join() === "1,2,3" && fr.kik.median < 0.6 && fr.kik.mis < 0.3
+    && fr.line === "# FRAME: X +y Y -x Z +z, active, X||a Z||c*"
+    && fr.back.axes.join() === "2,-1,3" && fr.back.active && !fr.back.turn && fr.back.mis < 1e-4 && fr.back.median < 0.01 && fr.after === "X +x Y +y Z +z, passive, X||a Z||c*"
+    && /NotAnOxfordAcquisition/.test(fr.h5oina) && fr.h5oinaOff, JSON.stringify(fr));
+  // the File menu: its items, the theme (the chrome light, the wells as they were), and the
+  // conventions drawn, the scan's own among them
+  const menu = await evaluate(`
+    const btn = document.getElementById("btn-file"), list = document.getElementById("file-menu-list");
+    btn.click();
+    await new Promise((r) => setTimeout(r, 50));
+    const opened = !list.hidden && btn.getAttribute("aria-expanded") === "true";
+    const items = [...list.querySelectorAll('[role="menuitem"]')].map((b) => b.textContent.trim());
+    document.querySelector('#theme-pick [data-theme="light"]').click();
+    const light = document.documentElement.dataset.theme;
+    const bg = (el) => getComputedStyle(el).backgroundColor;
+    const lit = { body: bg(document.body), rail: bg(document.getElementById("rail")), well: bg(document.getElementById("map-well")) };
+    document.querySelector('#theme-pick [data-theme="dark"]').click();
+    const dark = document.documentElement.dataset.theme, darkBody = bg(document.body);
+    document.getElementById("btn-conventions").click();
+    await new Promise((r) => setTimeout(r, 100));
+    const dlg = document.getElementById("conv-dialog");
+    const out = { opened, items, light, lit, dark, darkBody, closed: list.hidden, open: dlg.open, entries: [...document.querySelectorAll("#conv-list button")].map((b) => b.dataset.key),
+      first: document.querySelector('#conv-list [aria-selected="true"]').dataset.key, scanKv: document.getElementById("conv-kv").innerText };
+    document.querySelector('#conv-list [data-key="oxford"]').click();
+    out.oxKv = document.getElementById("conv-kv").innerText;
+    out.axes = [...document.querySelectorAll("#conv-lab .cv-axis")].length;
+    out.labels = [...document.querySelectorAll("#conv-lab .cv-label")].map((e) => e.textContent).filter((s) => /^[XYZ]$/.test(s)).join("");
+    dlg.close();
+    out.after = dlg.open;
+    return out;`);
+  check("the File menu opens, sets the theme and draws the conventions",
+    menu.opened && menu.items.join("|") === "Open scan…|Open the example|Add master pattern…|Save project .json|View conventions…"
+    && menu.light === "light" && menu.lit.body === "rgb(243, 243, 245)" && menu.lit.rail === "rgb(233, 233, 236)" && menu.lit.well === "rgb(10, 10, 11)"
+    && menu.dark === "dark" && menu.darkBody === "rgb(14, 14, 16)" && menu.closed && menu.open && !menu.after
+    && menu.entries.join() === "scan,engine,oxford,bruker,edax,emsoft" && menu.first === "scan" && /not identified/.test(menu.scanKv) && /from top ÷ height/.test(menu.scanKv)
+    && /X \+y · Y −x · Z \+z/.test(menu.oxKv) && /from bottom ÷ width/.test(menu.oxKv) && /X ∥ a\*, Z ∥ c/.test(menu.oxKv) && menu.axes === 3 && menu.labels === "XYZ",
+    JSON.stringify(menu));
   // another colouring from the Index tab: the map and its key follow it
   const keyed = await evaluate(`
     const before = window.ze.map("ipf_z").join().length;
@@ -821,7 +884,7 @@ try {
     select(scanInput, up);
     for (let i = 0; i < 300 && !(window.ze.scan?.rows === 1 && idle()); i++) await wait(100);
     const raw = window.ze.scan;
-    const offered = !!document.getElementById("btn-add-ang") && !document.querySelector("dialog");
+    const offered = !!document.getElementById("btn-add-ang") && !document.querySelector("dialog[open]");
     select(document.getElementById("file-ang"), ang);
     for (let i = 0; i < 300 && !(window.ze.scan?.rows === 2 && idle()); i++) await wait(100);
     const paired = { scan: window.ze.scan, overview: await window.ze.storedOverview() };

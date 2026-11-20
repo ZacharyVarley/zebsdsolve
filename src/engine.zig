@@ -36,6 +36,7 @@ const pca_mod = @import("pca.zig");
 const nlpar_mod = @import("nlpar.zig");
 const crystal_mod = @import("sim/crystal.zig");
 const simulate_mod = @import("simulate.zig");
+const convention_mod = @import("convention.zig");
 
 const Gpu = gpu_mod.Gpu;
 const Buf = gpu_mod.Buf;
@@ -523,6 +524,11 @@ pub const Engine = struct {
     /// that a fit is a function of the scan, the settings and what was given, not of the fits
     /// run before it.
     geo_given: Geometry = .{},
+    /// The frame the exports write orientations in (convention.zig): the engine's own until
+    /// one is identified from the maker's own orientations or set; a new scan resets it.
+    convention: convention_mod.Frame = .{},
+    /// an export made by a call that asked its size, for the call that takes it (exports.zig)
+    export_held: []u8 = &.{},
     /// the source points the last plane fit measured, a fit pattern each (planefit.plane)
     plane_points: std.ArrayList(@import("planefit.zig").PlanePoint) = .empty,
     /// the crystal a master pattern is simulated for, and the last simulation (simulate.zig)
@@ -727,6 +733,9 @@ pub const Engine = struct {
             .none => {},
         }
         self.source = .none;
+        self.convention = .{};
+        self.gpa.free(self.export_held);
+        self.export_held = &.{};
         self.tuneFree();
         self.cache.deinit(self.gpa);
         self.ahead = &.{};
@@ -746,6 +755,40 @@ pub const Engine = struct {
         self.avg_n = 0;
         self.bg_key = .{ null, null };
         self.told_no_background = false;
+    }
+
+    /// The frame the maker's orientations in `ref` are in (with none, the scan file's own),
+    /// found against this engine's results (convention.identify). The exports take it when it
+    /// was told clearly: its median under 5°, and the best other convention's at least twice
+    /// that and 5° more. The misorientation left is reported, never applied.
+    pub fn identifyFrame(self: *Engine, ref: ?convention_mod.Reference) !struct { found: convention_mod.Found, installed: bool } {
+        if (self.phases.items.len == 0) return error.NoPhases;
+        var stored: ?scan_mod.Stored = null;
+        defer if (stored) |*st| st.deinit(self.gpa);
+        const r = ref orelse blk: {
+            const s = switch (self.source) {
+                .file => |s| s,
+                else => return error.NoStoredOrientations,
+            };
+            stored = (try s.storedOrientations(self.gpa)) orelse return error.NoStoredOrientations;
+            break :blk convention_mod.Reference{ .euler = stored.?.euler, .phase = stored.?.phase };
+        };
+        var views: [convention_mod.max_phases]convention_mod.PhaseView = undefined;
+        const n_ph = @min(self.phases.items.len, convention_mod.max_phases);
+        for (self.phases.items[0..n_ph], 0..) |*p, i| views[i] = .{ .rotations = p.master.rotations(), .lattice = p.master.lattice };
+        const cols: usize = if (self.info()) |i| i.cols else |_| 0;
+        const found = try convention_mod.identify(self.gpa, self.res.quat, self.res.phase, cols, r, views[0..n_ph]);
+        const holds = found.median_deg < 5 and found.runner_up_deg >= 2 * found.median_deg + 5;
+        if (holds) self.convention = found.frame;
+        var line: [256]u8 = undefined;
+        var w = std.Io.Writer.fixed(&line);
+        found.frame.describe(&w) catch {};
+        const deg = std.math.radiansToDegrees;
+        const m = found.misorientation;
+        const th = rot.norm(m);
+        const u = if (th > 0) rot.scale(m, 1 / th) else rot.Vec3{ 0, 0, 0 };
+        self.events.log("frame of the stored orientations: {s}; {d} cells, median {d:.2}°, {d:.0} % within 2°, {d:.1}° under the next convention{s}; misorientation left {d:.2}° about ({d:.3}, {d:.3}, {d:.3}) (x, y, z: toward the detector, the tilt axis, out of the surface), changing {d:.2}° from the first row to the last and {d:.2}° from the first column to the last", .{ w.buffered(), found.cells, found.median_deg, 100 * found.within, found.runner_up_deg, if (holds) "; the exports take it" else "; not told clearly, the exports keep theirs", deg(th), u[0], u[1], u[2], deg(rot.norm(found.misorientation_rows)), deg(rot.norm(found.misorientation_cols)) });
+        return .{ .found = found, .installed = holds };
     }
 
     fn clearFit(self: *Engine) void {
@@ -777,6 +820,7 @@ pub const Engine = struct {
         try self.adoptInfo(s.info);
         self.events.log("opened {s}: {d} × {d} patterns of {d} × {d}", .{ s.formatName(), s.info.rows, s.info.cols, s.info.pat_h, s.info.pat_w });
         if (s.info.pc_note.len != 0) self.events.log("{s}", .{s.info.pc_note});
+        if (!std.math.isNan(s.info.detector_rot[0])) self.events.log("the detector's orientation as the file stores it: {d:.2}° from the nominal one", .{std.math.radiansToDegrees(rot.norm(s.info.detector_rot))});
     }
 
     /// Take patterns from memory: rows · cols patterns of h × w pixels, row-major, copied.
@@ -813,6 +857,7 @@ pub const Engine = struct {
             g.pc = si.pc;
             g.rot = .{ 0, 0, 0 };
         }
+        if (!std.math.isNan(si.detector_rot[0])) g.rot = si.detector_rot;
         if (!std.math.isNan(si.sample_tilt_deg)) g.sample_tilt_deg = si.sample_tilt_deg;
         if (!std.math.isNan(si.detector_tilt_deg)) g.detector_tilt_deg = si.detector_tilt_deg;
         g.px_um = self.defaultPx();

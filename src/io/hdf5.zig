@@ -10,7 +10,7 @@
 //! tables (the default of every HDF5 writer) or as compact link messages; fixed-point, floating
 //! point, fixed and variable-length string types; compact, contiguous and chunked layouts
 //! (version 1 B-tree; version 4 single-chunk and implicit indexes); the deflate, shuffle,
-//! Fletcher-32 and LZF filters.
+//! Fletcher-32 and LZF filters; attributes of numbers and strings in an object's header.
 //! Not covered, each reported by name: dense groups (fractal heaps), the fixed and extensible
 //! array and version 2 B-tree chunk indexes of files written with libver="latest", external
 //! links and other filters.
@@ -106,6 +106,21 @@ pub const Dataset = struct {
         var n: u64 = 1;
         for (self.chunk[0..self.rank]) |d| n *= d;
         return n;
+    }
+};
+
+/// An object's attribute (Hdf5.attributes): its type, shape and value as stored bytes.
+pub const Attribute = struct {
+    name: []u8,
+    dtype: Dtype,
+    rank: u8 = 0,
+    dims: [MAX_RANK]u64 = @splat(1),
+    data: []u8,
+
+    pub fn deinit(self: *Attribute, gpa: Allocator) void {
+        gpa.free(self.name);
+        gpa.free(self.data);
+        self.* = undefined;
     }
 };
 
@@ -1062,15 +1077,105 @@ pub const Hdf5 = struct {
                 while (n > 0 and buf[n - 1] == ' ') n -= 1;
                 return buf[0..n];
             },
-            .vlen_string => {
-                // length, global heap collection address, object index
-                const len = std.mem.readInt(u32, raw[0..4], .little);
-                const coll = std.mem.readVarInt(u64, raw[4..][0..self.so], .little);
-                const idx = std.mem.readInt(u32, raw[4 + self.so ..][0..4], .little);
-                return self.heapObject(coll, idx, len, buf);
-            },
+            .vlen_string => return self.vlenString(raw, buf),
             else => return error.NotAString,
         }
+    }
+
+    /// A variable-length string from its stored element (length, global heap collection
+    /// address, object index) into `buf`.
+    pub fn vlenString(self: *Hdf5, element: []const u8, buf: []u8) ![]u8 {
+        if (element.len < 8 + @as(usize, self.so)) return error.BadHdf5;
+        const len = std.mem.readInt(u32, element[0..4], .little);
+        if (len == 0) return buf[0..0];
+        const coll = std.mem.readVarInt(u64, element[4..][0..self.so], .little);
+        const idx = std.mem.readInt(u32, element[4 + self.so ..][0..4], .little);
+        return self.heapObject(coll, idx, len, buf);
+    }
+
+    // ── attributes ──
+
+    /// The attributes in the object header at `addr` whose values are numbers or strings, as
+    /// stored (a variable-length string read out of the global heap into a fixed-length one, as
+    /// long as its longest element). Attributes kept in dense storage, and of other types, are
+    /// left out. The caller frees each and the slice.
+    pub fn attributes(self: *Hdf5, addr: u64) ![]Attribute {
+        const msgs = try self.messages(addr);
+        defer self.gpa.free(msgs);
+        var out: std.ArrayList(Attribute) = .empty;
+        errdefer {
+            for (out.items) |*a| a.deinit(self.gpa);
+            out.deinit(self.gpa);
+        }
+        for (msgs) |m| {
+            if (m.type != 0x0c) continue;
+            const a = self.attribute(m.at) catch continue;
+            if (a) |x| try out.append(self.gpa, x);
+        }
+        return out.toOwnedSlice(self.gpa);
+    }
+
+    fn attribute(self: *Hdf5, at: u64) !?Attribute {
+        const version = try self.f.int(u8, at);
+        if (version < 1 or version > 3) return null;
+        const name_size = try self.f.int(u16, at + 2);
+        const type_size = try self.f.int(u16, at + 4);
+        const space_size = try self.f.int(u16, at + 6);
+        // (version 1 pads the name, the type and the space to 8 bytes; 3 adds the name's encoding)
+        const span = struct {
+            fn f(v: u8, n: u64) u64 {
+                return if (v == 1) std.mem.alignForward(u64, n, 8) else n;
+            }
+        }.f;
+        const name_at = at + 8 + @as(u64, if (version == 3) 1 else 0);
+        const type_at = name_at + span(version, name_size);
+        const space_at = type_at + span(version, type_size);
+        const data_at = space_at + span(version, space_size);
+        var dtype = try self.datatype(type_at);
+        switch (dtype.class) {
+            .uint, .int, .float, .string, .vlen_string => {},
+            .other => return null,
+        }
+        const sv = try self.f.int(u8, space_at);
+        const rank = try self.f.int(u8, space_at + 1);
+        if (rank > MAX_RANK) return null;
+        var dims: [MAX_RANK]u64 = @splat(1);
+        var count: u64 = 1;
+        const dp = space_at + @as(u64, if (sv == 1) 8 else 4);
+        for (0..rank) |i| {
+            dims[i] = try self.length(dp + i * self.sl);
+            count *= dims[i];
+        }
+        if (sv == 2 and try self.f.int(u8, space_at + 3) == 2) count = 0;
+        if (count > 1 << 20 or dtype.size == 0) return null;
+        const gpa = self.gpa;
+        const name = try gpa.alloc(u8, @max(name_size, 1) - 1);
+        errdefer gpa.free(name);
+        try self.f.read(name_at, name);
+        const n: usize = @intCast(count);
+        const raw = try gpa.alloc(u8, n * dtype.size);
+        defer gpa.free(raw);
+        try self.f.read(data_at, raw);
+        var data: []u8 = undefined;
+        if (dtype.class == .vlen_string) {
+            var strs: std.ArrayList([]u8) = .empty;
+            defer {
+                for (strs.items) |s| gpa.free(s);
+                strs.deinit(gpa);
+            }
+            var longest: usize = 1;
+            var buf: [4096]u8 = undefined;
+            for (0..n) |i| {
+                const s = try self.vlenString(raw[i * dtype.size ..][0..dtype.size], &buf);
+                try strs.append(gpa, try gpa.dupe(u8, s));
+                longest = @max(longest, s.len);
+            }
+            data = try gpa.alloc(u8, n * longest);
+            @memset(data, 0);
+            for (strs.items, 0..) |s, i| @memcpy(data[i * longest ..][0..s.len], s);
+            dtype = .{ .class = .string, .size = @intCast(longest) };
+        } else data = try gpa.dupe(u8, raw);
+        return .{ .name = name, .dtype = dtype, .rank = rank, .dims = dims, .data = data };
     }
 
     fn heapObject(self: *Hdf5, coll: u64, index: u32, len: u32, buf: []u8) ![]u8 {

@@ -127,6 +127,17 @@ pub fn det(m: Mat3) f64 {
     return m[0] * (m[4] * m[8] - m[5] * m[7]) - m[1] * (m[3] * m[8] - m[5] * m[6]) + m[2] * (m[3] * m[7] - m[4] * m[6]);
 }
 
+/// The inverse of a 3 × 3 matrix (row-major), by its adjugate; NaN where it is singular.
+pub fn inverse(m: Mat3) Mat3 {
+    const d = det(m);
+    const k = if (d != 0) 1 / d else std.math.nan(f64);
+    return .{
+        (m[4] * m[8] - m[5] * m[7]) * k, (m[2] * m[7] - m[1] * m[8]) * k, (m[1] * m[5] - m[2] * m[4]) * k,
+        (m[5] * m[6] - m[3] * m[8]) * k, (m[0] * m[8] - m[2] * m[6]) * k, (m[2] * m[3] - m[0] * m[5]) * k,
+        (m[3] * m[7] - m[4] * m[6]) * k, (m[1] * m[6] - m[0] * m[7]) * k, (m[0] * m[4] - m[1] * m[3]) * k,
+    };
+}
+
 /// Bunge (phi1, Phi, phi2) → quaternion.
 pub fn fromBunge(e: Vec3) Quat {
     const sigma = 0.5 * (e[0] + e[2]);

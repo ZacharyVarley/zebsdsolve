@@ -1,0 +1,70 @@
+# Reference frames: conventions as data, found from the data
+
+An orientation is a rotation between a sample's frame and a crystal's. Whoever writes one chooses both frames and how the rotation is written, and the choices differ between packages, between versions of one package, and between settings of one version. zebsdsolve computes in one choice, kikuchipy's (*the engine's frame*). It is not privileged: it is one convention among the others, described in the same terms as all of them. This note says what those terms are, how the engine finds which convention a file is in, what is left between a maker's orientations and the engine's once it has, and what was measured. In the app, File › View conventions draws each one.
+
+## What a convention is
+
+Three independent choices, each a small discrete set. None is named after a maker.
+
+| Choice | Values | |
+|---|---|---|
+| Sample axes | which of the engine's axes, with which sign, each of X, Y and Z is: the 24 right-handed ways | `axes`, e.g. `[2, -1, 3]`: X is +y, Y is −x, Z is +z |
+| The rotation's sense | passive (the Bunge angles take the sample's axes to the crystal's, as every EBSD file reads them) or active (the inverse) | `active` |
+| Crystal axes on the lattice | X ∥ a, Z ∥ c\* (the masters' own frame: EMsoft's and ebsdsim's); X ∥ a\*, Z ∥ c; Y ∥ b, Z ∥ c\*; Y ∥ b\*, Z ∥ c | `crystal` |
+
+The engine's frame, by what it is tied to: x on the sample's surface toward the detector, y along the tilt axis in the direction the pattern's columns run, z out of the surface (`src/geometry.zig`); its crystal axes are each master's own. Its convention is `axes [1, 2, 3]`, passive, X ∥ a, Z ∥ c\*.
+
+On an orthogonal cell the four crystal conventions agree. On a hexagonal one there are two: X ∥ a\* (equivalently Y ∥ b) is X ∥ a rotated 30° about c. On a monoclinic cell X ∥ a\* is X ∥ a rotated by β − 90° about b. The rotations between them are computed from each phase's cell, so a convention applies to any lattice without a table of lattice systems.
+
+## Finding the convention a file is in
+
+A file that stores its maker's orientations says which convention they are in, whatever its documentation claims. `identify_frame()` (the app does it after indexing) compares them with the engine's:
+
+1. The file's phase labels are matched to the engine's phases by where they agree on the map (the label each phase meets most), not by names or numbers.
+2. Every convention (24 sample axes, two senses, the crystal axes that differ for some phase in play) reads the file's orientations into the engine's frame, and each cell's angle to the engine's orientation is taken under that phase's own symmetry (the rotations its master obeys). A convention scores each phase's median angle, averaged over the phases, so a cubic phase, which cannot tell crystal axes apart, does not outvote a hexagonal one that can.
+3. The result says how well it holds (the median, the fraction of cells within 2°) and how clearly it was told (the median under the best other convention). The exports take it when its median is under 5° and the best other's is at least twice that and 5° more.
+
+Readers only read: where each format stores its angles, in what unit, and how it marks a cell it did not index (`Scan.storedOrientations`). Oxford's `Euler` (radians, phase 0 not indexed), Bruker's `phi1`, `PHI`, `phi2` (degrees, phase 0 not indexed), EDAX's `phi1` or `Phi1`, `Phi`, `phi2` or `Phi2` (radians, 4π not indexed), and an `.ang` beside a UP file. `stored_orientations()` gives them as stored. Orientations from anywhere else can be passed in: `identify_frame(euler, phase)`.
+
+## What is left: the misorientation
+
+With the convention found, a maker's orientations and the engine's still differ by a misorientation, and it is not part of any convention. The patterns fix the crystal against the detector; the sample frame follows from where the detector is against the sample, and from where the pattern centre is. Two programs that place either differently differ by the rotation between their placements: a detector orientation one of them did not use, a pattern centre measured against another height, a pattern centre held fixed while the beam moved. Each indexes with its own errors besides. Nothing in the orientations says which side is right, so the engine never applies it. `identify_frame()` measures it on the cells within a few degrees, as a rotation of the engine's sample axes, and fits it by least squares as a plane over the map: `misorientation` (at the map's middle), `misorientation_rows` and `misorientation_cols` (how much it changes from the first row to the last and from the first column to the last). One that changes over the map says the two place the pattern centre differently as the beam moves; one that does not, that their detector orientations or pattern centres differ, or that either indexed less well.
+
+## Measured
+
+Three acquisitions, one from each maker's software (not in `testdata/`), each indexed here with a master simulated from its phase's cell, CLAHE on, against the orientations the maker's software stored:
+
+| Acquisition | Convention | Median | Misorientation | Over the rows | Next convention |
+|---|---|---|---|---|---|
+| Oxford AZtec `.h5oina`: zirconium with a hydride, 98 × 100, scan rotated a half turn; 9208 zirconium cells | X +y, Y −x, Z +z; passive; X ∥ a\*, Z ∥ c | 0.20° | 0.10° | 0.17° | 24.8° |
+| Bruker Esprit h5ebsd: ferrite, 48 × 64; 3071 cells | X +y, Y −x, Z +z; passive | 1.16° | 1.02° | 0.26° | 12.0° |
+| EDAX OIM h5ebsd: a nickel superalloy, 501 × 601 at 2 µm; all rows of columns 250–349, 50 100 cells | X +x, Y +y, Z +z; passive | 0.76° | 0.34° | 1.96° | 34.9° |
+| kikuchipy's refined orientations of the nickel example (`testdata/`) | X +x, Y +y, Z +z; passive | 0.32° | 0.08° | 0.11° | 21.9° |
+
+So EDAX's sample frame is the engine's, Oxford's and Bruker's are it rotated 90° about the surface normal, and Oxford writes hexagonal crystals with X ∥ a\*. What was left over was looked into, cause by cause:
+
+- **Oxford: the detector orientation the file stores.** Its `Detector Orientation Euler` (φ1 −0.94°, Φ 93.26°, φ2 −0.08°) lies 3.40° from the nominal (0, 90°, 0). Its axes are those its pattern centre is measured in (x along the pattern's columns, y up it, z the normal), so the reader turns it into the geometry's detector rotation directly. Without it the misorientation was 3.43°, 3.28° of it about the tilt axis and −0.99° about the normal, the stored orientation's components; with it, 0.10°. The file's per-pattern pattern centres say the same independently: as the beam moves, they move as a detector 86.73° from the scan's y and 0.9° in azimuth would see it (the Euler angles say 86.74° and 0.94°).
+- **Bruker: which height PCY is a fraction of.** The diagram Esprit stores in the file (`Coordinate Systems`) gives PCY and DD both as fractions of the pattern's height. The patterns were clipped (`TopClip` 0.04: 576 of 600 rows), and Esprit's own per-pattern pattern centres move with the beam as its tilts (70°, 4°: 24° between the scan's y and the detector) and its step say only when PCY is read as a fraction of the height before clipping and DD of the stored height (23.96°, 0.9997 of the step; read as the diagram says, 24.85° and 0.967). Each pattern fitted by itself puts the pattern centre 172.2 px from the top of the stored pattern: 2 px from PCY so read, 9 px from PCY read on the stored height. Read so, the misorientation falls from 1.75° to 1.02°. What remains, about the tilt axis, is the size of Esprit's own pattern centre's difference from the patterns' (7 px across) and of Hough indexing's errors; with the patterns' own pattern centre it is 0.84°.
+- **EDAX: the pattern centre held as the beam moves down the rows.** On a map 1.2 mm across, the beam's travel moves the pattern centre 4 px over 120. Region by region, the patterns put their pattern centre where the engine's model of the beam's travel does, to 0.6 px. OIM's orientations follow the travel across the columns but not down the rows: the misorientation changes 1.96° about the tilt axis from the first row to the last, as y\* and z\* held at their stored values would have it, and holding them so in each region leaves 0.3° everywhere.
+- **Not the cause:** where in a pixel the pattern centre is measured from (half a pixel is 0.05° here), the reduction of the patterns (1.73°, 1.75°, 1.76° at binning 4, 2, 1), CLAHE (the same with it off), the engine's scan directions and reference cell (both makers' per-pattern pattern centres move with the beam as the engine's do, and their mean is the map's middle), and the positions a file labels its cells with (Bruker's `X SAMPLE` runs against the beam's column index and starts a step in; the engine reads the cells by their indices). The misorientation is the same, to 0.1° to 0.2°, for every group of crystal orientations.
+
+The tests plant conventions and misorientations rather than trust these files: `tests/test_stored_orientations.py` writes a toy scan of nickel and GaN laid out as each maker writes h5ebsd, its orientations in a different convention and misoriented by a different rotation, both computed in the test from the definitions above (not with the engine's code), and checks that each convention is found and each misorientation measured; and that an Oxford detector orientation and a clipped Bruker pattern centre are read. `tests/test_api.py` writes a planted convention into an `.ang` and finds it again, and finds kikuchipy's orientations in the engine's frame.
+
+## What the exports do
+
+`.ang` and `.ctf` write orientations in the engine's convention: its own frame until one is identified or set (`Solver.frame`, the app's selector under Export, or a project file's `frame`). Their headers name it (`# FRAME:` in the `.ang`, the `Prj` line of the `.ctf`). A new scan starts from the engine's frame. A convention measured on one scan of an instrument can be carried to the next in the project file. No export applies a misorientation: they write the engine's orientations, in the convention.
+
+An `.h5oina` is made only from an Oxford acquisition, and only in a convention other than the engine's: what its angles mean is the acquisition's, so the export identifies the convention from the acquisition's own orientations when none is set, and refuses when they do not tell it. The file is new, written by the engine's own HDF5 writer (`src/io/hdf5_write.zig`: superblock version 2, version 2 object headers, compact groups, contiguous data), not the acquisition edited: every group, dataset and attribute of the acquisition is copied through the engine's reader except the patterns and anything else of more than 64 values a map cell (spectra), and the indexing (`Euler`, `Phase`, `Error`, `Mean Angular Deviation`, `Bands`, the pattern-centre fields) is written anew: the engine's orientations in the convention, its phases numbered as the acquisition numbers them (new ones added), each cell's pattern centre as the geometry has the beam there, in Oxford's convention, and the header's `Detector Orientation Euler` as the geometry has the detector. The engine's own scores, the convention and what was left out go under `/zebsdsolve`. On the Oxford map above, the file's orientations lie a median 0.20° from AZtec's; the header's 60 datasets, their units and the electron images come through.
+
+## Not done
+
+- Pattern-centre conventions are still converted by each reader (Bruker's as found above). They fit the same scheme as the frames: which corner, which way y runs, which height each coordinate is a fraction of, and whether the pattern centre follows the beam, each checked against the engine's own fitted pattern centre and the maker's per-pattern pattern centres where a file stores them.
+- How the beam's travel follows the map's index (the scan signs, a maker's scan rotation) is set, or measured by the plane on maps wide enough to show it; it is not yet part of a convention.
+- A scan whose file stores no orientations exports in the engine's frame unless a convention is set; the engine does not guess one from the file's maker.
+- Oxford's detector orientation is read when it lies within 15° of the nominal (0, 90°, 0), as on the one acquisition it was checked on; a file whose angles lie further, or whose specimen orientation is not zero, keeps the nominal detector, and the misorientation says how far that is off.
+- The `.h5oina` copies the acquisition's values, not its storage: variable-length strings become fixed-length ones and compressed or chunked datasets are written contiguous; datasets of compound or reference types are left out (and listed under `/zebsdsolve`), attributes kept in dense storage are left out, and soft and external links are not followed.
+- Conventions outside the vocabulary (an Euler set other than Bunge's, a left-handed frame) are not found; the result's median and the next convention's say when the best one does not fit.
+
+## In the code
+
+`src/convention.zig` (the vocabulary, the conversions both ways, `identify` and the misorientation), `Scan.storedOrientations` and the readers' geometry (`oxfordDetectorRot`, Bruker's clipped pattern centre) in `src/scan.zig` and the `.ang` companion in `src/ang.zig`, `Engine.convention` and `identifyFrame` in `src/engine.zig`, the writers in `src/output.zig` and `src/h5oina.zig` (on `src/io/hdf5_write.zig`); `ze_export_h5oina`, `ze_identify_frame`, `ze_frame`, `ze_set_frame` and `ze_stored_orientations` in `src/exports.zig`; `identify_frame`, `frame` and `stored_orientations` in Python, `identifyFrame` and `frame` in `web/zebsdsolve.js`; the drawings in `web/app/js/conventions.js`.

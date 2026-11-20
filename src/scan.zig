@@ -16,6 +16,7 @@ const std = @import("std");
 const file_mod = @import("io/file.zig");
 const File = file_mod.File;
 const hdf5 = @import("io/hdf5.zig");
+const rot = @import("rot.zig");
 
 const Allocator = std.mem.Allocator;
 
@@ -57,6 +58,71 @@ pub const Info = struct {
     /// its values where it stores one per map cell
     pc: [3]f64 = @splat(std.math.nan(f64)),
     pc_note: []const u8 = "",
+    /// the detector's rotation from its nominal attitude where the file stores its orientation,
+    /// as geometry.rot has it (rotation vector, radians, about the detector's row and column
+    /// directions and its normal)
+    detector_rot: [3]f64 = @splat(std.math.nan(f64)),
+};
+
+/// Oxford's nominal detector orientation, (0, 90°, 0): Bunge angles of the detector's axes (x
+/// along the pattern's columns, y up it, z its normal toward the sample, the axes its pattern
+/// centre is measured in) in the sample's.
+const oxford_nominal: rot.Vec3 = .{ 0, std.math.pi / 2.0, 0 };
+
+/// The rotation (active, row-major) Bunge angles (φ1, Φ, φ2) describe: Rz(φ1) Rx(Φ) Rz(φ2).
+fn bungeMatrix(e: rot.Vec3) rot.Mat3 {
+    const c1 = @cos(e[0]);
+    const s1 = @sin(e[0]);
+    const c = @cos(e[1]);
+    const s = @sin(e[1]);
+    const c2 = @cos(e[2]);
+    const s2 = @sin(e[2]);
+    return .{
+        c1 * c2 - s1 * c * s2, -c1 * s2 - s1 * c * c2, s1 * s,
+        s1 * c2 + c1 * c * s2, -s1 * s2 + c1 * c * c2, -c1 * s,
+        s * s2,                s * c2,                 c,
+    };
+}
+
+/// Oxford's `Detector Orientation Euler` as geometry.rot: the detector's rotation away from the
+/// nominal (0, 90°, 0), in its own axes. Oxford's detector axes are those its pattern centre is
+/// measured in (x along the columns, y up the pattern); the engine's are the row direction, the
+/// column direction and the normal, so (x, y, z) Oxford is (column, −row, normal) here. Null
+/// when the angles lie more than 15° from the nominal: then they do not say what this reading
+/// takes them to. (Checked on an AZtec acquisition: its orientations and the engine's then
+/// agree to 0.12°; with the detector at the nominal attitude, 3.4°.)
+pub fn oxfordDetectorRot(e: rot.Vec3) ?rot.Vec3 {
+    for (e) |v| if (!std.math.isFinite(v)) return null;
+    const b = rot.matMul(rot.transpose(bungeMatrix(oxford_nominal)), bungeMatrix(e));
+    const v = rot.so3Log(rot.fromMat(b));
+    if (rot.norm(v) > std.math.degreesToRadians(15.0)) return null;
+    return .{ -v[1], v[0], v[2] };
+}
+
+/// The inverse of `oxfordDetectorRot`: geometry.rot as Oxford's Bunge angles (φ1 and φ2 in
+/// [0, 2π)).
+pub fn oxfordDetectorEuler(r: rot.Vec3) rot.Vec3 {
+    const v: rot.Vec3 = .{ r[1], -r[0], r[2] };
+    const m = rot.matMul(bungeMatrix(oxford_nominal), rot.toMat(rot.so3Exp(v)));
+    const tau = 2 * std.math.pi;
+    const phi = std.math.acos(std.math.clamp(m[8], -1, 1));
+    var p1 = std.math.atan2(m[2], -m[5]);
+    var p2 = std.math.atan2(m[6], m[7]);
+    if (p1 < 0) p1 += tau;
+    if (p2 < 0) p2 += tau;
+    return .{ p1, phi, p2 };
+}
+
+/// Orientations a file stores, as `Scan.storedOrientations` gives them (owned).
+pub const Stored = struct {
+    euler: []f64,
+    phase: []i32,
+
+    pub fn deinit(self: *Stored, gpa: Allocator) void {
+        gpa.free(self.euler);
+        gpa.free(self.phase);
+        self.* = undefined;
+    }
 };
 
 pub const Scan = struct {
@@ -78,6 +144,13 @@ pub const Scan = struct {
     /// Owned scalar values from a non-HDF5 companion, in verified pattern order.
     overview_values: []f32 = &.{},
     overview_kind: OverviewKind = .none,
+    /// HDF5 formats: the scan's Data and Header groups
+    h5_data: ?u64 = null,
+    h5_header: ?u64 = null,
+    /// a companion's stored orientations (Bunge, radians, 3 per cell) and phase labels
+    /// (−1: not indexed), owned; HDF5 formats read theirs on demand (storedOrientations)
+    stored_euler: []f64 = &.{},
+    stored_phase: []i32 = &.{},
     why: []const u8 = "",
 
     pub fn count(self: *const Scan) u64 {
@@ -108,6 +181,80 @@ pub const Scan = struct {
         defer self.gpa.free(values);
         if ((try self.h5.?.numbers(address, values)) != n) return error.InvalidStoredOverview;
         for (values, out) |x, *v| v.* = if (std.math.isFinite(x) and @abs(x) <= std.math.floatMax(f32)) @floatCast(x) else std.math.nan(f32);
+    }
+
+    /// The orientations the file stores from its maker's own indexing, as it stores them: Bunge
+    /// angles (radians; a format that writes degrees is converted) and a phase label per cell
+    /// (any number; −1: not indexed). Which frames they are in is not read here
+    /// (convention.identify finds it from the data). Null where the file stores none.
+    pub fn storedOrientations(self: *Scan, gpa: Allocator) !?Stored {
+        const n: usize = @intCast(self.count());
+        if (self.stored_euler.len != 0) {
+            if (self.stored_euler.len != 3 * n or self.stored_phase.len != n) return null;
+            const euler = try gpa.dupe(f64, self.stored_euler);
+            errdefer gpa.free(euler);
+            return .{ .euler = euler, .phase = try gpa.dupe(i32, self.stored_phase) };
+        }
+        const data = self.h5_data orelse return null;
+        const h = &self.h5.?;
+        // where each format keeps them, in what unit, and whether its phase 0 means not indexed
+        const Where = struct { one: []const u8 = "", three: [3][2][]const u8 = .{ .{ "", "" }, .{ "", "" }, .{ "", "" } }, degrees: bool = false, zero_unindexed: bool };
+        const where: Where = switch (self.format) {
+            .h5_oxford => .{ .one = "Euler", .zero_unindexed = true },
+            .h5_bruker => .{ .three = .{ .{ "phi1", "" }, .{ "PHI", "" }, .{ "phi2", "" } }, .degrees = true, .zero_unindexed = true },
+            .h5_edax => .{ .three = .{ .{ "phi1", "Phi1" }, .{ "Phi", "PHI" }, .{ "phi2", "Phi2" } }, .zero_unindexed = false },
+            else => return null,
+        };
+        const euler = try gpa.alloc(f64, 3 * n);
+        errdefer gpa.free(euler);
+        if (where.one.len != 0) {
+            const a = (try h.child(data, where.one)) orelse {
+                gpa.free(euler);
+                return null;
+            };
+            if ((h.numbers(a, euler) catch 0) != 3 * n) {
+                gpa.free(euler);
+                return null;
+            }
+        } else {
+            const column = try gpa.alloc(f64, n);
+            defer gpa.free(column);
+            for (where.three, 0..) |names, k| {
+                var got = false;
+                for (names) |nm| {
+                    if (nm.len == 0 or got) continue;
+                    const a = (try h.child(data, nm)) orelse continue;
+                    if ((h.numbers(a, column) catch 0) != n) continue;
+                    for (column, 0..) |v, i| euler[3 * i + k] = v;
+                    got = true;
+                }
+                if (!got) {
+                    gpa.free(euler);
+                    return null;
+                }
+            }
+        }
+        if (where.degrees) for (euler) |*v| {
+            v.* = std.math.degreesToRadians(v.*);
+        };
+        const phase = try gpa.alloc(i32, n);
+        errdefer gpa.free(phase);
+        @memset(phase, 0);
+        if (try h.child(data, "Phase")) |a| {
+            const vals = try gpa.alloc(f64, n);
+            defer gpa.free(vals);
+            if ((h.numbers(a, vals) catch 0) == n) for (vals, phase) |v, *p| {
+                p.* = if (std.math.isFinite(v) and @abs(v) < 1 << 30) @intFromFloat(v) else -1;
+            };
+        }
+        for (phase, 0..) |*p, i| {
+            if (where.zero_unindexed and p.* == 0) p.* = -1;
+            // (angles past a turn: the not-indexed marker some makers write, 4π)
+            for (euler[3 * i ..][0..3]) |v| {
+                if (!std.math.isFinite(v) or @abs(v) > 2 * std.math.pi + 0.01) p.* = -1;
+            }
+        }
+        return .{ .euler = euler, .phase = phase };
     }
 
     fn discoverOverview(self: *Scan, data: u64) void {
@@ -185,6 +332,8 @@ pub const Scan = struct {
             gpa.free(self.offsets);
             gpa.free(self.background);
             gpa.free(self.overview_values);
+            gpa.free(self.stored_euler);
+            gpa.free(self.stored_phase);
         }
         const f = &self.files[0];
         var head: [8]u8 = @splat(0);
@@ -212,6 +361,8 @@ pub const Scan = struct {
         gpa.free(self.offsets);
         gpa.free(self.background);
         gpa.free(self.overview_values);
+        gpa.free(self.stored_euler);
+        gpa.free(self.stored_phase);
         for (self.files) |*f| f.close();
         gpa.free(self.files);
         gpa.destroy(self);
@@ -356,6 +507,8 @@ pub const Scan = struct {
         const ebsd = (try h.child(scan, "EBSD")).?;
         const data = (try h.child(ebsd, "Data")).?;
         const header = (try h.child(ebsd, "Header")).?;
+        self.h5_data = data;
+        self.h5_header = header;
 
         const V = struct {
             format: Format,
@@ -466,6 +619,16 @@ pub const Scan = struct {
                 const full = num.get(h, header, "DetectorFullHeightMicrons");
                 const unclipped = num.get(h, header, "UnClippedPatternHeight");
                 if (full > 0 and unclipped > 0) info.px_um = full / unclipped;
+                // A clipped pattern's PCY is a fraction of the height before clipping, from the
+                // top: Esprit's own per-pattern pattern centres move with the beam as its tilts
+                // and step say only when PCY is read so and DD as a fraction of the stored
+                // height, and the patterns put their centre there (2 px from it; 9 px from PCY
+                // read on the stored height).
+                const stored: f64 = @floatFromInt(info.pat_h);
+                if (unclipped > stored and !std.math.isNan(info.pc[1])) {
+                    info.pc[1] *= unclipped / stored;
+                    info.pc_note = "Bruker's PCY read as a fraction of the pattern's height before clipping (UnClippedPatternHeight), DD of its stored height";
+                }
                 info.voltage_kv = num.get(h, header, "KV");
             },
             .h5_edax => {
@@ -490,6 +653,12 @@ pub const Scan = struct {
                 const z = num.mean(h, gpa, data, "Detector Distance");
                 info.pc = .{ x, 1 - y * ratio, z * ratio };
                 info.sample_tilt_deg = std.math.radiansToDegrees(info.sample_tilt_deg);
+                if (try h.child(header, "Detector Orientation Euler")) |a| {
+                    var eu: [3]f64 = undefined;
+                    if ((h.numbers(a, &eu) catch 0) == 3) if (oxfordDetectorRot(eu)) |r| {
+                        info.detector_rot = r;
+                    };
+                }
                 info.voltage_kv = num.get(h, header, "Beam Voltage");
             },
             else => unreachable,
@@ -610,6 +779,8 @@ pub const Scan = struct {
             }
             const ang = try @import("ang.zig").load(self.gpa, &self.files[k], n, if (version >= 3) .{ dx, dy } else null, w, hgt);
             errdefer self.gpa.free(ang.iq);
+            errdefer self.gpa.free(ang.euler);
+            errdefer self.gpa.free(ang.phase);
             if (version >= 3 and (nx != ang.cols or ny != ang.rows)) return error.ScanShapeMismatch;
             if (version >= 3 and (!sameStep(dx, ang.step_x_um) or !sameStep(dy, ang.step_y_um))) return error.UPANGStepMismatch;
             if ((hints.rows != 0 and hints.rows != ang.rows) or (hints.cols != 0 and hints.cols != ang.cols)) return error.ScanShapeMismatch;
@@ -621,6 +792,8 @@ pub const Scan = struct {
             info.pc_note = ang.pc_note;
             self.overview_values = ang.iq;
             self.overview_kind = .image_quality;
+            self.stored_euler = ang.euler;
+            self.stored_phase = ang.phase;
             return;
         }
         if (hints.rows != 0 and hints.cols != 0) {
@@ -835,4 +1008,17 @@ test "the nickel scan opens with its metadata" {
     try s.read(4000, 1, buf[0..3600]);
     try std.testing.expectEqualSlices(u8, buf[0..3600], some[7200..]);
     try std.testing.expectError(error.CellsNotAscending, s.readCells(&.{ 5, 4 }, some[0..7200]));
+}
+
+test "Oxford's detector orientation as the geometry's rotation, and back" {
+    // an AZtec acquisition's (radians): 3.40° from the nominal (0, 90°, 0)
+    const eu: rot.Vec3 = .{ 6.266744, 1.6277858, 6.2817445 };
+    const r = oxfordDetectorRot(eu).?;
+    const want = [_]f64{ 0.0163958, 0.05700002, -0.00097189 };
+    for (want, r) |a, b| try std.testing.expectApproxEqAbs(a, b, 1e-6);
+    const back = oxfordDetectorEuler(r);
+    for (eu, back) |a, b| try std.testing.expectApproxEqAbs(a, b, 1e-6);
+    // the nominal itself is no rotation, and angles far from it are not read
+    for (oxfordDetectorRot(.{ 0, std.math.pi / 2.0, 0 }).?) |v| try std.testing.expectApproxEqAbs(0, v, 1e-12);
+    try std.testing.expect(oxfordDetectorRot(.{ 0, std.math.degreesToRadians(20.0), 0 }) == null);
 }
