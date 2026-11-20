@@ -389,7 +389,7 @@ function ioImports(state) {
 const SYNC_EXPORTS = new Set(["ze_alloc", "ze_free", "ze_version", "ze_create", "ze_destroy", "ze_adapter", "ze_error",
   "ze_configure", "ze_settings", "ze_events", "ze_cancel", "ze_close_scan", "ze_scan_info", "ze_scan_format", "ze_scan_overview_kind",
   "ze_get_geometry", "ze_set_geometry", "ze_clear_phases", "ze_phase_count", "ze_phase_info", "ze_pattern_shape", "ze_nlpar_view",
-  "ze_pc_scores", "ze_fit_patterns", "ze_results", "ze_map", "ze_ipf_key", "ze_export", "ze_reduce", "ze_disorientation", "ze_shader",
+  "ze_pc_scores", "ze_fit_patterns", "ze_results", "ze_map", "ze_ipf_key", "ze_export", "ze_export_oxford_snapshot", "ze_reduce", "ze_disorientation", "ze_shader",
   "ze_index_status", "ze_tune_begin", "ze_tune_report", "ze_pixel_angle", "ze_lattice", "ze_sweep", "ze_pc_level_count", "ze_pc_level", "ze_pc_level_ballots",
   "ze_gpu_counts", "ze_profile", "ze_profile_report", "ze_compile_wgsl", "ze_plane_points",
   "ze_sim_read_cif", "ze_sim_set_crystal", "ze_sim_edit_crystal", "ze_sim_crystal", "ze_sim_sheets", "ze_sim_add_phase", "ze_sim_npz",
@@ -1292,6 +1292,16 @@ export class Zebsdsolve {
       const p = f.alloc(n);
       this._check(this.x.ze_export(this.e, k, p, n), "export");
       return new Uint8Array(this.mem, p, n).slice();
+    });
+  }
+
+  /** Indexed results in Oxford CS1, using the acquisition calibration and master crystal frames. */
+  exportOxfordSnapshot() {
+    return this._frame((f) => {
+      const n = this._check(this.x.ze_export_oxford_snapshot(this.e, 0, 0, 0), "Oxford export snapshot");
+      const p = f.alloc(n);
+      this._check(this.x.ze_export_oxford_snapshot(this.e, 0, p, n), "Oxford export snapshot");
+      return JSON.parse(utf8.decode(new Uint8Array(this.mem, p, n)));
     });
   }
 

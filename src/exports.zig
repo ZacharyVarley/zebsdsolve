@@ -758,6 +758,18 @@ export fn ze_export(e: *Engine, kind: u32, buf: ?[*]u8, cap: usize) i64 {
     return @intCast(text.len);
 }
 
+/// Oxford CS1 export snapshot. A null buffer queries its size.
+export fn ze_export_oxford_snapshot(e: *Engine, frame: ?[*]const f64, buf: ?[*]u8, cap: usize) i64 {
+    const requested = if (frame) |p| p[0..4].* else null;
+    const bytes = @import("oxford_snapshot.zig").snapshot(e, requested) catch |err| return failed(e, "export_oxford_snapshot", err);
+    defer e.gpa.free(bytes);
+    if (buf) |p| {
+        if (cap < bytes.len) return failed(e, "export_oxford_snapshot", error.BufferTooSmall);
+        @memcpy(p[0..bytes.len], bytes);
+    }
+    return @intCast(bytes.len);
+}
+
 /// An orientation as the results store one: `q` is replaced by its representative in the
 /// phase's fundamental zone (the equivalent of the smallest rotation, among those the proper
 /// rotations its master obeys give, about the master's own axes), and `euler` receives that

@@ -116,7 +116,7 @@ def _copy_without_patterns(source, target, omit_roots=()):
             obj = obj[name]
         return obj
     # Drop old processing solutions and every alias to their private objects.
-    # Keep any objects shared with the acquisition, including phase definitions.
+    # Keep objects shared with the canonical acquisition maps and images.
     protected = set()
     def protect_tree(obj):
         key = identity(obj)
@@ -126,8 +126,14 @@ def _copy_without_patterns(source, target, omit_roots=()):
             for key in obj:
                 if isinstance(obj.get(key, getlink=True), h5py.HardLink): protect_tree(obj[key])
     for path in omit_roots:
-        acquisition = local_target(path.rsplit('/', 1)[0]+'/EBSD')
-        if acquisition is not None: protect_tree(acquisition)
+        scan = local_target(path.rsplit('/', 1)[0])
+        if not isinstance(scan, h5py.Group):
+            continue
+        for name in scan:
+            if name in {'EBSD', 'SEM', 'Electron Image', 'Layered Image'} or re.fullmatch(r'EDS\d*', name):
+                acquisition = local_target(posixpath.join(scan.name, name))
+                if acquisition is not None:
+                    protect_tree(acquisition)
     def omit_tree(obj):
         key = identity(obj)
         if key in omitted_ids or key in protected: return

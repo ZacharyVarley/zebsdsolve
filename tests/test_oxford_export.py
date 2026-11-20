@@ -42,6 +42,8 @@ class OxfordExport(unittest.TestCase):
                 f["Patterns alias"] = data["Processed Patterns"]
                 f["1/Data Processing/Header/Phases"] = header["Phases"]
                 f["1/EDS/Data/Spectrum"] = np.zeros((6, 10))
+                f["1/EDS/Data/Live Time"] = np.arange(6)
+                f["1/Data Processing/Shared EDS"] = f["1/EDS/Data"]
             digest = hashlib.sha256(source.read_bytes()).digest()
             solver.open(source)
             solver.set_crystal({"space_group": 225, "cell": [3.52] * 3 + [90] * 3,
@@ -58,6 +60,7 @@ class OxfordExport(unittest.TestCase):
                 self.assertNotIn("Processed Patterns", data)
                 self.assertNotIn("Patterns alias", f)
                 self.assertNotIn("1/EDS/Data/Spectrum", f)
+                np.testing.assert_array_equal(f["1/EDS/Data/Live Time"], np.arange(6))
                 self.assertNotIn("1/Data Processing", f)
                 self.assertEqual(f["1/EBSD/Header/Phases/1/Laue Group"].attrs["Symbol"], "m-3m")
                 np.testing.assert_array_equal(data["Band Contrast"], np.arange(6))
