@@ -25,6 +25,7 @@ function supported(value, path, h) {
   const m = value.metadata, types = h.Module.H5T_class_t;
   const fail = (detail) => { throw new Error(`Oxford metadata ${path}: ${detail}; use Python export for this file.`); };
   if (m.virtual_sources !== undefined) throw new Error("Oxford export requires self-contained acquisition data: " + path);
+  if (m.type === types.H5T_REFERENCE.value) throw new Error("Oxford metadata export does not support HDF5 references: " + path);
   if (!Array.isArray(m.shape)) fail("null dataspaces cannot be preserved by the browser HDF5 writer");
   if (m.type === types.H5T_INTEGER.value) {
     if (![1, 2, 4, 8].includes(m.size) || !m.littleEndian) fail("unsupported integer dtype or byte order");
@@ -34,7 +35,7 @@ function supported(value, path, h) {
     // h5wasm's dtype API retains charset/width/VLEN, but fixes padding by charset.
     if (![0, 1].includes(m.cset) || (!m.vlen && m.strpad !== (m.cset === 0 ? 0 : 2))) fail("unsupported string padding or character set");
   } else {
-    fail("unsupported HDF5 datatype (references, enums, compounds, arrays and opaque types require native copying)");
+    fail("unsupported HDF5 datatype");
   }
   return value.dtype;
 }
@@ -105,7 +106,8 @@ export function copyOxfordMetadata(source, destination, h) {
     }
   }
   const scanGroup = localHardObject(source, scan);
-  const edsNames = scanGroup.keys().filter((name) => /^EDS\d*$/.test(name));
+  const scanNames = scanGroup.keys();
+  const edsNames = scanNames.filter((name) => /^EDS\d*$/.test(name));
   const spectrumPaths = edsNames.map((name) => `/${scan}/${name}/Data/Spectrum`);
   const acquisitionNames = ["EBSD", ...edsNames, "SEM", "Electron Image", "Layered Image"];
   // Inventory canonical acquisition paths before historical processing aliases.
@@ -117,7 +119,7 @@ export function copyOxfordMetadata(source, destination, h) {
   inventory(data, data.path);
   inventory(acquisition, acquisition.path);
   for (const name of acquisitionNames.slice(1)) {
-    if (!scanGroup.keys().includes(name)) continue;
+    if (!scanNames.includes(name)) continue;
     const p = join(scanGroup.path, name);
     if (source.get_link(p) !== null || source.get_external_link(p).filename !== undefined) continue;
     const object = source.get(p);

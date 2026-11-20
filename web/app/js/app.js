@@ -119,8 +119,7 @@ function progress(frac) {
   if (frac !== null) $("progress-bar").style.width = `${(100 * Math.max(0, Math.min(1, frac))).toFixed(1)}%`;
 }
 
-/** Run one engine job: the actions and the settings are off and Stop is on while it runs. The
- *  selected pattern is shown again when it is done (a job changes what there is to show). */
+/** Run one job with the actions and settings disabled. Show the selected pattern again after the job. */
 async function busy(label, fn, { cancellable = true } = {}) {
   if (st.busy) return;
   st.busy = 1;
