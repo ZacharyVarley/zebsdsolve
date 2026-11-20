@@ -140,7 +140,7 @@ input[type="number"], input[type="text"], select { height: var(--ctl); width: 10
 input[type="number"] { font: 12px var(--mono); padding-right: 2px; }
 input[type="number"]:hover, input[type="text"]:hover, select:hover { border-color: var(--field-hover-line); }
 input:disabled, select:disabled { opacity: .45; }
-select { cursor: pointer; }
+select { cursor: pointer; padding-right: 20px; -webkit-appearance: none; appearance: none; background: var(--field) var(--caret) no-repeat right 7px center / 8px 5px; }
 input[type="checkbox"] { accent-color: var(--accent); width: 13px; height: 13px; flex: none; cursor: pointer; }
 label { color: var(--muted); font-size: 11.5px; }
 label.check { display: inline-flex; align-items: center; gap: 6px; cursor: pointer; white-space: nowrap; }
@@ -213,6 +213,8 @@ input.slide:disabled { visibility: hidden; }
 .field > input[type="number"] { -moz-appearance: textfield; }
 .field > input[type="number"]::-webkit-inner-spin-button, .field > input[type="number"]::-webkit-outer-spin-button { -webkit-appearance: none; margin: 0; }
 .field > select { flex: 0 1 auto; width: auto; min-width: 0; max-width: 70%; }
+/* (a setting's value reads as text, its label muted beside it) */
+.field > input, .field > select { color: var(--text); }
 .field.wide > span { flex: 0 0 auto; min-width: 64px; }
 .field.wide > select { flex: 1 1 auto; max-width: none; }
 .field.toggle > span { flex: 0 1 auto; color: var(--text); font-size: 12px; }
@@ -374,7 +376,7 @@ body[data-resize="col"] * { cursor: col-resize !important; }
 /* what the map's colours mean, in its corner */
 .map-opts { display: inline-flex; align-items: center; gap: 6px; }
 .map-opts[hidden] { display: none; }
-.map-opts select { width: auto; height: 22px; font-size: 11.5px; padding: 0 20px 0 7px; -webkit-appearance: none; appearance: none; background: var(--field) var(--caret) no-repeat right 7px center / 8px 5px; }
+.map-opts select { width: auto; height: 22px; font-size: 11.5px; padding: 0 20px 0 7px; }
 .legend { position: absolute; right: 8px; top: 8px; display: flex; align-items: center; gap: 4px 8px; flex-wrap: wrap; max-width: calc(100% - 16px); padding: 4px 7px; border-radius: var(--rad-s);
   background: rgba(14, 14, 16, .84); border: 1px solid var(--line); color: var(--muted); font: 11px var(--mono); user-select: none; backdrop-filter: blur(3px); }
 .legend .bar { width: 96px; height: 8px; border-radius: 2px; background: linear-gradient(90deg, #000, #fff); border: 1px solid #3a3a41; }
@@ -399,7 +401,7 @@ body[data-resize="col"] * { cursor: col-resize !important; }
 /* a caption that is a choice: what the image shows, picked where it is shown */
 .pats figcaption.pick { pointer-events: auto; display: flex; align-items: center; gap: 2px; padding: 1px 6px 1px 1px; }
 .pats figcaption.pick > span { overflow: hidden; text-overflow: ellipsis; }
-.pats figcaption select { height: 19px; width: auto; min-width: 0; padding: 0 17px 0 6px; border: 1px solid transparent; border-radius: 3px; background: transparent var(--caret) no-repeat right 5px center / 8px 5px; color: var(--text); font-size: 10.5px; -webkit-appearance: none; appearance: none; }
+.pats figcaption select { height: 19px; width: auto; min-width: 0; padding: 0 17px 0 6px; border: 1px solid transparent; border-radius: 3px; background: transparent var(--caret) no-repeat right 5px center / 8px 5px; color: var(--text); font-size: 10.5px; }
 .pats figcaption select:hover { border-color: var(--line); background-color: var(--raise); }
 .pats .well canvas.inset { position: absolute; right: 6px; top: 6px; width: auto; height: auto; max-width: 30%; max-height: 30%; border: 1px solid #55555c; box-shadow: 0 0 0 1px rgba(0, 0, 0, .6); }
 
@@ -454,7 +456,7 @@ body[data-resize="col"] * { cursor: col-resize !important; }
 .dock-view[data-empty="0"] > #master-hint { display: none; }
 /* a view's own controls, under the dock's bar */
 .view-bar { flex: none; display: flex; align-items: center; gap: 4px 8px; flex-wrap: wrap; padding: 4px 8px; border-bottom: 1px solid var(--line-soft); background: var(--bg); }
-.view-bar select { width: auto; max-width: 220px; height: 22px; font-size: 11.5px; padding: 0 20px 0 7px; -webkit-appearance: none; appearance: none; background: var(--field) var(--caret) no-repeat right 7px center / 8px 5px; }
+.view-bar select { width: auto; max-width: 220px; height: 22px; font-size: 11.5px; padding: 0 20px 0 7px; }
 .dock-view[data-empty="1"] .view-bar > :not(#master-src) { opacity: .4; pointer-events: none; }
 
 /* a master on a globe: a square picture in the middle of its well, the axes drawn over it */
@@ -628,7 +630,6 @@ dialog.conv::backdrop { background: rgba(10, 10, 11, .55); backdrop-filter: blur
 /* the drawings: lines and labels in the theme's ink */
 .cv-sample { fill: var(--raise); stroke: var(--muted); stroke-width: 1; }
 .cv-detector { fill: var(--bg); stroke: var(--muted); stroke-width: 1; }
-.cv-edge { stroke: var(--faint); stroke-width: 1; fill: none; }
 .cv-beam { stroke: var(--data); stroke-width: 2; }
 .cv-dd { stroke: var(--muted); stroke-width: 1; stroke-dasharray: 4 3; }
 .cv-axis { stroke-width: 2.2; stroke-linecap: round; }

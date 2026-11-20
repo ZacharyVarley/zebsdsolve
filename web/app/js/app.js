@@ -581,7 +581,7 @@ function updateOverviewControls() {
   selector.replaceChildren();
   if (st.storedOverview) selector.add(new Option(st.storedOverview.label, "stored"));
   else {
-    const empty = new Option("overview", "none");
+    const empty = new Option("none", "none");
     empty.disabled = true;
     selector.add(empty);
   }
@@ -1293,6 +1293,10 @@ function resetZoom() {
 function drawMapOverlay() {
   const over = $("map-over");
   over.replaceChildren();
+  // (the fits' lattice belongs to the fits: drawn on the Geometry step, its box dimmed elsewhere)
+  const fitStep = app.dataset.tab === "geometry" && !!st.scan;
+  $("show-fit").disabled = !fitStep;
+  $("show-fit").closest("label").dataset.off = fitStep ? "0" : "1";
   if (!st.scan) return;
   const { rows, cols } = st.scan;
   const s = st.settings;
@@ -1305,10 +1309,6 @@ function drawMapOverlay() {
     const d = st.roiDrag;
     over.append(svg("rect", { x: Math.min(d.c0, d.c1), y: Math.min(d.r0, d.r1), width: Math.abs(d.c1 - d.c0) + 1, height: Math.abs(d.r1 - d.r0) + 1, fill: "rgba(214,176,100,.15)", stroke: "#e8c77e", "stroke-width": u }));
   }
-  // (the fits' lattice belongs to the fits: drawn on the Geometry step, its box dimmed elsewhere)
-  const fitStep = app.dataset.tab === "geometry";
-  $("show-fit").disabled = !fitStep;
-  $("show-fit").closest("label").dataset.off = fitStep ? "0" : "1";
   if ($("show-fit").checked && fitStep) {
     const cells = st.fit ? st.fit.cells : fitLattice();
     // (a few fit patterns are rings; a dense lattice, the plane's, a light dotting that leaves the map legible)
@@ -1988,6 +1988,9 @@ function updateEnabled() {
   $("btn-h5oina").disabled = !canExport || st.gpuLost || st.scan?.format !== "Oxford h5oina";
   for (const b of $("map-kind").children) if (RESULT_KINDS.includes(b.dataset.kind)) b.disabled = !st.results;
   $("btn-json").disabled = !st.scan;
+  // (the map's own tools wait for a map)
+  $("btn-roi").disabled = !st.scan || st.gpuLost;
+  $("btn-key").disabled = !st.scan;
   done("data", ready);
   done("patterns", ready);
 }

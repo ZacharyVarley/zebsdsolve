@@ -301,7 +301,7 @@
             </select>
           </span>
           <span class="map-opts" id="overview-opts">
-          <select id="overview-source" class="slim" aria-label="Overview source" title="What the overview shows: the quality the file stores for each pattern, or each pattern's contrast" disabled><option value="none">overview</option><option value="calculated">pattern contrast</option></select>
+          <select id="overview-source" class="slim" aria-label="Overview source" title="What the overview shows: the quality the file stores for each pattern, or each pattern's contrast" disabled><option value="none">none</option><option value="calculated">pattern contrast</option></select>
           <button type="button" class="ghost mini" id="btn-overview" disabled title="Calculate each pattern's contrast (its standard deviation), coarse at once and sharpening">calculate contrast</button>
           </span>
           <button type="button" class="tool" id="btn-roi" aria-pressed="false" title="The region of interest, which the fits and indexing keep to: drag a box on the map (shift-drag does it any time)"><svg><use href="#i-roi"/></svg><span id="roi-text">region</span></button>
@@ -343,13 +343,13 @@
                   <span class="ttl">Pattern</span>
                   <span class="grow"></span>
                   <div class="seg" id="pc-cmp-show" role="tablist" title="The simulation beside the pattern: under the pattern centre the file gave and under the one in use in turn, or one of them held. Each has its own orientation, found under that centre and refined. A click on the simulation switches between the two.">
-                    <button type="button" data-show="flicker" aria-pressed="true">flicker</button>
-                    <button type="button" data-show="file" aria-pressed="false">file PC</button>
-                    <button type="button" data-show="now" aria-pressed="false">current PC</button>
+                    <button type="button" data-show="flicker" aria-pressed="true" disabled>flicker</button>
+                    <button type="button" data-show="file" aria-pressed="false" disabled>file PC</button>
+                    <button type="button" data-show="now" aria-pressed="false" disabled>current PC</button>
                   </div>
                 </header>
                 <div class="pc-cmp-pair">
-                  <figure><div class="well"><canvas id="pc-cmp-exp" width="1" height="1"></canvas></div><figcaption><span id="pc-cmp-exp-cap">the pattern</span></figcaption></figure>
+                  <figure><div class="well"><canvas id="pc-cmp-exp" width="1" height="1"></canvas></div><figcaption><span id="pc-cmp-exp-cap"></span></figcaption></figure>
                   <figure><div class="well" id="pc-cmp-well"><canvas id="pc-cmp-sim" width="1" height="1"></canvas><span class="pc-tag" id="pc-cmp-tag"></span></div><figcaption><span id="pc-cmp-cap"></span></figcaption></figure>
                 </div>
                 <pre class="readout zone-foot" id="pc-cmp-readout"></pre>

@@ -118,8 +118,8 @@ export function drawEnergy(eSvg, zSvg, m, { solved = null, picked = null, pick =
       const pa = X(m.bins[picked].kv), pb = X(m.bins[picked].kv - dE);
       el(zSvg, "rect", { x: pa, y: b.y0, width: pb - pa, height: b.y1 - b.y0, class: "picked-band" });
     }
-    // the mean depth of all the electrons, and the depth above which 90 % leave, over the map
-    for (const [v, name] of [[m.mean_depth_nm, "mean depth"], [m.depth90_nm, "90 % leave above"]]) {
+    // the mean depth of all the electrons, and the depth 90 % of them leave from within, over the map
+    for (const [v, name] of [[m.mean_depth_nm, "mean depth"], [m.depth90_nm, "90 % within"]]) {
       if (!(v < zmax)) continue;
       el(zSvg, "line", { x1: b.x0, y1: Y(v), x2: b.x1, y2: Y(v), class: "chart-mark on-map" });
       el(zSvg, "text", { x: b.x1 - 4, y: Y(v) - 3, class: "chart-tick on-map", "text-anchor": "end" }, `${name} ${v.toFixed(1)} nm`);

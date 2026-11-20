@@ -192,12 +192,6 @@ fn has(set: []const Quat, q: Quat) bool {
 }
 
 /// Two sets of rotations are the same (each element up to its sign).
-fn sameSet(a: []const Quat, b: []const Quat) bool {
-    if (a.len != b.len) return false;
-    for (a) |q| if (!has(b, q)) return false;
-    return true;
-}
-
 /// The group the rotations in `buf[0..n]` generate, in place (identity first); null past
 /// MAX_ROTATIONS, which no crystal has.
 fn close(buf: *[MAX_ROTATIONS]Quat, n0: usize) ?usize {
@@ -350,13 +344,6 @@ pub fn settingOf(mats: []const rot.Mat3) ?Setting {
         }
     }
     return if (best_w >= 0) out else null;
-}
-
-/// The standard setting's group `k` as a setting (the identity frame).
-pub fn standardSetting(rotation: Laue, laue: Laue) Setting {
-    var out: Setting = .{ .rotation = rotation, .laue = laue, .n = operators(rotation).len };
-    @memcpy(out.rots[0..out.n], operators(rotation));
-    return out;
 }
 
 /// Laue class of a crystallographic point group, numbered 1–32 in International Tables order.

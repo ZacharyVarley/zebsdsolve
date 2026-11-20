@@ -196,12 +196,6 @@ pub const Gpu = struct {
         self.open = true;
     }
 
-    /// Zero bytes [offset, offset + size) (multiples of 4).
-    pub fn clearRange(self: *Gpu, b: Buf, offset: u64, size: u64) void {
-        self.dev.clearBuffer(b.id, offset, size);
-        self.open = true;
-    }
-
     /// Copy bytes; the size rounds up to 4 (WebGPU copies whole words; half-precision images
     /// of odd size end in a padding pair), within both buffers.
     pub fn copy(self: *Gpu, src: Buf, soff: u64, dst: Buf, doff: u64, size: u64) void {
@@ -287,12 +281,6 @@ pub const Gpu = struct {
     pub fn flat(groups: u32) [2]u32 {
         if (groups <= MAX_GROUPS) return .{ @max(groups, 1), 1 };
         return .{ MAX_GROUPS, (groups + MAX_GROUPS - 1) / MAX_GROUPS };
-    }
-
-    /// Dispatch a flat_index kernel over `groups` workgroups in z layers.
-    pub fn dispatchFlat(self: *Gpu, pipe: u32, groups: u32, z: u32, binds: []const Bind) void {
-        const f = flat(groups);
-        self.dispatch(pipe, f[0], f[1], z, binds);
     }
 
     pub fn dispatch(self: *Gpu, pipe: u32, x: u32, y: u32, z: u32, binds: []const Bind) void {

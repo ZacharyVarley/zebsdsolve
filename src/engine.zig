@@ -502,6 +502,11 @@ pub const Record = extern struct {
     z: f32,
 };
 
+comptime {
+    // (the layout detector.wgsl's collect writes)
+    std.debug.assert(@sizeOf(Record) == detector.RECORD * @sizeOf(f32));
+}
+
 /// What a search runs with: its method, and the bandwidth of the spherical correlation or the
 /// dictionary's grid.
 pub const Search = struct {

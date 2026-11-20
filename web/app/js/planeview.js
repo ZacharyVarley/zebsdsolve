@@ -300,12 +300,16 @@ export function createPlaneView() {
     // (a fit pattern stands for the cells about it: a square as wide as the lattice's stride)
     const stride = Math.max(1, Math.round(Math.sqrt((rows * cols) / Math.max(n, 1))));
     const wd = Math.max(1, cell * stride);
+    // (the squares at the edges kept to the map)
+    ctx.save();
+    ctx.beginPath(); ctx.rect(ox, oy, cell * cols, cell * rows); ctx.clip();
     for (let b = 0; b < n; b++) {
       const r = Math.floor(pts.cells[b] / cols), c = pts.cells[b] % cols;
       const rgb = pts.used[b] ? viridis(Math.min(1, far[b] / top)) : [212, 97, 95];
       ctx.fillStyle = `rgb(${rgb[0]},${rgb[1]},${rgb[2]})`;
       ctx.fillRect(ox + c * cell - (wd - cell) / 2, oy + r * cell - (wd - cell) / 2, wd, wd);
     }
+    ctx.restore();
     ctx.strokeStyle = "#2b2b30"; ctx.lineWidth = 1; ctx.strokeRect(x0 + 0.5, y0 + 0.5, w - 1, h - 1);
     // the scale, under the map: viridis from 0 to the 95th percentile of the patterns' distances
     const by = Math.min(y0 + h - 22, oy + cell * rows + 14), bw = Math.min(w - 24, 180), bx = x0 + (w - bw) / 2;
