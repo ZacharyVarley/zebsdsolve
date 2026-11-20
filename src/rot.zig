@@ -301,7 +301,7 @@ test "bunge round trip and passive sense" {
     const e: Vec3 = .{ 1.1, 0.7, 2.9 };
     const q = fromBunge(e);
     try expectVec(e, toBunge(q), 1e-10);
-    // phi1 alone: sample x expressed in a crystal frame turned by +phi1 about z
+    // phi1 alone: sample x expressed in a crystal frame rotated by +phi1 about z
     const v = qapply(fromBunge(.{ 0.3, 0, 0 }), .{ 1, 0, 0 });
     try expectVec(v, .{ @cos(0.3), -@sin(0.3), 0 }, tol);
 }

@@ -9,7 +9,7 @@
 //!
 //! How those surfaces become one choice is settings.pc_vote. `mean` averages them and takes
 //! the highest candidate. That is not robust: every surface also has broad ridges that are
-//! not the truth (a shift of the pattern centre traded against a turn of the crystal), the
+//! not the truth (a shift of the pattern centre traded against a rotation of the crystal), the
 //! ridges of many patterns overlap, and their sum pulls the maximum along them; under noise
 //! the sum's maximum is anywhere. `ballots`, the default, asks instead where the patterns
 //! agree: each pattern casts a ballot at each of its few best candidates (settings.pc_top_k,

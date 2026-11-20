@@ -82,7 +82,7 @@ pub const Frame = struct {
     /// rotation that takes them to the frame's, for a cell (a, b, c in Å; α, β, γ in degrees).
     /// Null where the frame's crystal axes need a cell and none is known.
     pub fn crystalOf(self: Frame, lattice: ?[6]f64) ?Quat {
-        return crystalTurn(self.crystal, lattice);
+        return crystalRotation(self.crystal, lattice);
     }
 
     /// An orientation in the engine's frame (q v q* takes sample directions to the master's
@@ -119,7 +119,7 @@ fn axesMatrix(axes: [3]i8) Mat3 {
     return m;
 }
 
-fn crystalTurn(axes: CrystalAxes, lattice: ?[6]f64) ?Quat {
+fn crystalRotation(axes: CrystalAxes, lattice: ?[6]f64) ?Quat {
     if (axes == .x_a_z_cstar) return rot.quat_identity;
     const l = lattice orelse return null;
     for (l) |v| if (!(v > 0) or !std.math.isFinite(v)) return null;
@@ -292,8 +292,8 @@ pub fn identify(gpa: std.mem.Allocator, q: []const f32, phase: []const i32, cols
         for (crystals[0..n_crystal]) |seen| {
             var differs = false;
             for (phases) |ph| {
-                const a = crystalTurn(cand, ph.lattice) orelse continue;
-                const b = crystalTurn(seen, ph.lattice) orelse continue;
+                const a = crystalRotation(cand, ph.lattice) orelse continue;
+                const b = crystalRotation(seen, ph.lattice) orelse continue;
                 if (apart(ph.rotations, a, b) > 1e-6) differs = true;
             }
             distinct = differs;
@@ -304,10 +304,10 @@ pub fn identify(gpa: std.mem.Allocator, q: []const f32, phase: []const i32, cols
             n_crystal += 1;
         }
     }
-    const turns = try gpa.alloc(Quat, phases.len * n_crystal);
-    defer gpa.free(turns);
+    const crystal_rots = try gpa.alloc(Quat, phases.len * n_crystal);
+    defer gpa.free(crystal_rots);
     for (phases, 0..) |ph, p| for (crystals[0..n_crystal], 0..) |c, k| {
-        turns[p * n_crystal + k] = crystalTurn(c, ph.lattice) orelse rot.quat_identity;
+        crystal_rots[p * n_crystal + k] = crystalRotation(c, ph.lattice) orelse rot.quat_identity;
     };
 
     // every convention, the engine's first (it wins ties)
@@ -319,7 +319,7 @@ pub fn identify(gpa: std.mem.Allocator, q: []const f32, phase: []const i32, cols
     for ([_]bool{ false, true }) |active| for (0..n_crystal) |k| for (perms) |pm| for (signs) |sg| {
         const cand: Frame = .{ .axes = .{ pm[0] * sg[0], pm[1] * sg[1], pm[2] * sg[2] }, .active = active, .crystal = crystals[k] };
         if (!cand.valid()) continue;
-        const med = score(cand, probe, phases, turns, n_crystal, k, angles);
+        const med = score(cand, probe, phases, crystal_rots, n_crystal, k, angles);
         if (med < best_med - 1e-9) {
             if (best_med < second and !sameAxes(best, cand)) second = best_med;
             best_med = med;
@@ -335,7 +335,7 @@ pub fn identify(gpa: std.mem.Allocator, q: []const f32, phase: []const i32, cols
     defer gpa.free(every);
     var close: usize = 0;
     for (all.items, every) |pr, *v| {
-        v.* = apart(phases[pr.phase].rotations, pr.q, best.fromFrame(pr.g, turns[pr.phase * n_crystal + kb]));
+        v.* = apart(phases[pr.phase].rotations, pr.q, best.fromFrame(pr.g, crystal_rots[pr.phase * n_crystal + kb]));
         close += @intFromBool(v.* < std.math.degreesToRadians(2.0));
     }
     out.within = @as(f64, @floatFromInt(close)) / @as(f64, @floatFromInt(every.len));
@@ -353,7 +353,7 @@ pub fn identify(gpa: std.mem.Allocator, q: []const f32, phase: []const i32, cols
     var used: u32 = 0;
     for (all.items) |pr| {
         const ph = phases[pr.phase];
-        const c = turns[pr.phase * n_crystal + kb];
+        const c = crystal_rots[pr.phase * n_crystal + kb];
         const r = best.fromFrame(pr.g, c);
         var gk: Quat = rot.quat_identity;
         var top: f64 = -1;
@@ -427,7 +427,7 @@ fn thin(gpa: std.mem.Allocator, xs: []const Pair, most: usize) ![]Pair {
 /// How far the reference read in `cand` (crystal description number `k`) lies from this
 /// engine's orientations: each phase's median angle (radians), averaged over the phases with a
 /// few cells or more (`pairs` grouped by phase).
-fn score(cand: Frame, pairs: []const Pair, phases: []const PhaseView, turns: []const Quat, n_crystal: usize, k: usize, buf: []f64) f64 {
+fn score(cand: Frame, pairs: []const Pair, phases: []const PhaseView, crystal_rots: []const Quat, n_crystal: usize, k: usize, buf: []f64) f64 {
     var sum: f64 = 0;
     var count: usize = 0;
     var i: usize = 0;
@@ -436,7 +436,7 @@ fn score(cand: Frame, pairs: []const Pair, phases: []const PhaseView, turns: []c
         while (j < pairs.len and pairs[j].phase == pairs[i].phase) j += 1;
         if (j - i >= 5) {
             const v = buf[0 .. j - i];
-            for (pairs[i..j], v) |pr, *x| x.* = apart(phases[pr.phase].rotations, pr.q, cand.fromFrame(pr.g, turns[pr.phase * n_crystal + k]));
+            for (pairs[i..j], v) |pr, *x| x.* = apart(phases[pr.phase].rotations, pr.q, cand.fromFrame(pr.g, crystal_rots[pr.phase * n_crystal + k]));
             sum += median(v);
             count += 1;
         }
@@ -459,19 +459,19 @@ fn hexRotations() [12]Quat {
     return out;
 }
 
-test "the crystal axes on a hexagonal cell: X || a* is X || a turned 30° about c" {
+test "the crystal axes on a hexagonal cell: X || a* is X || a rotated 30° about c" {
     const hex: [6]f64 = .{ 3.232, 3.232, 5.148, 90, 90, 120 };
-    const t = crystalTurn(.x_astar_z_c, hex).?;
+    const t = crystalRotation(.x_astar_z_c, hex).?;
     const v = rot.qapply(rot.qconj(t), .{ 1, 0, 0 });
     try testing.expectApproxEqAbs(@sqrt(3.0) / 2.0, v[0], 1e-12);
     try testing.expectApproxEqAbs(0.5, v[1], 1e-12);
     // Y || b on a hexagonal cell is X || a* (b ⊥ a*, and c* || c)
-    const y = crystalTurn(.y_b_z_cstar, hex).?;
+    const y = crystalRotation(.y_b_z_cstar, hex).?;
     try testing.expect(apart(&.{rot.quat_identity}, t, y) < 1e-12);
     // on a cube every description is the masters' own
-    for (std.enums.values(CrystalAxes)) |c| try testing.expect(apart(&.{rot.quat_identity}, crystalTurn(c, .{ 3.52, 3.52, 3.52, 90, 90, 90 }).?, rot.quat_identity) < 1e-12);
-    // and on a monoclinic cell X || a* is X || a turned by β − 90° about b
-    const mono = crystalTurn(.x_astar_z_c, .{ 5.1, 5.2, 5.3, 90, 99.2, 90 }).?;
+    for (std.enums.values(CrystalAxes)) |c| try testing.expect(apart(&.{rot.quat_identity}, crystalRotation(c, .{ 3.52, 3.52, 3.52, 90, 90, 90 }).?, rot.quat_identity) < 1e-12);
+    // and on a monoclinic cell X || a* is X || a rotated by β − 90° about b
+    const mono = crystalRotation(.x_astar_z_c, .{ 5.1, 5.2, 5.3, 90, 99.2, 90 }).?;
     try testing.expectApproxEqAbs(std.math.degreesToRadians(9.2), rot.angleBetween(mono, rot.quat_identity), 1e-9);
 }
 

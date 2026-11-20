@@ -1,5 +1,5 @@
-// Turning a view with the mouse: rotations as 9 numbers, row-major, each taking view directions
-// (x right, y up, z toward the viewer) into the frame of what is shown. A drag turns the view so
+// Rotating a view with the mouse: rotations as 9 numbers, row-major, each taking view directions
+// (x right, y up, z toward the viewer) into the frame of what is shown. A drag rotates the view so
 // that the point under the pointer stays under it (an arcball).
 
 export const IDENTITY = [1, 0, 0, 0, 1, 0, 0, 0, 1];
@@ -115,15 +115,15 @@ export function pictureSize(w, h, rough) {
   return [Math.max(32, Math.round(w * k)), Math.max(32, Math.round(h * k))];
 }
 
-/** Drag to turn, scroll to zoom, control-scroll to spin about the view's axis, double-click to
+/** Drag to rotate, scroll to zoom, control-scroll to spin about the view's axis, double-click to
  *  reset, on `el`: `at(ev)` gives the unit direction under the pointer in the view's frame (or
- *  null: no drag), `turn(R)` takes the rotation to apply on the right (R' = R · turn), `zoom(f)` a
+ *  null: no drag), `rotate(R)` takes the rotation to apply on the right (R' = R · rotate), `zoom(f)` a
  *  zoom factor, `reset()` the first view. */
-export function wireTurning(el, { at, turn, zoom, reset, dragging, pan = null }) {
+export function wireRotation(el, { at, rotate, zoom, reset, dragging, pan = null }) {
   let from = null;
   let last = null;
   // a drag moves the picture (with `pan`) when shift is down, or where `at` has no direction to
-  // turn by (a locked view, the space beside a projection)
+  // rotate by (a locked view, the space beside a projection)
   el.addEventListener("pointerdown", (ev) => {
     if (ev.button !== 0) return;
     const p = ev.shiftKey && pan ? null : at(ev);
@@ -143,7 +143,7 @@ export function wireTurning(el, { at, turn, zoom, reset, dragging, pan = null })
     const p = at(ev);
     if (!p) return;
     // the point that was under the last pointer is under this one: R' p = R p₀
-    turn(between(p, from));
+    rotate(between(p, from));
     from = p;
   });
   const end = () => { if (last) { from = null; last = null; dragging(false, false); } };
@@ -152,7 +152,7 @@ export function wireTurning(el, { at, turn, zoom, reset, dragging, pan = null })
   el.addEventListener("wheel", (ev) => {
     ev.preventDefault();
     const dy = ev.deltaY * (ev.deltaMode === 1 ? 33 : 1);
-    if (ev.ctrlKey) turn(spinZ(dy * 0.0006));
+    if (ev.ctrlKey) rotate(spinZ(dy * 0.0006));
     else zoom(Math.exp(-dy * 0.0015), ev);
   }, { passive: false });
   el.addEventListener("dblclick", reset);

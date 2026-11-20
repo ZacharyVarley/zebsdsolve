@@ -12,7 +12,7 @@
 //! match indexing itself would not accept (settings.accept_nmi or accept_z, and
 //! accept_step_deg) are left out: a pattern matched to the wrong orientation puts its source
 //! wherever suits its mistake. Each of the others is refined by itself over six unknowns, a
-//! shift of its rays' origin and a turn of its crystal, by Levenberg–Marquardt on its own
+//! shift of its rays' origin and a rotation of its crystal, by Levenberg–Marquardt on its own
 //! normalized cross-correlation with its simulation. The device supplies, per pattern, that
 //! correlation's gradient and Gauss–Newton matrix over those six directions (detector.wgsl
 //! `sums`); all the patterns take a step together, one readback a step.
@@ -52,11 +52,11 @@ pub const PlaneResult = extern struct {
     /// the pattern centre the fit began from (the vote's, in the automatic fit)
     pc: [3]f64 = .{ 0, 0, 0 },
     start_pc: [3]f64 = .{ 0, 0, 0 },
-    /// the geometry's turn now (the plane's when the frame follows it, else as it was)
+    /// the geometry's detector rotation now (the plane's when the frame follows it, else as it was)
     rot: [3]f64 = .{ 0, 0, 0 },
     /// What the plane says (plane.Said) and each one's standard error, by leaving out the
     /// points of one block of the map at a time (a jackknife over `blocks` blocks): the
-    /// sample's frame against the nominal one (swing, tilt, twist, radians), how far the beam
+    /// sample's frame against the nominal one (azimuthal, tilt, twist, radians), how far the beam
     /// goes for a row and for a column against the scan's steps and the pixel size, the angle
     /// between the scan's directions off a right angle, and the source at the map's middle.
     said_rot: [3]f64 = .{ 0, 0, 0 },
@@ -164,7 +164,7 @@ fn choose(a: std.mem.Allocator, models: []const plane_mod.Model, pts: []plane_mo
 /// A pattern's normalized cross-correlation with its simulation, with its gradient and
 /// Gauss–Newton matrix (the score falls by ½ δᵀ H δ about its top) over the device's six
 /// directions: a shift of the pattern's rays' origin (pixels, in the sample's axes), then a
-/// turn of its crystal (radians).
+/// rotation of its crystal (radians).
 const Local = struct {
     ok: bool = false,
     ncc: f64 = 0,
@@ -231,7 +231,7 @@ fn solve(comptime N: usize, A0: [N * N]f64, b0: [N]f64) ?[N]f64 {
     return x;
 }
 
-/// A pattern's system over `k` of its unknowns from the last (3: the turn alone; 6: the
+/// A pattern's system over `k` of its unknowns from the last (3: the rotation alone; 6: the
 /// source's shift too), damped by Marquardt's `lambda` (0: as it is).
 fn damped(comptime k: usize, l: *const Local, lambda: f64) struct { A: [k * k]f64, g: [k]f64 } {
     const o = 6 - k;
@@ -670,9 +670,9 @@ const Joint = struct {
     }
 };
 
-/// A pattern's information about its source with its turn profiled out (pixels, the sample's
+/// A pattern's information about its source with its rotation profiled out (pixels, the sample's
 /// axes): the curvature S = H_tt − H_tq H_qq⁻¹ H_qt and the pull g̃ = g_t − H_tq H_qq⁻¹ g_q, what
-/// its score says of its source once its orientation follows. Null where its turn is not told.
+/// its score says of its source once its orientation follows. Null where its rotation is not told.
 fn profiled(l: *const Local) ?struct { S: [9]f64, g: [3]f64 } {
     const B = damped(3, l, 0).A;
     var S: [9]f64 = undefined;
@@ -1145,16 +1145,16 @@ fn finishPlane(e: *Engine, fit: *Fit, res_out: *PlaneResult, before_in: *const G
     for (0..3) |i| res.rmsd[i] = @sqrt(sq[i] / @max(used, 1));
 
     // The fit patterns, with their orientations in the sample's frame as the geometry now has
-    // it. A turn of the geometry from E to E' turns that frame: q' = q h(E) h(E')⁻¹, with h
-    // the detector's turn in the sample's axes, Exp(R0 log E).
+    // it. A rotation of the detector from E to E' rotates that frame: q' = q h(E) h(E')⁻¹, with h
+    // the detector's rotation in the sample's axes, Exp(R0 log E).
     const quats = try gpa.alloc(f32, 4 * n);
     errdefer gpa.free(quats);
     const nccs = try gpa.alloc(f32, n);
     const R0 = before.nominal();
-    const turn = rot.qmul(rot.so3Exp(rot.matVec(R0, before.rot)), rot.qconj(rot.so3Exp(rot.matVec(R0, e.geo.rot))));
+    const frame_rot = rot.qmul(rot.so3Exp(rot.matVec(R0, before.rot)), rot.qconj(rot.so3Exp(rot.matVec(R0, e.geo.rot))));
     for (0..n) |k| {
         const p: usize = @intCast(fit.phase[k]);
-        const q = sym.toFz(rot.qmul(fit.q[k], turn), e.phases.items[p].master.rotations());
+        const q = sym.toFz(rot.qmul(fit.q[k], frame_rot), e.phases.items[p].master.rotations());
         for (0..4) |c| quats[4 * k + c] = @floatCast(q[c]);
         nccs[k] = if (fit.use[k]) @floatCast(fit.keep[k].ncc) else fit.seed_ncc[k];
     }
@@ -1175,7 +1175,7 @@ fn finishPlane(e: *Engine, fit: *Fit, res_out: *PlaneResult, before_in: *const G
         else => "the plane",
     } });
     e.events.log("plane of source points ({s}): {d} of {d} fit patterns used; about it they scatter by {d:.5} {d:.5} {d:.5} (PCx, PCy, PCz); mean NCC {d:.4} with each pattern at its own best (was {d:.4})", .{ @tagName(model), res.n_used, res.n_patterns, res.rmsd[0], res.rmsd[1], res.rmsd[2], res.ncc, res.start_ncc });
-    e.events.log("plane: source at the map's middle {d:.5} {d:.5} {d:.5}; the sample's frame against the nominal one: swing {d:.2}° ± {d:.2}°, tilt {d:.2}° ± {d:.2}°, the scan turned in its plane {d:.2}° ± {d:.2}°; the beam's travel for a row {d:.3} ± {d:.3} and for a column {d:.3} ± {d:.3} of what the steps and the pixel size say; the scan's directions {d:.2}° ± {d:.2}° off square", .{ res.pc[0], res.pc[1], res.pc[2], said.rot[0] * deg, res.said_rot_se[0] * deg, said.rot[1] * deg, res.said_rot_se[1] * deg, said.rot[2] * deg, res.said_rot_se[2] * deg, said.step[0], res.step_se[0], said.step[1], res.step_se[1], said.skew * deg, res.skew_se * deg });
+    e.events.log("plane: source at the map's middle {d:.5} {d:.5} {d:.5}; the sample's frame against the nominal one: azimuthal {d:.2}° ± {d:.2}°, tilt {d:.2}° ± {d:.2}°, scan rotation {d:.2}° ± {d:.2}°; the beam's travel for a row {d:.3} ± {d:.3} and for a column {d:.3} ± {d:.3} of what the steps and the pixel size say; the scan's directions {d:.2}° ± {d:.2}° off square", .{ res.pc[0], res.pc[1], res.pc[2], said.rot[0] * deg, res.said_rot_se[0] * deg, said.rot[1] * deg, res.said_rot_se[1] * deg, said.rot[2] * deg, res.said_rot_se[2] * deg, said.step[0], res.step_se[0], said.step[1], res.step_se[1], said.skew * deg, res.skew_se * deg });
     return res;
 }
 

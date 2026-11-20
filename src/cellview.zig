@@ -1,6 +1,6 @@
 //! The crystal to simulate, as its unit cell in a picture, for the app: every atom of the cell
 //! (each site's orbit, with its images on the cell's faces, edges and corners) as a ball in its
-//! element's colour, and the cell's edges as rods, seen by an orthographic camera turned by a
+//! element's colour, and the cell's edges as rods, seen by an orthographic camera rotated by a
 //! rotation the caller holds (the mouse's). The atoms are kept on the device between calls, so
 //! that a drag only renders (cellview.wgsl).
 const std = @import("std");
@@ -39,7 +39,7 @@ const CvP = extern struct {
 };
 
 /// Render `width` × `height` RGBA8 pixels (one u32 each, R in the low byte) of the crystal's
-/// cell. `rot` turns view directions (x right, y up, z toward the viewer) into the crystal's
+/// cell. `rot` takes view directions (x right, y up, z toward the viewer) into the crystal's
 /// Cartesian frame, row-major; `zoom` 1 fits the cell to the shorter side; `highlight` what to
 /// pick out (cellview.wgsl: 1–3 an edge a, b, c; 4–6 an angle α, β, γ; 16 + k site k); `cells`
 /// the cells along each lattice vector (1, or 3 for a 3 × 3 × 3 supercell).

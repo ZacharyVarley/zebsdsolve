@@ -63,7 +63,7 @@ pub const Settings = struct {
     toy_rows: u32 = 48,
     toy_cols: u32 = 64,
     toy_grains: u32 = 24,
-    /// Within a grain, every cell is turned from the grain's orientation by a small random
+    /// Within a grain, every cell is rotated from the grain's orientation by a small random
     /// rotation of this root-mean-square angle, degrees (0: a grain has one orientation).
     toy_spread_deg: f64 = 0,
     /// The share of cells that hold no crystal at all (a pore, a scratch): their patterns are
@@ -171,7 +171,7 @@ pub const Settings = struct {
     // ── spherical indexing ──
     /// Harmonic bandwidth L of the correlation when indexing: how fine a detail of the pattern
     /// on the sphere takes part. The orientation grid has the next power of two ≥ 2L − 1
-    /// points per turn (64 for L ≤ 32, 128 for L ≤ 64, 256 for L ≤ 128), and the cost follows
+    /// points per 360° (64 for L ≤ 32, 128 for L ≤ 64, 256 for L ≤ 128), and the cost follows
     /// its cube.
     bandwidth: u32 = 64,
 
@@ -225,7 +225,7 @@ pub const Settings = struct {
     /// points tell them, plane.slope_prior). Winkelmann et al. 2020; kikuchipy's fit_pc.
     plane_kind: PlaneKind = .affine,
     /// The sample frame orientations are in once a plane is fitted: `nominal` leaves it
-    /// where the tilts and the detector's turn have it; `follow` takes it from the plane
+    /// where the tilts and the detector's rotation have it; `follow` takes it from the plane
     /// (its normal the plane's, its x along the scan's rows), as kikuchipy sets its sample
     /// tilt from the plane.
     plane_frame: PlaneFrame = .nominal,
@@ -238,9 +238,9 @@ pub const Settings = struct {
     /// `joint`: the model's numbers (3 for one centre, 5 a tilt line, 9 or 11 the plane) fitted
     /// to all the fit patterns at once, by Gauss–Newton on their mean NCC with each pattern's
     /// orientation profiled out: no pattern ever has a source of its own, so a pattern whose
-    /// source and turn its own features can hardly tell apart adds what it does tell and no
+    /// source and rotation its own features can hardly tell apart adds what it does tell and no
     /// more. `points`: Winkelmann et al.'s and kikuchipy's way, each pattern fitted by itself
-    /// over its source and its turn (six unknowns), then the model through those source points.
+    /// over its source and its rotation (six unknowns), then the model through those source points.
     /// `points` by default: on synthetic scans the two are equally accurate, and `joint`'s
     /// points for comparing the models are one step from the model fitted to every pattern,
     /// the held-out ones too, which leans the comparison toward the full model.
@@ -332,12 +332,6 @@ pub const Settings = struct {
     /// for the Laue class; `perfect_rotation`, theirs for the class's proper rotations, which
     /// tell a direction from its opposite.
     ipf_colors: IpfColors = .perfect,
-    /// The perfect keys' two gradients (the paper's equations 9 and 10). `ipf_lightness` is
-    /// λ_L: 1 makes the lightness linear in the distance from a sector's centre, less widens
-    /// the light (and dark) centre. `ipf_gray` is λ_S: 0 leaves the centres white and black,
-    /// more turns them toward gray, at 1 the same gray. The paper recommends a quarter for both.
-    ipf_lightness: f64 = 0.25,
-    ipf_gray: f64 = 0.25,
 
     // ── indexing ──
     /// How each pattern's orientation is first found, before refinement:
@@ -394,7 +388,7 @@ pub const Settings = struct {
     /// is the NMI on that scale.
     accept_nmi: f64 = 0,
     accept_z: f64 = 15,
-    /// … and when its refinement had settled: when the last step that improved it turned the
+    /// … and when its refinement had settled: when the last step that improved it rotated the
     /// crystal by no more than this, degrees. A match whose iterations ran out on the way is
     /// left for the next sweep, which starts it closer.
     accept_step_deg: f64 = 0.2,
@@ -433,7 +427,6 @@ pub const Settings = struct {
         if (!(self.plane_master_px >= 0)) return error.BadSetting;
         if (self.pc_steps < 1 or self.pc_steps > 65 or self.pc_steps_z < 1 or self.pc_steps_z > 65) return error.BadSetting;
         if (self.pc_levels < 1 or self.pc_levels > 8) return error.BadSetting;
-        if (!(self.ipf_lightness >= 0 and self.ipf_lightness <= 1) or !(self.ipf_gray >= 0 and self.ipf_gray <= 1)) return error.BadSetting;
         if (!(self.pc_z_min >= 0)) return error.BadSetting;
         if (self.toy_rows < 1 or self.toy_rows > 4096 or self.toy_cols < 1 or self.toy_cols > 4096 or self.toy_grains < 1) return error.BadSetting;
         if (self.toy_height < 8 or self.toy_height > 1024 or self.toy_width < 8 or self.toy_width > 1024) return error.BadSetting;

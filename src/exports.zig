@@ -299,12 +299,12 @@ export fn ze_cell_info(e: *Engine, cells: u32, out: ?[*]u8, cap: usize) i64 {
     return @intCast(bytes.len);
 }
 
-/// The crystal's cell in a picture for the app (cellview.zig): `turn` the view's rotation into
+/// The crystal's cell in a picture for the app (cellview.zig): `view_rot` the view's rotation into
 /// the crystal's Cartesian frame (row-major 3 × 3), `zoom` 1 fitting the cell to the shorter
 /// side, `highlight` what to pick out (1–3 the edge a, b, c; 4–6 the angle α, β, γ; 16 + k the
 /// atoms of site k; 0 nothing); `width` × `height` RGBA8 pixels into `out` (`len` u32).
-export fn ze_cell_view(e: *Engine, turn: [*]const f32, zoom: f32, highlight: u32, cells: u32, width: u32, height: u32, out: [*]u32, len: usize) i32 {
-    @import("cellview.zig").render(e, turn[0..9].*, zoom, highlight, cells, width, height, out[0..len]) catch |err| return failed(e, "cell_view", err);
+export fn ze_cell_view(e: *Engine, view_rot: [*]const f32, zoom: f32, highlight: u32, cells: u32, width: u32, height: u32, out: [*]u32, len: usize) i32 {
+    @import("cellview.zig").render(e, view_rot[0..9].*, zoom, highlight, cells, width, height, out[0..len]) catch |err| return failed(e, "cell_view", err);
     return 0;
 }
 
@@ -378,14 +378,14 @@ export fn ze_phase_info(e: *Engine, index: u32, out: *engine.PhaseInfo) i32 {
 /// A master in a picture for the app (sphereview.zig): `source` a phase (≥ 0) or the last
 /// simulation (−1); `stored` 1 a phase's master as loaded, 0 as patterns are compared with it;
 /// `bin` and `site`, for the simulation, one energy bin's and one site's alone (−1: all);
-/// `projection` 0 globe, 1 Lambert, 2 stereographic, 3 joint Lambert; `turn` the view's
+/// `projection` 0 globe, 1 Lambert, 2 stereographic, 3 joint Lambert; `view_rot` the view's
 /// rotation into the crystal's frame (row-major 3 × 3, then four more numbers: the picture's pan
 /// across and down in shorter sides, the hemispheres shown (0 both, 1 upper, 2 lower), 1 for the
 /// upper less the lower's inversion); `width` × `height` RGBA8 pixels into
 /// `out` (`len` u32).
-export fn ze_sphere_view(e: *Engine, source: i32, stored: u32, bin: i32, site: i32, projection: u32, turn: [*]const f32, zoom: f32, width: u32, height: u32, out: [*]u32, len: usize) i32 {
+export fn ze_sphere_view(e: *Engine, source: i32, stored: u32, bin: i32, site: i32, projection: u32, view_rot: [*]const f32, zoom: f32, width: u32, height: u32, out: [*]u32, len: usize) i32 {
     if (projection > 3) return failed(e, "sphere_view", error.UnknownKind);
-    @import("sphereview.zig").render(e, source, stored != 0, bin, site, @enumFromInt(projection), turn[0..9].*, turn[9..13].*, zoom, width, height, out[0..len]) catch |err| return failed(e, "sphere_view", err);
+    @import("sphereview.zig").render(e, source, stored != 0, bin, site, @enumFromInt(projection), view_rot[0..9].*, view_rot[9..13].*, zoom, width, height, out[0..len]) catch |err| return failed(e, "sphere_view", err);
     return 0;
 }
 
@@ -727,8 +727,8 @@ export fn ze_map(e: *Engine, kind: u32, out: [*]u8, len: usize) i32 {
     return 0;
 }
 
-/// The key to a phase's inverse pole figure colours, as the settings have them (ipf_colors,
-/// ipf_lightness, ipf_gray), as RGBA8, size × size: the directions that stand for all the
+/// The key to a phase's inverse pole figure colours, as the settings have them (ipf_colors), as
+/// RGBA8, size × size: the directions that stand for all the
 /// others, in stereographic projection with the crystal's x to the right, transparent outside
 /// them. `lower` = 0 gives their part in the upper hemisphere ([001] at the origin), 1 their
 /// part in the lower one, which only some keys have (output.ipfKey). `box` receives the part's
@@ -832,7 +832,7 @@ export fn ze_stored_orientations(e: *Engine, euler: [*]f64, phase: [*]i32, n: u6
     return 1;
 }
 
-/// The convention the exports write orientations in, as JSON (axes, turn, active, crystal and a
+/// The convention the exports write orientations in, as JSON (axes, active, crystal and a
 /// line describing it); returns its length (copied when cap suffices).
 export fn ze_frame(e: *Engine, buf: [*]u8, cap: usize) usize {
     var line: [1024]u8 = undefined;
@@ -844,8 +844,7 @@ export fn ze_frame(e: *Engine, buf: [*]u8, cap: usize) usize {
 }
 
 /// Set the convention the exports write in: JSON as `ze_frame` gives it (axes, active,
-/// crystal; others, such as the "turn" older projects carry, ignored), or empty for the
-/// engine's own.
+/// crystal; others ignored), or empty for the engine's own.
 export fn ze_set_frame(e: *Engine, json: [*]const u8, len: usize) i32 {
     if (len == 0) {
         e.convention = .{};

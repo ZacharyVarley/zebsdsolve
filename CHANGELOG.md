@@ -24,12 +24,13 @@ notes.
 - **The detector orientation an Oxford file stores** (`Detector Orientation Euler`) is read
   into the geometry, as #13 read it. Left out, the engine's orientations on an AZtec map lay
   3.4° from AZtec's; with it, 0.10°.
-- **A File menu** in the app: opening and saving, the theme (dark, light, or as the system is
-  set), and **View conventions**, which draws each reference frame and pattern-centre
-  convention (the lab with the sample's axes over the engine's, and the pattern as stored with
-  where its pattern centre is measured from), the scan's own once identified among them.
+- **A menu** in the app (the three bars left of the name): opening and saving, the theme
+  (dark, light, or as the system is set), and **View conventions**, which draws each reference
+  frame and pattern-centre convention (the lab with the sample's axes over the engine's, and
+  the pattern as stored with where its pattern centre is measured from), the scan's own once
+  identified among them.
 - **`.h5oina` export** of a scan opened from an Oxford acquisition (`solver.export("x.h5oina")`,
-  and a button under Export): the acquisition's groups, datasets and attributes copied (not its
+  and among the other formats under Export): the acquisition's groups, datasets and attributes copied (not its
   patterns, nor spectra), its indexing replaced by these results in the convention found from
   its own orientations, each cell's pattern centre in Oxford's convention, and the engine's
   scores under `/zebsdsolve`. On an Oxford zirconium map its orientations lie a median 0.20°
@@ -37,10 +38,33 @@ notes.
   Python, so neither needs an HDF5 library; the HDF5 reader now reads attributes. After #13 (by
   [Tijmenvermeij](https://github.com/Tijmenvermeij)), which wrote it from the front ends.
 
+### Changed
+
+- The inverse pole figure keys' gradients are no longer settings: `ipf_lightness` and
+  `ipf_gray` are gone, and the Nolze–Hielscher keys use the λ_L and λ_S of a quarter each that
+  the paper recommends, so a map's key is always one others draw. The key itself is still a
+  choice (`ipf_colors`).
+- The Index step shows the method's own parameters under it, and changes them as the method
+  changes (the bandwidth for spherical indexing, the grid for a dictionary, and the grid,
+  components and Oja passes for its components); the sweeps are under Advanced, with the early
+  sweeps' parameters likewise.
+- Rotations are named as rotations: the detector's angles away from its nominal attitude are
+  azimuthal, tilt and twist (kikuchipy's names), and the plane fit reports the scan rotation.
+
 ### Fixed
 
+- In the app: the log's times no longer wrap onto a second line; a lattice parameter tied to
+  another reads as the one it follows (3.524, not 3.5240 beside it); the crystal's facts wrap
+  instead of being cut off, as do wide readouts (a sweep plan, the plane fit's misfits); the
+  pattern centre in use reads to the four places the file's does; the z histogram says how many
+  of the cells above the threshold were accepted (acceptance also asks the refinement to have
+  settled, so the two counts can differ); the pattern-centre search's legend shows its marks in
+  the light theme; the plane fit's panel titles no longer run into their numbers in a narrower
+  window; the beam's step directions are under Geometry, Advanced (every scan's geometry uses
+  them), not under Raw stream; the conventions drawing's labels keep off each other and its
+  lines; the page has an icon.
 - `.ctf` and `.ang` wrote a hexagonal phase with the masters' crystal axes (X ∥ a), 30° about c
-  from Oxford's (X ∥ a\*), and in a sample frame turned 90° from Oxford's and Bruker's: on an
+  from Oxford's (X ∥ a\*), and in a sample frame rotated 90° from Oxford's and Bruker's: on an
   Oxford map of zirconium the `.ctf` lay a median 84° from AZtec's own orientations. A scan
   that stores its maker's orientations now exports in the convention found from them (0.20°
   there, with the file's detector orientation read); the header says which.
@@ -67,7 +91,7 @@ notes.
   them (a prior of a tenth on how far they move the denominator from the map's middle to its
   edge, against the points' own scatter), and a plane whose denominator falls below a tenth of
   its middle's anywhere on the map is refused. Small regions now give the affine plane; the
-  nickel example's whole map barely moves, and what its plane says of the detector's turn
+  nickel example's whole map barely moves, and what its plane says of the detector's rotation
   varies across blocks of the map by 15° at most instead of 199°.
 - The joint fit (`plane_method="joint"`) of a projective plane had no such hold: on a 12 × 12
   region of the nickel example (CLAHE on) its denominator went through zero inside the map. It
@@ -198,7 +222,7 @@ notes.
 - Master view: globe, Lambert, stereographic and joint (single-square) Lambert projections, with
   zoom and pan; one hemisphere for centrosymmetric crystals and an N − S′ difference for the
   others; a stereogram mode (distance and eye separation, default 0.5 m and 60 mm); several masters
-  can be switched between and toggled on or off; Ctrl + scroll turns about the north pole.
+  can be switched between and toggled on or off; Ctrl + scroll rotates about the north pole.
 - Crystal pane: the unit cell drawn by the engine, with an optional 3 × 3 × 3 supercell, a, b and c
   views over the picture, and a lock to the master's rotation.
 - Energy and depth charts run from the beam's energy down to 0, with arrow-key navigation and an

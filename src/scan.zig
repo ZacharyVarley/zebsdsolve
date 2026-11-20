@@ -249,7 +249,7 @@ pub const Scan = struct {
         }
         for (phase, 0..) |*p, i| {
             if (where.zero_unindexed and p.* == 0) p.* = -1;
-            // (angles past a turn: the not-indexed marker some makers write, 4π)
+            // (angles past 2π: the not-indexed marker some makers write, 4π)
             for (euler[3 * i ..][0..3]) |v| {
                 if (!std.math.isFinite(v) or @abs(v) > 2 * std.math.pi + 0.01) p.* = -1;
             }

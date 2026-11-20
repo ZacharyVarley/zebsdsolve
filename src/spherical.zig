@@ -104,7 +104,7 @@ pub fn fftSize(L: u32) u32 {
 
 pub const Tables = struct {
     L: u32,
-    /// orientation grid points per turn; the sphere grid has n rings of 2n points
+    /// orientation grid points per 360°; the sphere grid has n rings of 2n points
     n: u32,
     n_pairs: u32,
     ring: Buf,

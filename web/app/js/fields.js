@@ -4,10 +4,11 @@
 
 // the method the sweeps before the last use, and which methods any sweep uses
 const firstMethod = (s) => (s.sweep_method === "same" ? s.method : s.sweep_method);
-const uses = (s, m) => s.method === m || (s.sweeps > 1 && firstMethod(s) === m);
-const usesSpherical = (s) => uses(s, "spherical");
-const usesDictionary = (s) => uses(s, "dictionary") || uses(s, "pca");
-const usesPca = (s) => uses(s, "pca");
+// hints a field and its duplicate (under the method, and among the sweeps) share
+const BANDWIDTH = "Harmonic bandwidth of the spherical correlation when indexing (the pattern-centre vote has its own, under Geometry). The orientation grid has the next power of two ≥ 2L − 1 points per 360° (64 up to L = 32, 128 up to 64, 256 up to 128), and the cost follows its cube.";
+const GRID = "Cubochoric grid points per half edge; the orientations in the phase's fundamental zone are kept. The mean spacing is about 45° / grid for cubic crystals.";
+const COMPONENTS = "Components kept of a dictionary. More find more patterns and cost more per comparison: on the nickel scan 128 of a grid of 40 find 94 %, 256 find 97 %.";
+const EPOCHS = "Passes of Oja's rule over the dictionary to learn its components. One is nearly enough.";
 
 export const FIELDS = {
   scan: [
@@ -15,17 +16,15 @@ export const FIELDS = {
     { key: "map_cols", label: "columns", type: "int", min: 0, hint: "Columns of the map, for files that do not record it. 0: as the file says." },
     { key: "pattern_height", label: "pattern h", type: "int", min: 0, hint: "Pattern height in pixels, for raw streams without a header." },
     { key: "pattern_width", label: "pattern w", type: "int", min: 0, hint: "Pattern width in pixels, for raw streams without a header." },
-    { key: "scan_x_sign", label: "column step", type: "enum", options: [[-1, "−y"], [1, "+y"]], hint: "Which way the beam moves on the sample for a step along the map's columns, along the sample frame's y (the detector's column direction)." },
-    { key: "scan_y_sign", label: "row step", type: "enum", options: [[-1, "−x"], [1, "+x"]], hint: "Which way the beam moves for a step down the map's rows, along the sample frame's x (down the tilted surface, toward the detector)." },
   ],
   toy: [
-    { key: "toy_seed", label: "seed", type: "int", min: 0, max: 4294967295, hint: "The microstructure comes from this number: the grains' places, their orientations and phases, the turns within them and the blank cells." },
+    { key: "toy_seed", label: "seed", type: "int", min: 0, max: 4294967295, hint: "The microstructure comes from this number: the grains' places, their orientations and phases, the rotations within them and the blank cells." },
     { key: "toy_grains", label: "grains", type: "int", min: 1, hint: "Points scattered over the map; each cell belongs to the nearest, which makes the grains. 1: a single crystal. As many as there are cells: an orientation per cell." },
     { key: "toy_rows", label: "rows", type: "int", min: 1, max: 4096 },
     { key: "toy_cols", label: "columns", type: "int", min: 1, max: 4096 },
     { key: "toy_height", label: "pattern h", type: "int", min: 8, max: 1024 },
     { key: "toy_width", label: "pattern w", type: "int", min: 8, max: 1024 },
-    { key: "toy_spread_deg", label: "spread °", type: "num", step: 0.1, min: 0, hint: "Every cell is turned from its grain's orientation by a small random rotation of this root-mean-square angle. 0: a grain has one orientation." },
+    { key: "toy_spread_deg", label: "spread °", type: "num", step: 0.1, min: 0, hint: "Every cell is rotated from its grain's orientation by a small random rotation of this root-mean-square angle. 0: a grain has one orientation." },
     { key: "toy_blank", label: "blank", type: "num", step: 0.01, min: 0, max: 1, hint: "The share of cells that hold no crystal: their patterns are the background alone, and nothing should index them." },
     { key: "toy_contrast", label: "contrast", type: "num", step: 0.05, min: 0.01, max: 1, hint: "The share of a pixel's intensity that is the simulated pattern; the rest is background. 1: the simulation alone. A real detector's patterns are mostly background." },
     { key: "toy_background_sigma", label: "bg σ", type: "num", step: 0.05, min: 0, when: (s) => s.toy_contrast < 1, hint: "The background's shape: flat at 0, else a Gaussian hump over the detector's centre of this sigma, as a fraction of the pattern's width." },
@@ -68,7 +67,7 @@ export const FIELDS = {
     { key: "mask_radius", label: "radius", type: "num", step: 0.05, min: 0.1, when: (s) => s.mask, hint: "The mask's radius as a fraction of half the pattern's smaller side." },
   ],
   master: [
-    { key: "pixel_angle_deg", label: "pixel °", type: "num", step: 0.01, min: 0, hint: "Angular width of one stored detector pixel: what turns the pattern filters' pixel sizes into sizes on the sphere. 0: from the geometry, the pixel at the pattern centre." },
+    { key: "pixel_angle_deg", label: "pixel °", type: "num", step: 0.01, min: 0, hint: "Angular width of one stored detector pixel: what converts the pattern filters' pixel sizes to sizes on the sphere. 0: from the geometry, the pixel at the pattern centre." },
     { key: "master_smooth", label: "smooth px", type: "num", step: 0.05, min: 0, hint: "Gaussian smoothing on the sphere, as a sigma in pixels of the pattern being compared. A detector pixel averages the sphere over its footprint; 0.3 is about a square pixel's spread." },
   ],
   // the pattern-centre search: the range it starts from, its slices and its tiers
@@ -83,10 +82,10 @@ export const FIELDS = {
   // the plane of source points
   plane: [
     { key: "plane_kind", label: "model", type: "enum", options: [["affine", "affine"], ["projective", "projective"]], hint: "What the fit patterns' source points are fitted as, against the scan's rows and columns. Affine: nine numbers, the scan a parallelogram on a plane (steps, their directions and the plane's tilt all free). Projective: eleven, the beam deflected from a pivot onto the tilted sample, so that the scan's parallels need not stay parallel; it matters on scans a tenth of the detector wide or more (Winkelmann et al. 2020), and its two slopes stay near zero unless the points tell them. Fit plane fits this; Auto fit geometry checks it against one centre and a tilt line (PCx the same everywhere, PCy and PCz along the rows) and takes the simplest the map supports." },
-    { key: "plane_frame", label: "frame", type: "enum", options: [["nominal", "nominal"], ["follow", "plane"]], hint: "Which sample frame orientations are in once a plane is fitted. As the tilts say: where the sample tilt, the detector tilt and the detector's turn above have it; the plane only says where the beam stood. Follows the plane: its normal is the plane's own and its x runs along the scan's rows, as kikuchipy sets its sample tilt from the plane; the detector's turn above then becomes the plane's." },
+    { key: "plane_frame", label: "frame", type: "enum", options: [["nominal", "nominal"], ["follow", "plane"]], hint: "Which sample frame orientations are in once a plane is fitted. As the tilts say: where the sample tilt, the detector tilt and the detector's rotation above have it; the plane only says where the beam stood. Follows the plane: its normal is the plane's own and its x runs along the scan's rows, as kikuchipy sets its sample tilt from the plane; the detector's rotation above then becomes the plane's." },
   ],
   planemore: [
-    { key: "plane_method", label: "method", type: "enum", options: [["points", "per pattern"], ["joint", "joint"]], hint: "Through each pattern's own source (the default): Winkelmann et al.'s and kikuchipy's way, each pattern fitted by itself over its source and its turn (six unknowns), then the model through those points. To all the patterns at once: the model's numbers (3 for one centre, 5 a tilt line, 9 or 11 the plane) fitted to every fit pattern together, by Gauss–Newton on their mean NCC with each pattern's orientation following. Equally accurate on synthetic scans and a little faster, but Auto's comparison of the models leans toward the full plane with it: its points are one step from the plane fitted to every pattern, the held-out ones too." },
+    { key: "plane_method", label: "method", type: "enum", options: [["points", "per pattern"], ["joint", "joint"]], hint: "Through each pattern's own source (the default): Winkelmann et al.'s and kikuchipy's way, each pattern fitted by itself over its source and its rotation (six unknowns), then the model through those points. To all the patterns at once: the model's numbers (3 for one centre, 5 a tilt line, 9 or 11 the plane) fitted to every fit pattern together, by Gauss–Newton on their mean NCC with each pattern's orientation following. Equally accurate on synthetic scans and a little faster, but Auto's comparison of the models leans toward the full plane with it: its points are one step from the plane fitted to every pattern, the held-out ones too." },
     { key: "plane_weights", label: "weights", type: "enum", options: [["information", "information"], ["equal", "equal"]], when: (s) => s.plane_method === "points", hint: "How the patterns' own source points count in the plane's fit. By how sharply each is told: by the curvature of that pattern's own score over its source's place, its orientation following. A small pattern tells its source's distance far better than where it stands across the detector, and some orientations tell it better than others; weighed so, thousands of small map patterns do the work of a few large calibration patterns. Alike: every point the same, as kikuchipy fits a few good patterns." },
     { key: "plane_stride", label: "stride", type: "int", min: 1, max: 4096, hint: "The plane's fit patterns: every n-th cell of the region of interest along its rows and along its columns." },
     { key: "plane_patterns_max", label: "max patterns", type: "int", min: 0, max: 10000000, hint: "No more than this many: the stride is widened until they are (0: no such limit)." },
@@ -99,7 +98,7 @@ export const FIELDS = {
   ],
   pcsearch: [
     { key: "fit_grid", label: "grid", type: "int", min: 1, max: 31, hint: "Fit pattern centre uses a lattice of this many × this many patterns over the region of interest. Every one of them is correlated under every candidate, so the vote's time grows with their number." },
-    { key: "fit_bandwidth", label: "bandwidth", type: "int", min: 8, max: 256, hint: "Harmonic bandwidth of the correlation in the pattern-centre vote, of the one that gives the plane fit's patterns their first orientations, and of the one that indexes the selected pattern on the spot (indexing has its own, under Index). The vote's peak sharpens with it and its cost follows the cube of the orientation grid: 64 points per turn up to L = 32, 128 up to 64, 256 up to 128." },
+    { key: "fit_bandwidth", label: "bandwidth", type: "int", min: 8, max: 256, hint: "Harmonic bandwidth of the correlation in the pattern-centre vote, of the one that gives the plane fit's patterns their first orientations, and of the one that indexes the selected pattern on the spot (indexing has its own, under Index). The vote's peak sharpens with it and its cost follows the cube of the orientation grid: 64 points per 360° up to L = 32, 128 up to 64, 256 up to 128." },
     { key: "pc_z_min", label: "min z", type: "num", step: 0.05, min: 0, hint: "A candidate that puts the detector nearer the source than this (z, in pattern heights) gets no score. Toward z = 0 the detector fills the whole hemisphere and the scores stop being correlations; a search let loose there runs away." },
     { key: "pc_vote", label: "vote", type: "enum", options: [["ballots", "ballots"], ["mean", "mean"]],
       hint: "How each tier's winner is chosen from each fit pattern's own best correlation under every candidate. Ballots: every pattern casts a ballot at each of its few best candidates, the ballots are spread a little, and the densest place wins; patterns that disagree are simply outvoted. Mean: the candidate whose scores, averaged over the patterns, are highest; one broad wrong ridge shared by many patterns then pulls the winner along it." },
@@ -109,13 +108,23 @@ export const FIELDS = {
     { key: "pc_inlier_radius", label: "inlier r", type: "num", step: 0.01, min: 0.005, when: (s) => s.pc_vote === "ballots", hint: "The winner is refined once to the weighted centre of the ballots within this distance of it (a fraction of the pattern), and found again among those alone." },
     { key: "pc_nms", label: "NMS", type: "int", min: 0, max: 9, when: (s) => s.pc_vote === "ballots", hint: "Non-maximum suppression: a ballot only where the pattern's score is the highest within a cube of this many candidates a side. 0: any of its best candidates, which measured better here (and in the camera-plane tests before): wider suppression pushes ballots onto symmetry-alias peaks." },
   ],
+  // which way the beam moves on the sample for a step along the map (Geometry, Advanced)
+  beam: [
+    { key: "scan_x_sign", label: "column step", type: "enum", options: [[-1, "−y"], [1, "+y"]], hint: "Which way the beam moves on the sample for a step along the map's columns, along the sample frame's y (the detector's column direction)." },
+    { key: "scan_y_sign", label: "row step", type: "enum", options: [[-1, "−x"], [1, "+x"]], hint: "Which way the beam moves for a step down the map's rows, along the sample frame's x (down the tilted surface, toward the detector)." },
+  ],
   pixel: [
     { key: "detector_width_mm", label: "detector mm", type: "num", step: 1, min: 1, hint: "What a scan is given a pixel size from when its file records none and none is typed in: this width over the pattern's stored pixels across. 24 mm is 480 pixels of 50 µm. It is used when a scan is opened, and when the pixel size is cleared." },
   ],
+  // the method and, under it, its own parameters alone (`of`: shown only where it applies)
   index: [
     { key: "method", label: "method", type: "enum", options: [["spherical", "spherical"], ["dictionary", "dictionary"], ["pca", "dictionary PCA"]], hint: "How each orientation is first found (the last sweep's method, when there are several). Spherical: harmonic cross-correlation over all orientations, each pattern from the point of the sample the beam stood on. Dictionary: inner products, pixel by pixel, with simulated patterns of a grid of orientations, simulated for the map's centre. Dictionary components: the same dictionary simulated once and kept as its leading components (learned by Oja's rule), matched in those." },
-    { key: "bandwidth", label: "bandwidth", type: "int", min: 8, max: 256, when: usesSpherical, hint: "Harmonic bandwidth of the spherical correlation when indexing (the pattern-centre vote has its own, under Geometry). The orientation grid has the next power of two ≥ 2L − 1 points per turn (64 up to L = 32, 128 up to 64, 256 up to 128), and the cost follows its cube." },
-    { key: "dict_grid", label: "grid", type: "int", min: 2, max: 200, when: usesDictionary, hint: "Cubochoric grid points per half edge; the orientations in the phase's fundamental zone are kept. The mean spacing is about 45° / grid for cubic crystals." },
+    { key: "bandwidth", label: "bandwidth", type: "int", min: 8, max: 256, of: (s) => s.method === "spherical", hint: BANDWIDTH },
+    { key: "dict_grid", label: "grid", type: "int", min: 2, max: 200, of: (s) => s.method !== "spherical", hint: GRID },
+    { key: "pca_components", label: "components", type: "int", min: 4, max: 1024, of: (s) => s.method === "pca", hint: COMPONENTS },
+    { key: "pca_epochs", label: "Oja passes", type: "int", min: 1, max: 16, of: (s) => s.method === "pca", hint: EPOCHS },
+  ],
+  refine: [
     { key: "refine", label: "refine", type: "bool", hint: "Refine each orientation on the detector (Levenberg–Marquardt on the NCC), the simulation projected from the pattern's own source point." },
     { key: "refine_iters", label: "iterations", type: "int", min: 0, max: 100, when: (s) => s.refine },
     { key: "refine_step", label: "max step °", type: "num", step: 0.25, min: 0.05, when: (s) => s.refine },
@@ -123,30 +132,30 @@ export const FIELDS = {
   accept: [
     { key: "accept_nmi", label: "NMI ≥", type: "num", step: 0.005, min: 0, max: 1, hint: "A match is accepted when its normalized mutual information with its simulation is at least this: an absolute threshold, the same for every pattern. 0: the threshold comes from the calibration beside it instead. The readout below says what NMI chance gives on this scan." },
     { key: "accept_z", label: "z ≥", type: "num", step: 1, when: (s) => !(s.accept_nmi > 0), hint: "With no absolute threshold: a calibration made once for the scan, the same for every pattern. A sample of the region's patterns is scored against simulations at random orientations; a match is accepted when its mutual information stands this many of that chance level's standard deviations above it. The readout below says what NMI that is." },
-    { key: "accept_step_deg", label: "settled °", type: "num", step: 0.05, min: 0.01, hint: "… and when its refinement had settled: when the last step that improved it turned the crystal by no more than this. A match whose iterations ran out on the way is left for the next sweep." },
+    { key: "accept_step_deg", label: "settled °", type: "num", step: 0.05, min: 0.01, hint: "… and when its refinement had settled: when the last step that improved it rotated the crystal by no more than this. A match whose iterations ran out on the way is left for the next sweep." },
   ],
+  // the sweeps (under Advanced): the early sweeps' method and, under it, its parameters, and the
+  // last's where the sweeps between are spaced toward it and the method above does not show it
   sweeps: [
-    { key: "sweeps", label: "sweeps", type: "int", min: 1, max: 6, hint: "Passes over the region. With more than one, the first is cheap and each later one takes only the patterns no earlier one indexed acceptably; the last runs at the bandwidth (or dictionary grid) above." },
+    { key: "sweeps", label: "sweeps", type: "int", min: 1, max: 6, hint: "Passes over the region. With more than one, the first is cheap and each later one takes only the patterns no earlier one indexed acceptably; the last runs at the method's own bandwidth (or dictionary grid)." },
     { key: "sweep_method", label: "early by", type: "enum", when: (s) => s.sweeps > 1,
       options: [["same", "same"], ["spherical", "spherical"], ["dictionary", "dictionary"], ["pca", "dictionary PCA"]],
       hint: "What the sweeps before the last search with. A cheap search first, and the spherical correlation at full bandwidth for what it leaves, is the usual mix." },
-    { key: "sweep_bandwidth", label: "first L", type: "int", min: 8, max: 256, when: (s) => s.sweeps > 1 && firstMethod(s) === "spherical", hint: "The first sweep's bandwidth. The sweeps between it and the last are spaced by equal ratios." },
-    { key: "sweep_dict_grid", label: "first grid", type: "int", min: 2, max: 200, when: (s) => s.sweeps > 1 && firstMethod(s) !== "spherical", hint: "The first sweep's dictionary grid. The sweeps between it and the last are spaced by equal ratios." },
+    { key: "sweep_bandwidth", label: "first L", type: "int", min: 8, max: 256, of: (s) => s.sweeps > 1 && firstMethod(s) === "spherical", hint: "The first sweep's bandwidth. The sweeps between it and the last are spaced by equal ratios." },
+    { key: "sweep_dict_grid", label: "first grid", type: "int", min: 2, max: 200, of: (s) => s.sweeps > 1 && firstMethod(s) !== "spherical", hint: "The first sweep's dictionary grid. The sweeps between it and the last are spaced by equal ratios." },
+    { key: "bandwidth", label: "last L", type: "int", min: 8, max: 256, of: (s) => s.sweeps > 2 && firstMethod(s) === "spherical" && s.method !== "spherical", hint: "The bandwidth the sweeps between the first and the last are spaced toward (the last searches by the method above)." },
+    { key: "dict_grid", label: "last grid", type: "int", min: 2, max: 200, of: (s) => s.sweeps > 2 && firstMethod(s) !== "spherical" && s.method === "spherical", hint: "The dictionary grid the sweeps between the first and the last are spaced toward (the last searches by the method above)." },
+    { key: "pca_components", label: "components", type: "int", min: 4, max: 1024, of: (s) => s.sweeps > 1 && firstMethod(s) === "pca" && s.method !== "pca", hint: COMPONENTS },
+    { key: "pca_epochs", label: "Oja passes", type: "int", min: 1, max: 16, of: (s) => s.sweeps > 1 && firstMethod(s) === "pca" && s.method !== "pca", hint: EPOCHS },
   ],
   indexmore: [
     { key: "phase_by", label: "phase by", type: "enum", options: [["nmi", "NMI"], ["ncc", "NCC"]], hint: "With several phases: each pattern takes the phase whose best orientation scores highest by this." },
     { key: "nmi_bins", label: "NMI bins", type: "int", min: 2, max: 32, hint: "Histogram levels per axis of the mutual information. Small patterns have too few pixels for many." },
-    { key: "pca_components", label: "components", type: "int", min: 4, max: 1024, when: usesPca, hint: "Components kept of a dictionary. More find more patterns and cost more per comparison: on the nickel scan 128 of a grid of 40 find 94 %, 256 find 97 %." },
-    { key: "pca_epochs", label: "Oja passes", type: "int", min: 1, max: 16, when: usesPca, hint: "Passes of Oja's rule over the dictionary to learn its components. One is nearly enough." },
     { key: "batch", label: "batch", type: "int", min: 1, max: 4096, hint: "Patterns read and indexed per step (and per readback). Speed only: the results do not depend on it. Tune speed sets this, the pixels per invocation and the two workgroups to what runs fastest here." },
     { key: "refine_pixels", label: "px / thread", type: "int", min: 8, max: 65536, hint: "Pixels of a pattern one GPU invocation adds up in refinement. Speed only. The fastest value grows with the batch, so Tune speed moves the two together." },
     { key: "wg_refine", label: "WG refine", type: "enum", options: [[16, "16"], [32, "32"], [64, "64"], [128, "128"], [256, "256"]], hint: "GPU invocations per workgroup of refinement's sums. Speed only; each value is compiled once." },
     { key: "wg_fft", label: "WG FFT", type: "enum", options: [[16, "16"], [32, "32"], [64, "64"], [128, "128"], [256, "256"]], hint: "GPU invocations per workgroup of the correlation's FFT kernels. Speed only; each value is compiled once." },
     { key: "tile_mb", label: "FFT MiB", type: "int", min: 8, max: 8192, hint: "Memory the correlation's spectra may take per dispatch: how many patterns of a batch are correlated at once. Speed only, and it made no difference where it was measured, so Tune speed leaves it." },
-  ],
-  maps: [
-    { key: "ipf_lightness", label: "λL", type: "num", step: 0.05, min: 0, max: 1, when: (s) => s.ipf_colors.startsWith("perfect"), hint: "The paper's λL: 1 makes the lightness linear in the distance from a sector's centre, which leaves a small white spot; less widens the light (and dark) centre. The paper recommends a quarter." },
-    { key: "ipf_gray", label: "λS", type: "num", step: 0.05, min: 0, max: 1, when: (s) => s.ipf_colors.startsWith("perfect"), hint: "The paper's λS: 0 leaves the centres white and black; more turns them toward gray, which keeps white and black free for marks on the map. The paper recommends a quarter." },
   ],
   // the Simulate step
   simbeam: [
@@ -188,7 +197,7 @@ export const GEOMETRY = [
   ["pc", "PC", "Where the detector stands, for the beam at the map's centre. Bruker convention: x from the left and y from the top in fractions of the pattern's width and height; z, the detector distance, in fractions of its height.", 0.001, 1],
   ["sampleTiltDeg", "sample tilt °", "", 0.5, 1],
   ["detectorTiltDeg", "detector tilt °", "", 0.5, 1],
-  ["rot", "rotation °", "The detector's attitude away from the one the two tilts give it, as a rotation vector in its own axes: swing about its row direction (down the pattern), tilt about its column direction (in the detector tilt's sense), twist about its normal. A turn is about the source point: the pattern centre stays as it is written, and the pattern at the map's centre does not change (its crystal's orientation turns with the detector). A plane fit whose sample frame follows the plane sets it.", 0.05, 180 / Math.PI],
+  ["rot", "rotation °", "The detector's attitude away from the one the two tilts give it, as a rotation vector in its own axes: azimuthal about its row direction (down the pattern), tilt about its column direction (in the detector tilt's sense), twist about its normal. The rotation is about the source point: the pattern centre stays as it is written, and the pattern at the map's centre does not change (its crystal's orientation rotates with the detector). A plane fit whose sample frame follows the plane sets it.", 0.05, 180 / Math.PI],
   ["stepXUm", "step x µm", "The scan's step along the map's columns.", 0.1, 1],
   ["stepYUm", "step y µm", "The scan's step down the map's rows.", 0.1, 1],
   ["pxUm", "pixel µm", "The size of one stored pattern pixel on the detector (a binned pixel, when the patterns were binned): with the scan's steps, how far the beam moved between patterns, in pixels, until a plane of source points is fitted: the plane then says where the beam stood, and this only how its steps compare with the scan's. It is the file's when the file records one, else the detector's width over the pattern's pixels across, until a value is typed here. Cleared (or 0), it goes back to that. No fit changes it.", 10, 1],
@@ -261,6 +270,8 @@ export function buildFields(root, apply) {
         if (f.type === "bool") input.checked = !!settings[f.key]; else input.value = String(settings[f.key]);
         if (readout) readout.textContent = String(settings[f.key]);
         el.dataset.off = f.when && !f.when(settings) ? "1" : "0";
+        // a parameter of a choice (the method's, the early sweeps') shows only under its own
+        if (f.of) el.hidden = !f.of(settings);
       }
     },
   };

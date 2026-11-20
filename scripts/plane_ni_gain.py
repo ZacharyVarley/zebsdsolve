@@ -89,7 +89,7 @@ def main():
     print(f"{'':16s} {'nine calibration':>22s} {'map patterns':>14s} {'as given':>10s}")
     for k, n in enumerate(names):
         print(f"{n:16s} {1e5 * full[k]:+10.3f} ± {1e5 * se[k]:.3f} {1e5 * mine[k]:+14.3f} {1e5 * nominal[k]:+10.3f}")
-    print(f"\nthe map's plane says: tilt {np.degrees(w['rot'][1]):+.2f} ± {np.degrees(w['rot_se'][1]):.2f} deg from nominal, the scan turned {np.degrees(w['rot'][2]):+.2f} ± {np.degrees(w['rot_se'][2]):.2f} deg in its plane, "
+    print(f"\nthe map's plane says: tilt {np.degrees(w['rot'][1]):+.2f} ± {np.degrees(w['rot_se'][1]):.2f} deg from nominal, scan rotation {np.degrees(w['rot'][2]):+.2f} ± {np.degrees(w['rot_se'][2]):.2f} deg in its plane, "
           f"steps {w['step'][0]:.3f} ± {w['step_se'][0]:.3f} (row) and {w['step'][1]:.3f} ± {w['step_se'][1]:.3f} (column) of the given ones")
 
 

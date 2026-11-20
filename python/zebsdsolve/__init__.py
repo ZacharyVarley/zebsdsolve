@@ -149,7 +149,7 @@ class Solver:
     @property
     def geometry(self):
         """The detector geometry: a dict with pc (3), sample_tilt_deg, detector_tilt_deg, rot (3,
-        rotation vector, radians, in the detector's own axes: swing about its row direction,
+        rotation vector, radians, in the detector's own axes: azimuthal about its row direction,
         tilt about its column direction, twist about its normal), px_um, step_x_um, step_y_um.
 
         px_um is the size of one stored pattern pixel on the detector: the scan file's, or one
@@ -236,7 +236,7 @@ class Solver:
 
         Keywords are settings. The microstructure, from `toy_seed`: `toy_rows` × `toy_cols`
         cells cut into `toy_grains` grains (1: a single crystal), each with a random orientation
-        and phase; `toy_spread_deg` turns every cell a little within its grain; `toy_blank` is
+        and phase; `toy_spread_deg` rotates every cell a little within its grain; `toy_blank` is
         the share of cells holding no crystal. The detector: patterns of `toy_height` ×
         `toy_width` pixels, `toy_contrast` of whose intensity is the simulation and the rest a
         background (flat, or a hump of `toy_background_sigma` × the width). The counting: a
@@ -506,12 +506,12 @@ class Solver:
 
         Returns a dict: plane (4 × 3), kind, frame, pc (the source at the map's middle), start_pc
         (the pattern centre the fit began from), rot
-        (the geometry's turn now), n_patterns, n_used, rmsd (of the used points about the
+        (the geometry's detector rotation now), n_patterns, n_used, rmsd (of the used points about the
         plane: PCx, PCy, PCz), ncc and start_ncc (the fit patterns' mean score, each at its
         own best, and before), iterations, and `said`: what the plane says of the geometry,
         each with its standard error (`*_se`, from leaving out one block of the map at a
-        time): rot (the sample's frame against the nominal one: swing, tilt, and the scan's
-        turn in its own plane; radians), sample_tilt_deg (the sample tilt that tilt makes),
+        time): rot (the sample's frame against the nominal one: azimuthal, tilt, and the scan
+        rotation; radians), sample_tilt_deg (the sample tilt that tilt makes),
         step (the beam's travel for a row and for a column, as a factor on what the steps and
         the pixel size say), skew (the scan's directions off a right angle, radians)."""
         r = _n.PlaneResult()
@@ -792,8 +792,7 @@ class Solver:
 
     def ipf_key(self, phase=0, size=256, lower=False):
         """The key to a phase's inverse pole figure colours, as the settings have them
-        (`ipf_colors`: "classic", "hue", "perfect" or "perfect_rotation"; `ipf_lightness` and
-        `ipf_gray` for the last two): (rgba, box). `rgba` is uint8 (size, size, 4): the crystal
+        (`ipf_colors`: "classic", "hue", "perfect" or "perfect_rotation"): (rgba, box). `rgba` is uint8 (size, size, 4): the crystal
         directions that stand for all the others, in stereographic projection with the crystal's
         x to the right ([001] at the origin), transparent outside them. That is the triangle
         between [001], [101] and [111] for the cubic classes, a wedge from the c axis for any
@@ -904,7 +903,7 @@ class Solver:
         """Orientations as the results store them: (quaternions, euler), each quaternion's
         representative in the phase's fundamental zone and its Bunge angles (radians). The zone
         is that of the proper rotations of the phase's point group (for GaN, 6mm, the six about
-        c: not its Laue class's twelve, half of which turn the polar axis over)."""
+        c: not its Laue class's twelve, half of which flip the polar axis)."""
         q = _f32(quaternions).reshape(-1, 4).copy()
         euler = np.empty((len(q), 3), np.float64)
         for i in range(len(q)):

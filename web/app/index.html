@@ -4,6 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>zebsdsolve · EBSD pattern centre and indexing</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 20 20'%3E%3Ccircle cx='10' cy='10' r='7.6' fill='%230e0e10' stroke='%23d6b064' stroke-width='1.6'/%3E%3Cpath d='M3.5 13.2 16.5 6.8M5 5.5l10 9M10 2.8v14.4' fill='none' stroke='%23d6b064' stroke-width='1.2' stroke-linecap='round'/%3E%3C/svg%3E">
   <link rel="stylesheet" href="./css/app.css">
   <script>
     // the theme before the first paint (File › theme; kept in this browser only)
@@ -25,6 +26,8 @@
     <symbol id="i-crystal" viewBox="0 0 16 16"><path d="M8 1.6 13.6 4.8v6.4L8 14.4 2.4 11.2V4.8z" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"/><path d="M2.4 4.8 8 8l5.6-3.2M8 8v6.4" fill="none" stroke="currentColor" stroke-width="1.1" stroke-linejoin="round" opacity=".75"/></symbol>
     <symbol id="i-up" viewBox="0 0 12 12"><path d="M3 7.5 6 4.5l3 3" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></symbol>
     <symbol id="i-down" viewBox="0 0 16 16"><path d="M8 2.5v8M4.5 7.5 8 11l3.5-3.5M3 13.5h10" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+    <symbol id="i-menu" viewBox="0 0 16 16"><path d="M2.5 4.25h11M2.5 8h11M2.5 11.75h11" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></symbol>
+    <symbol id="i-caret" viewBox="0 0 8 5"><path d="M.5.5 4 4 7.5.5" fill="none" stroke="currentColor" stroke-width="1.2"/></symbol>
     <symbol id="i-roi" viewBox="0 0 16 16"><rect x="2.5" y="3.5" width="11" height="9" rx="1" fill="none" stroke="currentColor" stroke-width="1.3" stroke-dasharray="2.2 1.8"/></symbol>
   </svg>
 
@@ -32,9 +35,8 @@
     <aside class="rail" id="rail">
       <header class="rail-head">
         <div class="brand-row">
-          <span class="brand"><svg><use href="#i-logo"/></svg>zebsdsolve</span>
           <div class="menu" id="file-menu">
-            <button type="button" class="ghost menu-btn" id="btn-file" aria-haspopup="menu" aria-expanded="false" aria-controls="file-menu-list">File</button>
+            <button type="button" class="ghost icon menu-btn" id="btn-file" aria-haspopup="menu" aria-expanded="false" aria-controls="file-menu-list" aria-label="File" title="File: open, save, theme, conventions"><svg><use href="#i-menu"/></svg></button>
             <div class="menu-list" id="file-menu-list" role="menu" hidden>
               <button type="button" role="menuitem" data-click="btn-open">Open scan…</button>
               <button type="button" role="menuitem" data-click="btn-example">Open the example</button>
@@ -52,6 +54,7 @@
               <button type="button" role="menuitem" id="btn-conventions" title="Each reference frame and pattern-centre convention drawn: the sample's axes, the detector, where the pattern centre is measured from; the scan's own, once identified">View conventions…</button>
             </div>
           </div>
+          <span class="brand"><svg><use href="#i-logo"/></svg>zebsdsolve</span>
           <span class="adapter" id="adapter" title="GPU adapter"></span>
         </div>
         <div class="scan-meta" id="scan-meta">no scan open</div>
@@ -131,7 +134,7 @@
           <dl class="kv" id="fit-readout"></dl>
           <details class="sub" id="plane-said-box" hidden>
             <summary>Fit details</summary>
-            <dl class="kv" id="plane-said" title="Each with its standard error from leaving out one block of the map at a time. scatter: the patterns' own points about the fit. misfit: each model's error on held-out blocks against the best one's. swing, tilt: the sample's against the nominal. scan: its turn in the sample's plane and how far off square. steps: the beam's travel per row and column against what the steps and the pixel size say (1: as given)."></dl>
+            <dl class="kv" id="plane-said" title="Each with its standard error from leaving out one block of the map at a time. scatter: the patterns' own points about the fit. misfit: each model's error on held-out blocks against the best one's. azimuthal, tilt: the sample's against the nominal. scan: its rotation in the sample's plane and how far off square. steps: the beam's travel per row and column against what the steps and the pixel size say (1: as given)."></dl>
           </details>
 
           <h4>Pattern centre</h4>
@@ -156,7 +159,8 @@
           <div class="fields" id="geometry-fields"></div>
           <details class="sub">
             <summary>Advanced</summary>
-            <div class="tri" id="geo-turn-fields"></div>
+            <div class="tri" id="geo-rot-fields"></div>
+            <div class="fields" data-group="beam"></div>
             <div class="fields" data-group="pixel"></div>
           </details>
 
@@ -178,20 +182,14 @@
           </div>
           <dl class="kv" id="index-readout"></dl>
           <div class="fields" data-group="index"></div>
+          <div class="fields" data-group="refine"></div>
           <h4>Acceptance</h4>
           <div class="fields" data-group="accept"></div>
           <dl class="kv" id="sweep-readout"></dl>
-          <details class="sub">
-            <summary>Sweeps</summary>
-            <div class="fields" data-group="sweeps"></div>
-          </details>
-          <details class="sub">
+          <details class="sub" id="index-advanced">
             <summary>Advanced</summary>
+            <div class="fields" data-group="sweeps"></div>
             <div class="fields" data-group="indexmore"></div>
-          </details>
-          <details class="sub">
-            <summary>IPF key</summary>
-            <div class="fields" data-group="maps"></div>
           </details>
           <h4>Export</h4>
           <div class="row">
@@ -204,7 +202,12 @@
           <div class="row">
             <button type="button" class="needs-results" id="btn-ang" title="EDAX .ang: Bunge angles in the frame above, each orientation's representative in its phase's fundamental zone; the region of interest's cells"><svg><use href="#i-down"/></svg>.ang</button>
             <button type="button" class="needs-results" id="btn-ctf" title="Oxford .ctf: Bunge angles as for the .ang, with each phase's lattice"><svg><use href="#i-down"/></svg>.ctf</button>
-            <button type="button" class="needs-results" id="btn-h5oina" title="Oxford .h5oina, for a scan opened from one: the acquisition's header, maps and images copied (not its patterns), its indexing replaced by these results in the frame found from its own orientations, each cell's pattern centre, and this engine's scores under /zebsdsolve"><svg><use href="#i-down"/></svg>.h5oina</button>
+            <div class="menu" id="export-more">
+              <button type="button" class="needs-results" id="btn-export-more" aria-haspopup="menu" aria-expanded="false" aria-controls="export-more-list" title="Other formats">other<svg class="caret"><use href="#i-caret"/></svg></button>
+              <div class="menu-list up" id="export-more-list" role="menu" hidden>
+                <button type="button" role="menuitem" id="btn-h5oina" title="Oxford .h5oina, for a scan opened from one: the acquisition's header, maps and images copied (not its patterns), its indexing replaced by these results in the frame found from its own orientations, each cell's pattern centre, and this engine's scores under /zebsdsolve">.h5oina<span class="key">Oxford acquisitions</span></button>
+              </div>
+            </div>
             <button type="button" id="btn-json" title="The geometry and every setting, as JSON. Dropped on the window (or opened with a scan), it brings them back."><svg><use href="#i-down"/></svg>project .json</button>
           </div>
         </section>
@@ -213,7 +216,7 @@
           <div class="row">
             <button type="button" class="primary" id="btn-cif" title="A crystal structure to simulate: .cif (or drop one on the window). It is read into the International Tables' standard setting; how it was read goes to the log."><svg><use href="#i-open"/></svg>Open CIF…</button>
             <select id="cif-preset" title="Common crystals at their room-temperature lattice parameters">
-              <option value="">or a preset…</option>
+              <option value="">preset…</option>
               <option value="Ni">nickel</option>
               <option value="Al">aluminium</option>
               <option value="Fe-alpha">iron, ferrite (bcc)</option>
@@ -386,7 +389,7 @@
                     <button type="button" class="mini" id="votes-take" title="Make the candidate under the cross-hair the pattern centre, to fit again from there">use cross-hair</button>
                     <button type="button" class="ghost mini" id="votes-follow" title="Put the cross-hair back on the pattern centre in use. It goes there by itself whenever the pattern centre changes (a fit, or a value typed in).">reset cross-hair</button>
                   </div>
-                  <p class="hint marks"><span class="k" style="color:#fff">□</span> winner <span class="k" style="color:#fff">┄</span> next tier <span class="k" style="color:#fff">╱</span> path <span class="k" style="color:#e8c77e">+</span> current <span class="k" style="color:#9d9da4">×</span> start <span class="k" style="color:#6a9ec8">×</span> file</p>
+                  <p class="hint marks"><span class="k" style="color:#fff">□</span>winner <span class="k" style="color:#fff">┄</span>next tier <span class="k" style="color:#fff">╱</span>path <span class="k" style="color:#e8c77e">+</span>current <span class="k" style="color:#9d9da4">×</span>start <span class="k" style="color:#6a9ec8">×</span>file</p>
                 </div>
               </section>
             </div>
@@ -418,7 +421,7 @@
                 <button type="button" data-half="south" aria-pressed="false" title="The lower (southern) hemisphere alone, seen from above">south</button>
                 <button type="button" data-half="diff" aria-pressed="false" title="The upper hemisphere less the lower one's inversion, I(d) − I(−d): zero everywhere for a crystal with a centre of symmetry">N − S′</button>
               </div>
-              <div class="seg" id="view-mode" role="tablist" title="How the sphere is drawn. Drag to turn it (flat projections, locked: to move it), shift-drag to move it, scroll to zoom about the pointer, control-scroll to spin it, double-click for the first view.">
+              <div class="seg" id="view-mode" role="tablist" title="How the sphere is drawn. Drag to rotate it (flat projections, locked: to move it), shift-drag to move it, scroll to zoom about the pointer, control-scroll to spin it, double-click for the first view.">
                 <button type="button" data-view="globe" aria-pressed="true" title="The sphere seen from outside">globe</button>
                 <button type="button" data-view="lambert" aria-pressed="false" title="The two hemispheres as equal-area (Lambert) squares, as master patterns are stored">Lambert</button>
                 <button type="button" data-view="stereographic" aria-pressed="false" title="The two hemispheres as stereographic discs: angles kept, areas not">stereographic</button>
@@ -427,11 +430,11 @@
             </div>
             <div class="well globe-well" id="master-well">
               <div class="well-tools tl">
-                <label class="check" id="view-stereo-box" title="The globe as a stereogram: two views, one for each eye, side by side, for parallel viewing (look through the screen, as at something far off, until the two fuse). The globes stand as far apart as the eyes; their turn against each other is the eyes' angle on the sphere at the distance set below."><input type="checkbox" id="view-stereo"> stereo</label>
+                <label class="check" id="view-stereo-box" title="The globe as a stereogram: two views, one for each eye, side by side, for parallel viewing (look through the screen, as at something far off, until the two fuse). The globes stand as far apart as the eyes; their rotation against each other is the eyes' angle on the sphere at the distance set below."><input type="checkbox" id="view-stereo"> stereo</label>
               </div>
               <div class="well-tools tr">
-                <label class="check" id="view-lock-box" title="Keep the flat projections' poles where they are: a drag then moves the picture instead of turning the sphere (control-scroll still spins it about the north pole; shift-drag moves it either way). No effect on the globe."><input type="checkbox" id="view-lock" checked> lock</label>
-                <div class="seg" id="view-look" role="tablist" title="Look down a crystal axis (in a flat projection: that axis at the centre). Drag the picture to turn it from there.">
+                <label class="check" id="view-lock-box" title="Keep the flat projections' poles where they are: a drag then moves the picture instead of rotating the sphere (control-scroll still spins it about the north pole; shift-drag moves it either way). No effect on the globe."><input type="checkbox" id="view-lock" checked> lock</label>
+                <div class="seg" id="view-look" role="tablist" title="Look down a crystal axis (in a flat projection: that axis at the centre). Drag the picture to rotate it from there.">
                   <button type="button" data-look="0,0,1" title="Down onto the north pole: the crystal's z">z</button>
                   <button type="button" data-look="1,0,0" title="Along the crystal's x">x</button>
                   <button type="button" data-look="0,1,0" title="Along the crystal's y">y</button>
@@ -489,8 +492,8 @@
           <span class="meta" id="xtal-meta"></span>
         </div>
         <div class="xtal-body" id="xtal-body">
-          <div class="well globe-well cell-well" id="cell-well" title="Drag to turn the cell, scroll to zoom, control-scroll to spin it about the view, double-click for the first view">
-            <div class="well-tools tl"><label class="check" title="The cell and the master turn together: either one's turns are the other's (a locked flat projection keeps its poles)"><input type="checkbox" id="cell-link"> lock to master</label><label class="check" title="Draw 3 × 3 × 3 cells, the lattice's grid through them, so that the density of atoms along planes and directions shows"><input type="checkbox" id="cell-super"> 3 × 3 × 3</label></div>
+          <div class="well globe-well cell-well" id="cell-well" title="Drag to rotate the cell, scroll to zoom, control-scroll to spin it about the view, double-click for the first view">
+            <div class="well-tools tl"><label class="check" title="The cell and the master rotate together: either one's rotations are the other's (a locked flat projection keeps its poles)"><input type="checkbox" id="cell-link"> lock to master</label><label class="check" title="Draw 3 × 3 × 3 cells, the lattice's grid through them, so that the density of atoms along planes and directions shows"><input type="checkbox" id="cell-super"> 3 × 3 × 3</label></div>
             <div class="well-tools tr"><div class="seg" id="cell-look" role="tablist" title="Look along a lattice vector">
               <button type="button" data-look="0" title="Along a">a</button>
               <button type="button" data-look="1" title="Along b">b</button>

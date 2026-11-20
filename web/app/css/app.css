@@ -225,7 +225,7 @@ input.slide:disabled { visibility: hidden; }
 /* a control that does not apply with the settings as they are is dimmed, never hidden: what
    is not in view is taken not to exist */
 .field[data-off="1"] { opacity: .4; }
-/* three numbers under x, y, z (or swing, tilt, twist), with a name for each row */
+/* three numbers under x, y, z (or azimuthal, tilt, twist), with a name for each row */
 .tri { display: grid; grid-template-columns: 52px repeat(3, minmax(0, 1fr)); gap: 3px 4px; align-items: center; font: 11.5px var(--mono); }
 .tri > .h { color: var(--faint); font: 10.5px var(--font); text-align: center; }
 .tri > .k { color: var(--muted); font: 11.5px var(--font); white-space: nowrap; }
@@ -233,7 +233,7 @@ input.slide:disabled { visibility: hidden; }
 .tri > .v.d { color: var(--muted); }
 .tri > input { width: 100%; min-width: 0; padding: 0 5px; font-size: 11.5px; -moz-appearance: textfield; }
 .tri > input::-webkit-inner-spin-button, .tri > input::-webkit-outer-spin-button { -webkit-appearance: none; margin: 0; }
-#geo-turn-fields { grid-template-columns: 66px repeat(3, minmax(0, 1fr)); padding: 0; }
+#geo-rot-fields { grid-template-columns: 66px repeat(3, minmax(0, 1fr)); padding: 0; }
 .panel > .tri { padding: 6px 8px; background: var(--field); border: 1px solid var(--line-soft); border-radius: var(--rad-s); }
 .tri input { background: var(--panel); }
 /* what a fit found: names and values, two to a row */
@@ -242,7 +242,7 @@ input.slide:disabled { visibility: hidden; }
 .kv dt { color: var(--faint); white-space: nowrap; }
 .kv dd { color: var(--text); font: 11.5px var(--mono); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .kv dt.wide { grid-column: 1; }
-.kv dd.wide { grid-column: span 3; }
+.kv dd.wide { grid-column: span 3; white-space: normal; overflow-wrap: anywhere; }
 .kv dd.warn { color: var(--accent-hi); }
 .panel > .kv { padding: 6px 8px; background: var(--field); border: 1px solid var(--line-soft); border-radius: var(--rad-s); }
 .state { display: flex; align-items: center; gap: 8px; font-size: 11.5px; color: var(--muted); }
@@ -290,7 +290,7 @@ input.slide:disabled { visibility: hidden; }
 .console-head .flip { transform: rotate(180deg); }
 .ttl { font-size: 10px; font-weight: 650; letter-spacing: .09em; text-transform: uppercase; color: var(--muted); }
 .log { flex: 1; overflow: auto; padding: 6px 12px 8px; font: 11px/1.55 var(--mono); color: var(--muted); white-space: pre-wrap; user-select: text; overflow-wrap: anywhere; }
-.log > div { padding: 1px 0; display: grid; grid-template-columns: 7ch minmax(0, 1fr); gap: 8px; }
+.log > div { padding: 1px 0; display: grid; grid-template-columns: 8ch minmax(0, 1fr); gap: 8px; }
 .log .t { color: var(--faint); }
 .log .err { color: var(--bad); }
 .console-bar { position: relative; display: flex; align-items: center; gap: 8px; height: 30px; padding: 0 8px 0 10px; cursor: pointer; user-select: none; font-size: 11.5px; color: var(--muted); }
@@ -331,6 +331,8 @@ input.slide:disabled { visibility: hidden; }
 /* (the Simulate step needs no bar: the dock is the master's, and its own bar says the rest) */
 .app[data-tab="simulate"] .dock-pane > .pane-bar { display: none; }
 .facts-line { color: var(--muted); font: 11px var(--mono); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+/* (the crystal's facts are read whole: they wrap) */
+#crystal-facts { white-space: normal; }
 .well-tools.bl { bottom: 0; left: 0; right: 0; }
 .stereo-bar { align-items: center; gap: 14px; }
 .stereo-bar > label { display: inline-flex; align-items: center; gap: 7px; padding: 3px 9px; border-radius: var(--rad-s); background: rgba(14, 14, 16, .84); border: 1px solid var(--line); color: var(--muted); font-size: 11px; backdrop-filter: blur(3px); }
@@ -436,7 +438,8 @@ body[data-resize="col"] * { cursor: col-resize !important; }
 .vote-read .readout { margin: 0; font-size: 10.5px; line-height: 1.5; white-space: pre; overflow: hidden; }
 .vote-acts { display: flex; gap: 6px; flex-wrap: wrap; }
 .vote-read .marks { margin: 0; font-size: 10.5px; }
-.vote-read .marks .k { font-family: var(--mono); margin-left: 6px; }
+.vote-read .marks .k { font-family: var(--mono); margin: 0 4px 0 8px; padding: 0 3px; border-radius: 2px; background: var(--well); }
+.vote-read .marks .k:first-child { margin-left: 0; }
 .votes-empty { display: none; flex: 1; margin: 0; padding: 12% 24px 0; }
 .votes-empty .hint { max-width: 34em; margin: 0 auto 12px; text-align: center; }
 .votes-empty .readout { width: max-content; margin: 0 auto; font-size: 12px; line-height: 1.6; white-space: pre; }
@@ -582,13 +585,18 @@ label.check[data-off="1"] { opacity: .4; }
 
 /* ── the File menu: what opens and saves, the theme, and the conventions ── */
 .menu { position: relative; flex: none; }
-.menu-btn { height: 21px; padding: 0 7px; font-size: 11.5px; }
+.menu-btn { height: 22px; margin-left: -4px; }
+.menu-btn svg { width: 15px; height: 15px; }
 .menu-btn[aria-expanded="true"] { background: var(--raise); border-color: var(--line); color: var(--text); }
 .menu-list { position: absolute; left: 0; top: calc(100% + 4px); z-index: 20; min-width: 236px; padding: 4px; display: flex; flex-direction: column; gap: 1px;
   background: var(--card); border: 1px solid var(--line); border-radius: var(--rad); box-shadow: 0 10px 28px var(--shade); }
 .menu-list > button { justify-content: flex-start; height: 26px; padding: 0 9px; background: transparent; border-color: transparent; color: var(--text); font-size: 12px; }
 .menu-list > button:hover:not(:disabled) { background: var(--raise); border-color: transparent; }
 .menu-list > button .key { margin-left: auto; color: var(--faint); font: 10.5px var(--mono); }
+.menu-list.up { top: auto; bottom: calc(100% + 4px); left: auto; right: 0; min-width: 200px; }
+.row > .menu { flex: 1 1 auto; display: flex; }
+.row > .menu > button { flex: 1; }
+svg.caret { width: 8px; height: 5px; opacity: .8; }
 .menu-list > hr { border: 0; border-top: 1px solid var(--line-soft); margin: 3px 2px; }
 .menu-row { display: flex; align-items: center; gap: 8px; height: 28px; padding: 0 4px 0 9px; color: var(--muted); font-size: 11.5px; }
 .menu-row .seg { margin-left: auto; }

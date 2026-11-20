@@ -1,5 +1,5 @@
 // A master pattern in a picture: the engine renders the pixels (mastersph.wgsl, sphere_view) in
-// one of four projections; this holds each projection's rotation and zoom, turns the mouse into
+// one of four projections; this holds each projection's rotation and zoom, maps the mouse to
 // them, and draws the crystal's axes and its equator over the picture.
 //
 //   globe          the sphere seen from outside (orthographic), lit
@@ -12,7 +12,7 @@
 // frame. The flat projections start with R = 1: the upper hemisphere is the crystal's, x to the
 // right and y up, the lower one seen from above (through the sphere), as the master's sheets are.
 
-import { IDENTITY, lookFrom, mul, applyT, orthonormal, arcball, Frames, pictureSize, wireTurning, spinZ } from "./turn.js";
+import { IDENTITY, lookFrom, mul, applyT, orthonormal, arcball, Frames, pictureSize, wireRotation, spinZ } from "./rotate.js";
 
 const NS = "http://www.w3.org/2000/svg";
 const AXES = [["x", "#e0705e"], ["y", "#7fbf6e"], ["z", "#6a9ec8"]];
@@ -133,12 +133,12 @@ function dirName(c) {
 export class MasterView {
   /** `well`: the element the canvas and its overlay sit in; `render({ projection, rot, zoom,
    *  width, height })` returns the engine's RGBA pixels (or null when there is nothing to show);
-   *  `onTurn(rot)` hears of every turn the user makes. */
-  constructor(well, render, onTurn = null) {
+   *  `onRotate(rot)` hears of every rotation the user makes. */
+  constructor(well, render, onRotate = null) {
     this.well = well;
     this.render = render;
-    this.onTurn = onTurn;
-    // the flat projections' poles stay where they are (a drag does not turn them; control-
+    this.onRotate = onRotate;
+    // the flat projections' poles stay where they are (a drag does not rotate them; control-
     // scroll still spins them about the north pole)
     this.locked = true;
     this.canvas = document.createElement("canvas");
@@ -156,9 +156,9 @@ export class MasterView {
     this.stereo = { on: false, dist: 500, ipd: 60, swap: false };
     this.alive = false;
     this.frames = new Frames((rough) => this.frame(rough));
-    wireTurning(this.canvas, {
+    wireRotation(this.canvas, {
       at: (ev) => (this.isLocked() ? null : this.dirAt(ev)),
-      turn: (T) => { const s = this.state[this.projection]; s.rot = orthonormal(mul(s.rot, T)); this.frames.request(true); this.told(); },
+      rotate: (T) => { const s = this.state[this.projection]; s.rot = orthonormal(mul(s.rot, T)); this.frames.request(true); this.told(); },
       // zoom about the pointer: the point under it stays under it
       zoom: (f, ev) => {
         const s = this.state[this.projection];
@@ -207,7 +207,7 @@ export class MasterView {
     this.frames.request(true);
   }
 
-  told() { if (this.onTurn) this.onTurn(this.state[this.projection].rot); }
+  told() { if (this.onRotate) this.onRotate(this.state[this.projection].rot); }
 
   /** The hemispheres shown (flat projections: 0 both, 1 upper, 2 lower) and whether the picture
    *  is the upper hemisphere less the lower one's inversion. */
@@ -218,7 +218,7 @@ export class MasterView {
   }
 
   /** The globe as a stereogram (or not): two views side by side, as far apart as the eyes
-   *  (a screen pixel taken to be 0.265 mm), each turned from the other by the angle the eyes
+   *  (a screen pixel taken to be 0.265 mm), each rotated from the other by the angle the eyes
    *  have on the sphere at `dist` mm. */
   setStereo(on, dist, ipd, swap) {
     this.stereo = { on: !!on, dist, ipd, swap: !!swap };
@@ -226,15 +226,15 @@ export class MasterView {
   }
 
   /** In a stereogram: the two views' places, [{ x, y, half }] (left eye first, as drawn), in
-   *  the pane's pixels, and each one's turn about the screen's vertical. */
+   *  the pane's pixels, and each one's rotation about the screen's vertical. */
   stereoLayout(w, h, zoom) {
     const { dist, ipd, swap } = this.stereo;
     const sep = ipd / MM_PER_PX;
     // each view as wide as the separation, no wider (they would overlap); room to be smaller
     const half = Math.min(0.5 * sep * 0.98, 0.5 * Math.min(w / 2, h)) * Math.min(zoom, 1);
     const phi = ipd / dist;
-    const L = { x: w / 2 - sep / 2, y: h / 2, half, turn: swap ? phi / 2 : -phi / 2 };
-    const Rr = { x: w / 2 + sep / 2, y: h / 2, half, turn: swap ? -phi / 2 : phi / 2 };
+    const L = { x: w / 2 - sep / 2, y: h / 2, half, yaw: swap ? phi / 2 : -phi / 2 };
+    const Rr = { x: w / 2 + sep / 2, y: h / 2, half, yaw: swap ? -phi / 2 : phi / 2 };
     return [L, Rr];
   }
 
@@ -248,7 +248,7 @@ export class MasterView {
     this.refresh();
   }
 
-  /** A new master: back to the whole picture (zoom and pan; the turn is kept). */
+  /** A new master: back to the whole picture (zoom and pan; the rotation is kept). */
   resetLayout() {
     for (const k of PROJECTIONS) { this.state[k].zoom = FIRST[k].zoom; this.state[k].pan = [0, 0]; }
   }
@@ -328,7 +328,7 @@ export class MasterView {
     const eyes = [a, b];
     const pics = [];
     for (const eye of eyes) {
-      const R = mul(rot, [Math.cos(eye.turn), 0, -Math.sin(eye.turn), 0, 1, 0, Math.sin(eye.turn), 0, Math.cos(eye.turn)]);
+      const R = mul(rot, [Math.cos(eye.yaw), 0, -Math.sin(eye.yaw), 0, 1, 0, Math.sin(eye.yaw), 0, Math.cos(eye.yaw)]);
       pics.push(await this.render({ projection: "globe", rot: R, zoom: 0.98, pan: [0, 0], shown: 0, difference: this.difference, width: side, height: side }));
     }
     if (!pics[0] || !pics[1]) { this.canvas.hidden = true; this.over.replaceChildren(); return; }
@@ -348,7 +348,7 @@ export class MasterView {
     this.canvas.hidden = false;
     const els = [];
     eyes.forEach((e, k) => {
-      const R = mul(rot, [Math.cos(e.turn), 0, -Math.sin(e.turn), 0, 1, 0, Math.sin(e.turn), 0, Math.cos(e.turn)]);
+      const R = mul(rot, [Math.cos(e.yaw), 0, -Math.sin(e.yaw), 0, 1, 0, Math.sin(e.yaw), 0, Math.cos(e.yaw)]);
       els.push(...this.drawOverlay("globe", R, zoom, [0, 0], 0, e));
     });
     this.over.setAttribute("viewBox", `0 0 ${w} ${h}`);

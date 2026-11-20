@@ -108,7 +108,11 @@ function drawLab(svg, conv, g) {
   const c00 = add(add(PCp, mul(L.e1, -pc[1] * Hd)), mul(L.e2, -pc[0] * Wd));
   const dc = (r, q) => add(add(c00, mul(L.e1, r * Hd)), mul(L.e2, q * Wd));
   const B = [0, 0, 2.3];
-  const A = corner(-1, -1), len = 0.9;
+  // the map's first cell, as the engine reads the scan (its signs), and the sample's axes at
+  // another corner (the up-slope near one, unless the map starts there)
+  const m0uw = g.signs ? [-g.signs[1], -g.signs[0]] : null;
+  const [au, aw] = [[-1, -1], [-1, 1], [1, -1]].find(([u, w]) => !m0uw || u !== m0uw[0] || w !== m0uw[1]);
+  const A = corner(au, aw), len = 0.9;
   const engine = [L.xs, L.ys, L.zs];
   // fitted to the frame
   const ext = [corner(-1, -1), corner(1, -1), corner(1, 1), corner(-1, 1), dc(0, 0), dc(0, 1), dc(1, 0), dc(1, 1), B, ...engine.flatMap((e) => [add(A, mul(e, len + 0.35)), add(A, mul(e, -0.2))])].map(proj);
@@ -119,58 +123,106 @@ function drawLab(svg, conv, g) {
   const P = (v) => { const [x, y] = proj(v); return [ox + s * x, oy + s * y]; };
   const f = (n) => n.toFixed(1);
   const pts = (...vs) => vs.map((v) => P(v).map(f).join(",")).join(" ");
-  const line = (a, b, cls, extra = {}) => { const [xa, ya] = P(a), [xb, yb] = P(b); return el("line", { x1: f(xa), y1: f(ya), x2: f(xb), y2: f(yb), class: cls, ...extra }, svg); };
-  // a label beyond an arrow's tip, along it on the page
-  const tipLabel = (a, b, text, cls, gap = 11) => {
+  // every line drawn, on the page, for the labels to keep off
+  const segs = [];
+  const line = (a, b, cls, extra = {}) => {
     const [xa, ya] = P(a), [xb, yb] = P(b);
-    const d = Math.hypot(xb - xa, yb - ya) || 1;
-    el("text", { x: f(xb + ((xb - xa) / d) * gap), y: f(yb + ((yb - ya) / d) * gap + 4), "text-anchor": "middle", class: `cv-label ${cls}` }, svg, text);
+    segs.push([xa, ya, xb, yb]);
+    return el("line", { x1: f(xa), y1: f(ya), x2: f(xb), y2: f(yb), class: cls, ...extra }, svg);
   };
-  const note = (v, text, dx, dy, anchor = "start") => { const [x, y] = P(v); el("text", { x: f(x + dx), y: f(y + dy), "text-anchor": anchor, class: "cv-note" }, svg, text); };
+  const polygon = (cls, ...vs) => {
+    const q = vs.map(P);
+    q.forEach((a, i) => { const b = q[(i + 1) % q.length]; segs.push([a[0], a[1], b[0], b[1], 0.25]); });
+    el("polygon", { points: pts(...vs), class: cls }, svg);
+  };
+  const labels = [];
+  // A label near a point: of the places around it (beyond the arrow it names first, when it
+  // names one), the first that covers no line, no other label and nothing outside the frame;
+  // else the one that covers least.
+  const label = (at, text, cls, { from = null, gap = 10 } = {}) => {
+    const [x, y] = P(at);
+    const size = cls === "cv-note" ? 5.6 : /\bmap\b/.test(cls) ? 6.8 : 7.4;
+    const w = text.length * size + 4, h = 13;
+    const dirs = [];
+    if (from) {
+      const [xa, ya] = P(from);
+      const d = Math.hypot(x - xa, y - ya) || 1;
+      dirs.push([(x - xa) / d, (y - ya) / d]);
+    }
+    for (let k = 0; k < 16; k++) dirs.push([Math.cos((k * Math.PI) / 8), Math.sin((k * Math.PI) / 8)]);
+    let best = null;
+    for (const r of [gap, gap + 7, gap + 15, gap + 26]) for (const [dx, dy] of dirs) {
+      // the box's centre where its edge, not its centre, keeps the distance
+      const cx = x + dx * (r + Math.abs(dx) * w / 2), cy = y + dy * (r + Math.abs(dy) * h / 2);
+      const box = [cx - w / 2, cy - h / 2, cx + w / 2, cy + h / 2];
+      let cost = 0;
+      if (box[0] < 2 || box[1] < 2 || box[2] > W - 2 || box[3] > H - 2) cost += 5;
+      for (const b of labels) if (box[0] < b[2] && box[2] > b[0] && box[1] < b[3] && box[3] > b[1]) cost += 3;
+      for (const s of segs) if (crosses(s, box)) cost += s[4] ?? 1;
+      cost += r / 200;
+      if (!best || cost < best.cost - 1e-9) best = { cost, cx, cy, box };
+      if (cost < 0.2) break;
+    }
+    labels.push(best.box);
+    el("text", { x: f(best.cx), y: f(best.cy + 4), "text-anchor": "middle", class: cls }, svg, text);
+  };
   const defs = el("defs", {}, svg);
   for (const [id, cls] of [["cv-arrow", "cv-origin"], ["cv-arrow-map", "cv-pc"], ["cv-arrow-x", "cv-label x"], ["cv-arrow-y", "cv-label y"], ["cv-arrow-z", "cv-label z"]]) {
     const m = el("marker", { id, viewBox: "0 0 10 10", refX: 8, refY: 5, markerWidth: 6, markerHeight: 6, orient: "auto-start-reverse" }, defs);
     el("path", { d: "M0 1 L9 5 L0 9 z", class: cls, style: "stroke:none" }, m);
   }
 
+  // everything drawn first, the labels after, each kept off what is there
   // the detector (behind, as seen from here), the sample, the beam
-  el("polygon", { points: pts(dc(0, 0), dc(0, 1), dc(1, 1), dc(1, 0)), class: "cv-detector" }, svg);
-  el("polygon", { points: pts(corner(-1, -1), corner(1, -1), corner(1, 1), corner(-1, 1)), class: "cv-sample" }, svg);
+  polygon("cv-detector", dc(0, 0), dc(0, 1), dc(1, 1), dc(1, 0));
+  polygon("cv-sample", corner(-1, -1), corner(1, -1), corner(1, 1), corner(-1, 1));
   line(B, O, "cv-beam");
-  note(B, "beam", 6, 4);
   // the distance to the pattern centre, and the pattern's first pixel, rows and columns
   line(O, PCp, "cv-dd");
   const [px, py] = P(PCp);
   el("circle", { cx: f(px), cy: f(py), r: 3.4, class: "cv-pc" }, svg);
-  note(PCp, "PC", 7, -6);
   const [fx, fy] = P(dc(0, 0));
   el("circle", { cx: f(fx), cy: f(fy), r: 2.6, class: "cv-origin" }, svg);
   line(dc(0, 0), dc(0.28, 0), "cv-measure", { "marker-end": "url(#cv-arrow)" });
   line(dc(0, 0), dc(0, 0.28), "cv-measure", { "marker-end": "url(#cv-arrow)" });
-  tipLabel(dc(0, 0), dc(0.28, 0), "row", "ref", 12);
-  tipLabel(dc(0, 0), dc(0, 0.28), "col", "ref", 12);
   // the map's rows and columns on the sample, as the engine reads the scan (its signs)
+  let mapRow = null, mapCol = null;
   if (g.signs) {
     const [sx, sy] = g.signs;
-    const m0 = corner(-sy, -sx);
-    const rowDir = mul(L.xs, sy), colDir = mul(L.ys, sx);
-    line(m0, add(m0, mul(rowDir, 0.7)), "cv-map", { "marker-end": "url(#cv-arrow-map)" });
-    line(m0, add(m0, mul(colDir, 0.8)), "cv-map", { "marker-end": "url(#cv-arrow-map)" });
-    tipLabel(m0, add(m0, mul(rowDir, 0.7)), "map row", "map", 26);
-    tipLabel(m0, add(m0, mul(colDir, 0.8)), "map col", "map", 24);
+    const m0 = corner(...m0uw);
+    mapRow = [m0, add(m0, mul(L.xs, sy * 0.7))];
+    mapCol = [m0, add(m0, mul(L.ys, sx * 0.8))];
+    line(...mapRow, "cv-map", { "marker-end": "url(#cv-arrow-map)" });
+    line(...mapCol, "cv-map", { "marker-end": "url(#cv-arrow-map)" });
   }
   // the convention's sample axes at the sample's corner, over the engine's (dashed, lower case)
-  for (let i = 0; i < 3; i++) {
-    line(A, add(A, mul(engine[i], len)), "cv-ref");
-    tipLabel(A, add(A, mul(engine[i], len)), AXES[i], "ref", 8);
+  for (let i = 0; i < 3; i++) line(A, add(A, mul(engine[i], len)), "cv-ref");
+  const axes = conv.axes ? conv.axes.map((code) => mul(engine[Math.abs(code) - 1], Math.sign(code))) : [];
+  axes.forEach((v, i) => line(A, add(A, mul(v, len)), `cv-axis ${AXES[i]}`, { "marker-end": `url(#cv-arrow-${AXES[i]})` }));
+  // the labels, the convention's axes first
+  axes.forEach((v, i) => label(add(A, mul(v, len)), "XYZ"[i], `cv-label ${AXES[i]}`, { from: A, gap: 8 }));
+  // (the engine's own name only where no axis of the convention lies along it)
+  for (let i = 0; i < 3; i++) if (!conv.axes?.includes(i + 1)) label(add(A, mul(engine[i], len)), AXES[i], "cv-label ref", { from: A, gap: 5 });
+  if (mapRow) {
+    label(mapRow[1], "map row", "cv-label map", { from: mapRow[0], gap: 8 });
+    label(mapCol[1], "map col", "cv-label map", { from: mapCol[0], gap: 8 });
   }
-  if (conv.axes) {
-    conv.axes.forEach((code, i) => {
-      const v = mul(engine[Math.abs(code) - 1], Math.sign(code));
-      line(A, add(A, mul(v, len)), `cv-axis ${AXES[i]}`, { "marker-end": `url(#cv-arrow-${AXES[i]})` });
-      tipLabel(A, add(A, mul(v, len)), "XYZ"[i], AXES[i], 20);
-    });
-  }
+  label(PCp, "PC", "cv-note", { gap: 6 });
+  label(B, "beam", "cv-note", { gap: 6 });
+  label(dc(0.28, 0), "row", "cv-label ref", { from: dc(0, 0), gap: 6 });
+  label(dc(0, 0.28), "col", "cv-label ref", { from: dc(0, 0), gap: 6 });
+}
+
+/** Whether segment s ([x1, y1, x2, y2]) touches box b ([x0, y0, x1, y1]). */
+function crosses(s, b) {
+  const [x1, y1, x2, y2] = s;
+  if (Math.max(x1, x2) < b[0] || Math.min(x1, x2) > b[2] || Math.max(y1, y2) < b[1] || Math.min(y1, y2) > b[3]) return false;
+  const inside = (x, y) => x >= b[0] && x <= b[2] && y >= b[1] && y <= b[3];
+  if (inside(x1, y1) || inside(x2, y2)) return true;
+  // the box's corners on both sides of the segment's line: it passes through
+  const side = (x, y) => Math.sign((x2 - x1) * (y - y1) - (y2 - y1) * (x - x1));
+  const s0 = [side(b[0], b[1]), side(b[2], b[1]), side(b[0], b[3]), side(b[2], b[3])];
+  return Math.min(...s0) < 0 && Math.max(...s0) > 0;
 }
 
 function drawPattern(svg, conv, g) {

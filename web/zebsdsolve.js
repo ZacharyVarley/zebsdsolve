@@ -27,7 +27,7 @@ const utf8enc = new TextEncoder();
 // each. The adapter remembers (in localStorage) which pipelines this origin created, and at
 // the next load starts compiling all of them in parallel while the page sets up, so the first
 // fit or indexing step finds them ready. The list belongs to one build of zebsdsolve.wasm (its
-// fingerprint), so a new build starts a new list. `warm: false` in Zebsdsolve.create turns this off.
+// fingerprint), so a new build starts a new list. `warm: false` in Zebsdsolve.create switches this off.
 // A first visit starts from a list shipped with the site (`pipelines.json` beside the wasm,
 // recorded by tests/test_web.mjs --save-pipelines) when it belongs to the same build.
 // sphereView's projections, in the engine's order (sphereview.zig Projection)
@@ -1134,7 +1134,7 @@ export class Zebsdsolve {
    * takes the plane (its `planeKind`, `plane`: 4 × 3 row-major, plane · (column, row, 1) = w · (PCx, PCy, PCz, 1)), and
    * the scan's steps and the pixel size then say nothing of where the beam stood. Resolves to { plane, kind
    * (PLANE_KINDS), frame (0 nominal, 1 following the plane), pc, pcSe, rot, saidRot and saidRotSe (the sample's frame
-   * by the plane against the nominal one: swing, tilt, the scan's turn in its plane; radians), step and stepSe (the
+   * by the plane against the nominal one: azimuthal, tilt, the scan rotation; radians), step and stepSe (the
    * beam's travel for a row and a column against what the steps and pixel size say), skew, skewSe, rmsd (PCx, PCy,
    * PCz), ncc, startNcc, nPatterns, nUsed, iterations, blocks }.
    */
@@ -1330,8 +1330,8 @@ export class Zebsdsolve {
     });
   }
 
-  /** The key to a phase's inverse pole figure colours, as the settings have them (ipf_colors,
-   *  ipf_lightness, ipf_gray): { rgba (size × size × 4, for an ImageData), size, box, wedge }.
+  /** The key to a phase's inverse pole figure colours, as the settings have them (ipf_colors):
+   *  { rgba (size × size × 4, for an ImageData), size, box, wedge }.
    *  The crystal directions that stand for all the others, in stereographic projection with the
    *  crystal's x to the right ([001] at the origin), transparent outside them; `box` is their
    *  bounding box in the projection [x0, y0, x1, y1], drawn from the image's lower left corner at

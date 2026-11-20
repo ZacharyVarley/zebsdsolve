@@ -1,8 +1,8 @@
-// The crystal's unit cell in a picture: the engine renders it (cellview.wgsl); this turns the
+// The crystal's unit cell in a picture: the engine renders it (cellview.wgsl); this maps the
 // mouse into the view's rotation and zoom and names what is drawn: the lattice vectors a, b and
 // c along the edges from the cell's origin, the angles between them, and the elements.
 
-import { lookFrom, mul, applyT, orthonormal, arcball, Frames, pictureSize, wireTurning } from "./turn.js";
+import { lookFrom, mul, applyT, orthonormal, arcball, Frames, pictureSize, wireRotation } from "./rotate.js";
 
 const NS = "http://www.w3.org/2000/svg";
 // a, b, c in the colours of the master view's x, y, z (the rods from the origin are drawn so)
@@ -14,12 +14,12 @@ const fmt = (v, d) => (Math.abs(v - Math.round(v)) < 1e-9 ? String(Math.round(v)
 
 export class CellView {
   /** `well`: the element the picture sits in; `render({ rot, zoom, highlight, width, height })`
-   *  returns the engine's RGBA pixels (or null when there is no crystal); `onTurn(rot)` hears of
-   *  every turn the user makes. */
-  constructor(well, render, onTurn = null) {
+   *  returns the engine's RGBA pixels (or null when there is no crystal); `onRotate(rot)` hears of
+   *  every rotation the user makes. */
+  constructor(well, render, onRotate = null) {
     this.well = well;
     this.render = render;
-    this.onTurn = onTurn;
+    this.onRotate = onRotate;
     this.canvas = document.createElement("canvas");
     this.canvas.className = "globe-canvas";
     this.over = document.createElementNS(NS, "svg");
@@ -34,13 +34,13 @@ export class CellView {
     this.zoom = ZOOM;
     this.highlight = null;
     this.frames = new Frames((rough) => this.frame(rough));
-    wireTurning(this.canvas, {
+    wireRotation(this.canvas, {
       at: (ev) => {
         const r = this.canvas.getBoundingClientRect();
         const rad = 0.5 * Math.min(r.width, r.height) * this.zoom;
         return arcball((ev.clientX - r.left - r.width / 2) / rad, (r.top + r.height / 2 - ev.clientY) / rad);
       },
-      turn: (T) => { if (this.rot) { this.rot = orthonormal(mul(this.rot, T)); this.frames.request(true); this.told(); } },
+      rotate: (T) => { if (this.rot) { this.rot = orthonormal(mul(this.rot, T)); this.frames.request(true); this.told(); } },
       zoom: (f) => { this.zoom = Math.max(0.3, Math.min(10, this.zoom * f)); this.frames.request(true); },
       reset: () => this.reset(),
       dragging: (on) => { if (on) this.well.dataset.drag = "1"; else { delete this.well.dataset.drag; this.frames.request(false); } },
@@ -70,7 +70,7 @@ export class CellView {
 
   refresh() { this.frames.request(false); }
 
-  told() { if (this.onTurn && this.rot) this.onTurn(this.rot); }
+  told() { if (this.onRotate && this.rot) this.onRotate(this.rot); }
 
   /** Take a rotation from elsewhere (a linked view). */
   setRotation(rot) {

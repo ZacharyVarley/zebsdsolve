@@ -1,7 +1,7 @@
 //! A master pattern in a picture, for the app: a globe (an orthographic camera looking at a
 //! unit sphere whose surface carries the master), the two Lambert squares, the two
 //! stereographic discs, or the whole sphere in one square (the joint Lambert projection), each
-//! of the view turned by a rotation the caller holds (the mouse's). The sheets of the master
+//! of the view rotated by a rotation the caller holds (the mouse's). The sheets of the master
 //! shown are kept on the device between calls, so that a drag only renders (mastersph.wgsl,
 //! sphere_view).
 const std = @import("std");
@@ -50,7 +50,7 @@ pub const Projection = enum(u32) { globe = 0, lambert = 1, stereographic = 2, jo
 /// `source` ≥ 0 a phase's, as patterns are compared with it (or, `stored`, as it was loaded),
 /// −1 the last simulation's (of energy bin `bin` alone when ≥ 0, of site `site` alone when ≥
 /// 0). `layout` is (pan across, pan down, hemispheres shown: 0 both, 1 upper, 2 lower, 1 for the
-/// difference of the upper and the inverted lower; see sphere_view). `rot` turns view directions (x right, y up, z toward the viewer) into the crystal's
+/// difference of the upper and the inverted lower; see sphere_view). `rot` takes view directions (x right, y up, z toward the viewer) into the crystal's
 /// frame, row-major; `zoom` 1 fits the projection to the picture.
 pub fn render(e: *Engine, source: i32, stored: bool, bin: i32, site: i32, projection: Projection, rot: [9]f32, layout: [4]f32, zoom: f32, width: u32, height: u32, out: []u32) !void {
     if (width < 8 or height < 8 or width > 4096 or height > 4096) return error.BadSize;

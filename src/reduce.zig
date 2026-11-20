@@ -54,7 +54,7 @@ pub fn pattern(comptime T: type, src: []const u8, src_h: u32, src_w: u32, factor
         const inv = 1.0 / @as(f32, @floatFromInt(k * k));
         if (T != f32 and k <= 256) {
             // Whole pixels of integers: the columns of each band of k rows are summed as
-            // integers, a plain loop over the row that the compiler turns into vector adds,
+            // integers, a plain loop over the row that the compiler makes vector adds of,
             // and k neighbouring sums make a pixel. (Indexing is otherwise bound by this loop:
             // a pattern a pixel at a time through floats cost more than its search.)
             const cols = w * k;

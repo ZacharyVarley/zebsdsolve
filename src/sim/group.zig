@@ -360,7 +360,7 @@ pub fn hallGenerators(symbol: []const u8) !OpList {
         var w: [3]i32 = .{ 0, 0, 0 };
         for (tok) |ch| {
             if (ch >= '1' and ch <= '6') {
-                // a screw: k / order of a turn along the axis
+                // a screw: a translation of k / order along the axis
                 const num: i32 = DEN * @as(i32, ch - '0');
                 if (@mod(num, @as(i32, @intCast(order))) != 0) return error.BadHallSymbol;
                 const step = @divExact(num, @as(i32, @intCast(order)));

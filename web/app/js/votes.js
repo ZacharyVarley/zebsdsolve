@@ -1,5 +1,5 @@
 // The pattern-centre search, laid open. Every tier it scored is a small volume of votes over
-// (x, y, z). The view shows the volume whole, as a cloud to turn about (each candidate a
+// (x, y, z). The view shows the volume whole, as a cloud to rotate (each candidate a
 // glow as bright as its vote, the tiers the search went through nested in it, and the way it
 // went), and lays every slice along one axis side by side under it, with what led the search
 // (each tier's winner and the next tier's extent) and what the fit patterns each preferred on
@@ -9,8 +9,8 @@ import { fit, svg, viridis } from "./draw.js";
 
 const $ = (id) => document.getElementById(id);
 const NAMES = ["x", "y", "z"];
-// the volume turned about: the angles it starts at, and how far away the eye is (in half-widths)
-const TURN = { yaw: -0.62, pitch: 0.42 };
+// the volume rotated: the angles it starts at, and how far away the eye is (in half-widths)
+const START = { yaw: -0.62, pitch: 0.42 };
 const EYE = 5;
 // every slice along an axis: [horizontal axis, vertical axis, the axis the slices step along]
 const ALONG = { z: [0, 1, 2], y: [0, 2, 1], x: [1, 2, 0] };
@@ -28,7 +28,7 @@ const beyond = (v, a) => {
 };
 
 export function createVotes({ geometry, setPc }) {
-  const view = { levels: null, level: 0, at: [0, 0, 0], start: null, file: null, mode: "z", what: "ballots", following: true, tiles: null, yaw: TURN.yaw, pitch: TURN.pitch, shots: null };
+  const view = { levels: null, level: 0, at: [0, 0, 0], start: null, file: null, mode: "z", what: "ballots", following: true, tiles: null, yaw: START.yaw, pitch: START.pitch, shots: null };
 
   const axesOf = (l) => [l.x, l.y, l.z];
   const sizes = (l) => [l.x.length, l.y.length, l.z.length];
@@ -194,7 +194,7 @@ export function createVotes({ geometry, setPc }) {
     slider("votes-all-slide", n[f], view.at[f], NAMES[f]);
   }
 
-  /** The volume whole, turned about. The grid in view fills it; x runs to the right, y away
+  /** The volume whole, rotated. The grid in view fills it; x runs to the right, y away
    *  down the pattern, z up (the detector's distance), each as long as its span, so the
    *  basin's shape is its shape in pattern-centre units. */
   function drawSpace(l, next, lo, hi) {
@@ -328,7 +328,7 @@ export function createVotes({ geometry, setPc }) {
     }
     const [slo, shi] = range(l.scores);
     $("votes-3d-cap").textContent = `${n[0]} × ${n[1]} × ${n[2]} · NCC ${slo.toFixed(4)} – ${shi.toFixed(4)}`;
-    $("votes-3d-cap").title = "The tier's candidates; drag to turn the volume, click a candidate to put the cross-hair on it";
+    $("votes-3d-cap").title = "The tier's candidates; drag to rotate the volume, click a candidate to put the cross-hair on it";
   }
 
   function draw() {
@@ -403,8 +403,8 @@ export function createVotes({ geometry, setPc }) {
     $("votes-all-slide").addEventListener("input", (e) => move({ [along()[2]]: +e.target.value }));
     keys(canvas.parentElement, () => along()[0], () => along()[1], () => along()[2]);
   }
-  // the volume: a drag turns it, a click takes the candidate under the pointer (the brightest
-  // of those near it), a double-click turns it back
+  // the volume: a drag rotates it, a click takes the candidate under the pointer (the brightest
+  // of those near it), a double-click puts it back
   {
     const canvas = $("votes-3d");
     let drag = null;
@@ -438,7 +438,7 @@ export function createVotes({ geometry, setPc }) {
       window.addEventListener("mouseup", up);
     });
     const move3 = (sh) => move({ 0: sh[3], 1: sh[4], 2: sh[5] });
-    canvas.addEventListener("dblclick", () => { view.yaw = TURN.yaw; view.pitch = TURN.pitch; draw(); });
+    canvas.addEventListener("dblclick", () => { view.yaw = START.yaw; view.pitch = START.pitch; draw(); });
   }
   $("votes-levels").addEventListener("click", (e) => { const b = e.target.closest("button"); if (b) select(+b.dataset.level); });
   $("votes-mode").addEventListener("click", (e) => { const b = e.target.closest("button"); if (b) { view.mode = b.dataset.mode; draw(); } });

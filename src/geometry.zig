@@ -31,9 +31,9 @@ pub const Geometry = extern struct {
     sample_tilt_deg: f64 = 70,
     detector_tilt_deg: f64 = 0,
     /// rotation of the detector away from its nominal attitude (rotation vector, radians, in
-    /// the detector's own axes): about its row direction (down the pattern: swing), about its
+    /// the detector's own axes): about its row direction (down the pattern: azimuthal), about its
     /// column direction (across the pattern: tilt, in the detector tilt's sense) and about its
-    /// normal (twist). It turns the detector about the source point, so the pattern centre
+    /// normal (twist), as kikuchipy names the three. It rotates the detector about the source point, so the pattern centre
     /// stays where it is.
     rot: [3]f64 = .{ 0, 0, 0 },
     /// size of one stored pattern pixel on the detector, micrometres (0: unknown: the beam's
@@ -116,7 +116,7 @@ test "pattern centre and pose are two views of one thing" {
     // the source (origin) projects onto the detector at the pattern centre, at distance pcz·rows
     const n: rot.Vec3 = .{ R[2], R[5], R[8] };
     try std.testing.expectApproxEqAbs(0.5 * 60.0, rot.dot(n, t), 1e-10);
-    // a turn about the column direction is the detector tilt
+    // a rotation about the column direction is the detector tilt
     var h: Geometry = .{ .rot = .{ 0, std.math.degreesToRadians(3.0), 0 } };
     const tilted: Geometry = .{ .detector_tilt_deg = 3 };
     for (h.rotation(), tilted.rotation()) |a, b| try std.testing.expectApproxEqAbs(a, b, 1e-12);

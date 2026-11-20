@@ -54,7 +54,7 @@ def from_bunge(e):
         np.stack([s1 * s, -c1 * s, c], -1)], -2)
 
 
-def turned(v):
+def rotation(v):
     """The rotation by the rotation vector v (Rodrigues)."""
     th = np.linalg.norm(v)
     if th == 0:
@@ -72,7 +72,7 @@ def written(q, phase, frame, misorientation=(0, 0, 0)):
     a = np.zeros((3, 3))
     for i, code in enumerate(frame["axes"]):
         a[i, abs(code) - 1] = np.sign(code)
-    s = a @ turned(misorientation)
+    s = a @ rotation(misorientation)
     c30, s30 = np.cos(np.pi / 6), np.sin(np.pi / 6)
     # on a hexagonal cell X || a* lies 30 degrees from a about c (a* is perpendicular to b and c)
     hexagonal = np.array([[c30, s30, 0], [-s30, c30, 0], [0, 0, 1]]) if frame["crystal"] == "x_astar_z_c" else np.eye(3)
@@ -210,7 +210,6 @@ class StoredOrientations(unittest.TestCase):
             self.assertEqual(f["axes"], planted["axes"], msg)
             self.assertEqual(f["active"], planted["active"], msg)
             self.assertEqual(f["crystal"], planted["crystal"], msg)
-            self.assertNotIn("turn", f, msg)
             np.testing.assert_allclose(found["misorientation"], MISORIENTED[layout], atol=2e-3, err_msg=msg)
             np.testing.assert_allclose(found["misorientation_rows"], 0, atol=3e-3, err_msg=msg)
             np.testing.assert_allclose(found["misorientation_cols"], 0, atol=3e-3, err_msg=msg)

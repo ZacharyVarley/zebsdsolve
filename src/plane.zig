@@ -294,8 +294,8 @@ pub const Said = struct {
     /// the source's place there
     pc: [3]f64,
     /// The sample's frame as the plane has it, against the nominal one (rotation vector in the
-    /// detector's axes, as geometry.rot: swing, tilt, twist): its normal is the plane's, and
-    /// its x runs along the scan's rows. The twist is then the scan's own turn in the sample's
+    /// detector's axes, as geometry.rot: azimuthal, tilt, twist): its normal is the plane's, and
+    /// its x runs along the scan's rows. The twist is then the scan rotation in the sample's
     /// plane against the detector, as much as the detector's.
     rot: [3]f64,
     /// how far the beam goes for a row and for a column, against what the scan's steps and
@@ -427,7 +427,7 @@ test "a projective plane through points that hardly move keeps its slopes near z
 }
 
 test "the plane of the model's own scan says the model's geometry" {
-    // a detector turned a little, a scan of known steps: the source points the pose gives, and
+    // a detector rotated a little, a scan of known steps: the source points the pose gives, and
     // back from their plane
     var g: Geometry = .{ .pc = .{ 0.42, 0.21, 0.5 }, .rot = .{ 0.02, -0.03, 0.04 }, .px_um = 560, .step_x_um = 30, .step_y_um = 40 };
     const rows: u32 = 30;

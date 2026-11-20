@@ -13,7 +13,7 @@ const Vec3 = rot.Vec3;
 ///  * as the rotations of the point group itself (Master.rotation, `rotationsOfPointGroup`),
 ///    which is what makes two orientations the same. For 6mm these are the six about c (.c6),
 ///    not the twelve of its Laue class 6/mmm (.d6): the two-folds across c that the inversion
-///    brings would turn the polar axis over, and that is another orientation.
+///    brings would flip the polar axis, and that is another orientation.
 pub const Laue = enum(u8) {
     /// -1
     c1 = 1,
@@ -154,7 +154,7 @@ pub const MAX_ROTATIONS = 24;
 /// themselves in the master's crystal frame. `frame` takes the standard setting of the tables
 /// here (the unique axis along z, a dihedral two-fold along x) to the master's: its rotations
 /// are frame · g · frame⁻¹ for g of `operators(rotation)`. A monoclinic master with its
-/// two-fold along y (unique axis b) has `frame` a quarter turn that takes z to y.
+/// two-fold along y (unique axis b) has `frame` a 90° rotation that takes z to y.
 pub const Setting = struct {
     rotation: Laue = .c1,
     laue: Laue = .c1,
@@ -278,7 +278,7 @@ fn isIn(set: []const Quat, k: Laue, f: Quat) bool {
 
 /// A master's setting from the point-group operators it obeys (3 × 3, row-major, acting on its
 /// crystal directions; proper and improper): their proper rotations are what make two
-/// orientations the same, and those with the improper ones turned proper (−M) its Laue
+/// orientations the same, and those with the improper ones made proper (−M) its Laue
 /// class. Null when they are not a crystallographic point group in any setting.
 pub fn settingOf(mats: []const rot.Mat3) ?Setting {
     var p: [MAX_ROTATIONS]Quat = undefined;
@@ -447,8 +447,9 @@ pub fn pointGroupFromName(s: []const u8) ?u32 {
 ///                      colored", for the Laue class: a light centre and the hue round it, the
 ///                      hue's rate balanced so that red, yellow, green, cyan, blue and magenta
 ///                      take even shares of the sector (their appendix A), the lightness and
-///                      the saturation following their equations 9 and 10 (settings
-///                      ipf_lightness, ipf_gray). A class whose sector is not bounded by
+///                      the saturation following their equations 9 and 10 with the λ_L and
+///                      λ_S they recommend, a quarter each (fixed: other values make keys no
+///                      one else draws). A class whose sector is not bounded by
 ///                      mirrors (m-3, -3m, 6/m, 4/m, 2/m) is coloured by the "extended" key:
 ///                      the half of its sector that is the sector of the class above it has a
 ///                      light centre, the other half a dark one, and the colours meet without a
@@ -590,7 +591,7 @@ fn hueTriangle(laue: Laue) ?[3]Vec3 {
     };
 }
 
-/// A fully saturated colour of hue `h` (turns) and lightness `l`.
+/// A fully saturated colour of hue `h` (a fraction of the hue circle) and lightness `l`.
 fn hsl(h: f64, l: f64) [3]f64 {
     const ch = 1 - @abs(2 * l - 1);
     const hp = 6 * (h - @floor(h));
@@ -665,11 +666,6 @@ const Sector = struct {
 pub const Key = struct {
     laue: Laue,
     colors: Colors,
-    /// equation 9's λ_L: 1 a lightness linear in the distance from the centre, less a wider
-    /// light (and dark) centre
-    lambda_l: f64 = 0.25,
-    /// equation 10's λ_S: 0 white and black centres, more toward gray
-    lambda_s: f64 = 0.25,
     shape: Shape,
     // ── the perfect keys' own ──
     /// the sector of the class above (the class's own where that is bounded by mirrors)
@@ -682,18 +678,23 @@ pub const Key = struct {
     e1: Vec3 = .{ 1, 0, 0 },
     e2: Vec3 = .{ 0, 1, 0 },
     /// the azimuths about the centre where a stretch of hue begins (a triangle's corners: red,
-    /// green, blue), closed by a whole turn
+    /// green, blue), closed by 2π
     seg: [4]f64 = .{ 0, 2 * std.math.pi, 0, 0 },
     n_seg: usize = 1,
     hue: [3][HUE_N + 1]f32 = undefined,
 
     const HUE_N = 256;
+    /// equation 9's λ_L (1 a lightness linear in the distance from the centre, less a wider
+    /// light and dark centre) and equation 10's λ_S (0 white and black centres, more toward
+    /// gray): the quarter each the paper recommends
+    const LAMBDA_L = 0.25;
+    const LAMBDA_S = 0.25;
     const Map = struct { m: rot.Mat3, white: bool };
     /// The cubic classes above m-3m's own triangle: sorting the coordinates' sizes is the map.
     const Fast = enum { none, o_laue, t_laue, o_rotation };
 
-    pub fn init(laue: Laue, colors: Colors, lambda_l: f64, lambda_s: f64) Key {
-        var k: Key = .{ .laue = laue, .colors = colors, .lambda_l = lambda_l, .lambda_s = lambda_s, .shape = shapeOf(laue, colors) };
+    pub fn init(laue: Laue, colors: Colors) Key {
+        var k: Key = .{ .laue = laue, .colors = colors, .shape = shapeOf(laue, colors) };
         if (colors != .perfect and colors != .perfect_rotation) return k;
         const proper = colors == .perfect_rotation;
         const z: Vec3 = .{ 0, 0, 1 };
@@ -775,14 +776,14 @@ pub const Key = struct {
                 // -3: sixths of the upper hemisphere, light and dark in turn, as the paper draws it
                 k.sector = Sector.triangle(z, at(0), at(60));
                 k.both(&C3, null, true);
-                var turned: [3]Quat = undefined;
-                for (C3, 0..) |g, i| turned[i] = rot.qmul(g, .{ 0, 0, 1, 0 });
-                k.both(&turned, null, false);
+                var rotated: [3]Quat = undefined;
+                for (C3, 0..) |g, i| rotated[i] = rot.qmul(g, .{ 0, 0, 1, 0 });
+                k.both(&rotated, null, false);
             },
             .c1 => {
                 k.sector = Sector.hemisphere();
                 k.add(&C1, null, 1, true);
-                // 1 under m (the mirror across z is minus the half turn about it); -1 keeps the
+                // 1 under m (the mirror across z is minus the 180° rotation about it); -1 keeps the
                 // upper hemisphere's colours for both
                 k.add(if (proper) C2[1..] else &C1, null, -1, !proper);
             },
@@ -920,8 +921,8 @@ pub const Key = struct {
         // of the class, dark otherwise), its border the equator
         const t = if (white) 1 - 0.5 * r else 0.5 * r;
         const sn = @sin(0.5 * std.math.pi * t);
-        const l = self.lambda_l * t + (1 - self.lambda_l) * sn * sn;
-        const sat = 1 - 2 * self.lambda_s * @abs(l - 0.5);
+        const l = LAMBDA_L * t + (1 - LAMBDA_L) * sn * sn;
+        const sat = 1 - 2 * LAMBDA_S * @abs(l - 0.5);
         const c = hsl(hue, l);
         return rgb(.{ sat * c[0] + (1 - sat) * 0.5, sat * c[1] + (1 - sat) * 0.5, sat * c[2] + (1 - sat) * 0.5 });
     }
@@ -949,7 +950,7 @@ fn hueColor(d: Vec3, laue: Laue) ?[3]f32 {
         if (ang < 1e-9) return .{ 1, 1, 1 };
         const f = rot.normalize(rot.sub(e, rot.scale(s.center, cos_a)));
         const r = std.math.clamp(ang / s.reach(f), 0.0, 1.0);
-        // the azimuth about the centre from the first corner, the corners a third of a turn of hue apart
+        // the azimuth about the centre from the first corner, the corners a third of the hue circle apart
         const e1 = rot.normalize(rot.sub(tri[0], rot.scale(s.center, rot.dot(tri[0], s.center))));
         const e2 = rot.cross(s.center, e1);
         var az: [3]f64 = undefined;
@@ -1013,7 +1014,7 @@ fn classicColor(d: Vec3, laue: Laue) [3]f32 {
 /// Colour (r, g, b in [0, 1]) of the crystal direction that sample direction `v` maps to under
 /// orientation `q`, by `colors` (a Key made for the purpose: make one and keep it for many).
 pub fn ipfColor(q: Quat, v: Vec3, laue: Laue, colors: Colors) [3]f32 {
-    return Key.init(laue, colors, 0.25, 0.25).color(rot.normalize(rot.qapply(q, v)));
+    return Key.init(laue, colors).color(rot.normalize(rot.qapply(q, v)));
 }
 
 // ── tests ──
@@ -1081,8 +1082,8 @@ test "a master's symmetry in its own setting: monoclinic with the unique axis b"
     // its unique axis is y, not the tables' z
     const z = rot.qapply(s.frame, .{ 0, 0, 1 });
     try std.testing.expectApproxEqAbs(@as(f64, 1), @abs(z[1]), 1e-9);
-    // a half turn about z is no symmetry of it: reducing by its own rotations keeps a pose that
-    // the tables' 2 (about z) would have turned into another orientation
+    // a 180° rotation about z is no symmetry of it: reducing by its own rotations keeps a pose that
+    // the tables' 2 (about z) would have made another orientation of
     const q = rot.qstd(rot.so3Exp(.{ 0.1, -0.2, 2.9 }));
     const own = toFz(q, s.rotations());
     try std.testing.expectApproxEqAbs(@as(f64, 0), disorientation(own, q, s.rotations()), 1e-9);
@@ -1094,7 +1095,7 @@ test "a master's symmetry in its own setting: monoclinic with the unique axis b"
     try std.testing.expectApproxEqAbs(@as(f64, 1), back[2], 1e-9);
 }
 
-test "a master's symmetry in its own setting: the trigonal and cubic groups turned" {
+test "a master's symmetry in its own setting: the trigonal and cubic groups rotated" {
     var buf: [48]rot.Mat3 = undefined;
     // -3m with its two-folds 30° from the tables' (P-31m against P-3m1), and 6mm (polar: its
     // rotations 6, its Laue class 6/mmm), each recovered with the frame that makes them so
@@ -1216,7 +1217,7 @@ test "the perfect keys: corners, one colour per equivalent, no jumps, and what e
     inline for (.{ Colors.perfect, Colors.perfect_rotation }) |colors| {
         inline for (std.meta.fields(Laue)) |fl| {
             const laue: Laue = @enumFromInt(fl.value);
-            const key = Key.init(laue, colors, 0.25, 0.25);
+            const key = Key.init(laue, colors);
             const ops = operators(laue);
             // -1 and -3 cannot be coloured by direction without a jump: theirs is at the equator
             const jumps = colors == .perfect and (laue == .c1 or laue == .c3);
@@ -1255,7 +1256,7 @@ test "the classic and hue keys show one equivalent of every direction" {
         const laue: Laue = @enumFromInt(fl.value);
         // the cubic triangle is m-3m's: m-3 shares it, two of its directions to a colour
         if (laue == .t) continue;
-        const key = Key.init(laue, .classic, 0.25, 0.25);
+        const key = Key.init(laue, .classic);
         for (0..200) |_| {
             const v = rot.normalize(.{ r.floatNorm(f64), r.floatNorm(f64), r.floatNorm(f64) });
             var inside: usize = 0;

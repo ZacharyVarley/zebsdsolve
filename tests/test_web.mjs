@@ -229,7 +229,7 @@ try {
     space.dispatchEvent(new MouseEvent("mousedown", { button: 0, clientX: box.left + 40, clientY: box.top + 40, bubbles: true }));
     window.dispatchEvent(new MouseEvent("mousemove", { clientX: box.left + 110, clientY: box.top + 70 }));
     window.dispatchEvent(new MouseEvent("mouseup", { clientX: box.left + 110, clientY: box.top + 70 }));
-    auto.volume = { lit: still[0], turned: ink()[1] !== still[1] };
+    auto.volume = { lit: still[0], rotated: ink()[1] !== still[1] };
     // the pattern and its simulation in one frame, either side of a bar that drags
     const cmpSel = document.getElementById("pat-cmp");
     cmpSel.value = "split";
@@ -297,7 +297,7 @@ try {
     // What follows compares the indexed orientations with kikuchipy's, which were refined with
     // the detector at its nominal attitude: the plane's sample frame is the nominal one unless
     // it is asked to follow the plane.
-    auto.turned = window.ze.geometry.rot.map((v) => (v * 180) / Math.PI);
+    auto.rotation = window.ze.geometry.rot.map((v) => (v * 180) / Math.PI);
     return { vote, plane, auto, follow };`);
   const err = (pc) => Math.max(...pc.map((v, i) => Math.abs(v - pcFile[i])));
   check("Fit pattern centre votes near the scan's centre", err(fits.vote.pc) < 0.008, `${fits.vote.pc.map((v) => v.toFixed(4)).join(" ")} (${err(fits.vote.pc).toFixed(4)} off) in ${fits.vote.s.toFixed(1)} s`);
@@ -342,11 +342,11 @@ try {
   // (the scan's file gives the detector's pixel: 70 µm binned by 8)
   const autoSaid = fits.auto.readout;
   check("Auto fit geometry is the vote, then the plane", err(fits.auto.pc) < 0.004 && fits.auto.grids >= 3 && fits.auto.px === 560 && fits.auto.shown && fits.auto.kind === 1 && fits.auto.dropped === 0
-    && /^[\d.]+ [\d.]+ [\d.]+$/.test(autoSaid.vote) && autoSaid.model === "affine" && /^centre [\d.]+ line [\d.]+ plane 1\.00$/.test(autoSaid.misfit) && fits.auto.turned.every((v) => v === 0),
+    && /^[\d.]+ [\d.]+ [\d.]+$/.test(autoSaid.vote) && autoSaid.model === "affine" && /^centre [\d.]+ line [\d.]+ plane 1\.00$/.test(autoSaid.misfit) && fits.auto.rotation.every((v) => v === 0),
     `from 0.03 off: ${fits.auto.pc.map((v) => v.toFixed(5)).join(" ")} (${err(fits.auto.pc).toFixed(5)} from kikuchipy's), in ${fits.auto.s.toFixed(2)} s; vote ${autoSaid.vote}; ${autoSaid.model}, misfit ${autoSaid.misfit}`);
   check("the detector's pixel size can be typed in, and cleared", fits.auto.pixel.typed === 500 && fits.auto.pixel.said === "typed" && fits.auto.pixel.cleared === 560 && fits.auto.pixel.shown === 560,
     `${fits.auto.pixel.said}; cleared: ${fits.auto.pixel.cleared} µm`);
-  check("the pattern centre's volume can be turned about", fits.auto.volume.lit > 200 && fits.auto.volume.turned, `${fits.auto.volume.lit} pixels lit; a drag redraws it`);
+  check("the pattern centre's volume can be rotated", fits.auto.volume.lit > 200 && fits.auto.volume.rotated, `${fits.auto.volume.lit} pixels lit; a drag redraws it`);
   check("the pattern and its simulation split by a bar", fits.auto.split.shown && fits.auto.split.moved && fits.auto.split.cap === "split", fits.auto.split.cap);
   check("the static background shows where the pattern does (and is off when none is subtracted)", fits.auto.background.other && /file/.test(fits.auto.background.cap) && fits.auto.background.offWhenNone, fits.auto.background.cap);
   check("the region of interest is drawn on the map, and cleared", fits.auto.roi.w > 5 && fits.auto.roi.h > 5 && fits.auto.roi.toolOff && /region \d+ × \d+/.test(fits.auto.roi.said) && fits.auto.roi.cleared, fits.auto.roi.said);
@@ -404,12 +404,12 @@ try {
     // an .h5oina is made only from an Oxford acquisition: not from this one
     let h5oina = "";
     try { await ze.exportH5oina(); } catch (e) { h5oina = String(e.message || e); }
-    return { readout0, fileOff, kik: { axes: kik.frame.axes, median: kik.median_deg, mis: Math.hypot(...kik.misorientation) * 180 / Math.PI }, line, back: { axes: back.frame.axes, active: back.frame.active, turn: "turn" in back.frame, mis: Math.hypot(...back.misorientation), median: back.median_deg }, after: ze.frame.text,
+    return { readout0, fileOff, kik: { axes: kik.frame.axes, median: kik.median_deg, mis: Math.hypot(...kik.misorientation) * 180 / Math.PI }, line, back: { axes: back.frame.axes, active: back.frame.active, mis: Math.hypot(...back.misorientation), median: back.median_deg }, after: ze.frame.text,
       h5oina, h5oinaOff: document.getElementById("btn-h5oina").disabled };`);
   check("the exports' frame is named, found from orientations, and written into the .ang",
     /^frameX \+x Y \+y Z \+z, passive, X\|\|a Z\|\|c\*$/.test(fr.readout0) && fr.fileOff && fr.kik.axes.join() === "1,2,3" && fr.kik.median < 0.6 && fr.kik.mis < 0.3
     && fr.line === "# FRAME: X +y Y -x Z +z, active, X||a Z||c*"
-    && fr.back.axes.join() === "2,-1,3" && fr.back.active && !fr.back.turn && fr.back.mis < 1e-4 && fr.back.median < 0.01 && fr.after === "X +x Y +y Z +z, passive, X||a Z||c*"
+    && fr.back.axes.join() === "2,-1,3" && fr.back.active && fr.back.mis < 1e-4 && fr.back.median < 0.01 && fr.after === "X +x Y +y Z +z, passive, X||a Z||c*"
     && /NotAnOxfordAcquisition/.test(fr.h5oina) && fr.h5oinaOff, JSON.stringify(fr));
   // the File menu: its items, the theme (the chrome light, the wells as they were), and the
   // conventions drawn, the scan's own among them
@@ -430,6 +430,15 @@ try {
     const dlg = document.getElementById("conv-dialog");
     const out = { opened, items, light, lit, dark, darkBody, closed: list.hidden, open: dlg.open, entries: [...document.querySelectorAll("#conv-list button")].map((b) => b.dataset.key),
       first: document.querySelector('#conv-list [aria-selected="true"]').dataset.key, scanKv: document.getElementById("conv-kv").innerText };
+    // no two of the drawing's labels on each other, in any convention
+    const overlaps = () => {
+      const b = [...document.querySelectorAll("#conv-lab text")].map((t) => t.getBBox());
+      let n = 0;
+      for (let i = 0; i < b.length; i++) for (let j = i + 1; j < b.length; j++) if (b[i].x < b[j].x + b[j].width - 1 && b[j].x < b[i].x + b[i].width - 1 && b[i].y < b[j].y + b[j].height - 1 && b[j].y < b[i].y + b[i].height - 1) n++;
+      return n;
+    };
+    out.overlaps = {};
+    for (const key of ["scan", "engine", "oxford", "bruker", "edax", "emsoft"]) { document.querySelector('#conv-list [data-key="' + key + '"]').click(); out.overlaps[key] = overlaps(); }
     document.querySelector('#conv-list [data-key="oxford"]').click();
     out.oxKv = document.getElementById("conv-kv").innerText;
     out.axes = [...document.querySelectorAll("#conv-lab .cv-axis")].length;
@@ -442,8 +451,28 @@ try {
     && menu.light === "light" && menu.lit.body === "rgb(243, 243, 245)" && menu.lit.rail === "rgb(233, 233, 236)" && menu.lit.well === "rgb(10, 10, 11)"
     && menu.dark === "dark" && menu.darkBody === "rgb(14, 14, 16)" && menu.closed && menu.open && !menu.after
     && menu.entries.join() === "scan,engine,oxford,bruker,edax,emsoft" && menu.first === "scan" && /not identified/.test(menu.scanKv) && /from top ÷ height/.test(menu.scanKv)
-    && /X \+y · Y −x · Z \+z/.test(menu.oxKv) && /from bottom ÷ width/.test(menu.oxKv) && /X ∥ a\*, Z ∥ c/.test(menu.oxKv) && menu.axes === 3 && menu.labels === "XYZ",
+    && /X \+y · Y −x · Z \+z/.test(menu.oxKv) && /from bottom ÷ width/.test(menu.oxKv) && /X ∥ a\*, Z ∥ c/.test(menu.oxKv) && menu.axes === 3 && menu.labels === "XYZ" && Object.values(menu.overlaps).every((n) => n === 0),
     JSON.stringify(menu));
+  // the menus' places: the File menu (three bars) left of the name; .h5oina under the export's
+  // "other"; the method's own parameters under it, swapped as it changes; the sweeps under Advanced
+  const ui = await evaluate(`
+    const row = document.querySelector(".brand-row");
+    const order = [...row.children].map((c) => c.id || c.className);
+    const bars = !!document.querySelector("#btn-file use[href='#i-menu']") && document.getElementById("btn-file").textContent.trim() === "";
+    const more = document.getElementById("export-more-list");
+    const inMore = more.contains(document.getElementById("btn-h5oina"));
+    const shown = () => [...document.querySelectorAll('.fields[data-group="index"] .field')].filter((f) => !f.hidden).map((f) => f.dataset.key).join();
+    const pick = async (v) => { const sel = document.querySelector('.field[data-key="method"] select'); sel.value = v; sel.dispatchEvent(new Event("change")); await new Promise((r) => setTimeout(r, 200)); return shown(); };
+    const methods = { spherical: shown(), dictionary: await pick("dictionary"), pca: await pick("pca") };
+    await pick("spherical");
+    const adv = document.getElementById("index-advanced");
+    return { order, bars, inMore, moreHidden: more.hidden, methods, sweepsInAdvanced: adv.contains(document.querySelector('.field[data-key="sweeps"]')),
+      noSweepsSection: ![...document.querySelectorAll(".sub > summary")].some((s) => s.textContent.trim() === "Sweeps"),
+      noKeySection: ![...document.querySelectorAll(".sub > summary")].some((s) => s.textContent.trim() === "IPF key"), method: window.ze.settings.method };`);
+  check("the menus and the method's parameters are where they belong",
+    ui.order[0] === "file-menu" && ui.order[1] === "brand" && ui.bars && ui.inMore && ui.moreHidden
+    && ui.methods.spherical === "method,bandwidth" && ui.methods.dictionary === "method,dict_grid" && ui.methods.pca === "method,dict_grid,pca_components,pca_epochs"
+    && ui.sweepsInAdvanced && ui.noSweepsSection && ui.noKeySection && ui.method === "spherical", JSON.stringify(ui));
   // another colouring from the Index tab: the map and its key follow it
   const keyed = await evaluate(`
     const before = window.ze.map("ipf_z").join().length;
@@ -452,13 +481,12 @@ try {
     await pick("perfect_rotation");
     const c1 = document.getElementById("map").getContext("2d").getImageData(0, 0, 75, 55).data.join();
     const out = { changed: c0 !== c1, setting: window.ze.settings.ipf_colors, w: document.querySelector("#map-legend canvas")?.width || 0,
-      names: [...document.querySelectorAll("#map-legend .key span")].map((e) => e.textContent).join(" "), dimmed: [...document.querySelectorAll('.field[data-key^="ipf_"]')].map((f) => f.dataset.off).join("") };
+      names: [...document.querySelectorAll("#map-legend .key span")].map((e) => e.textContent).join(" "), lambdas: document.querySelectorAll('.field[data-key="ipf_lightness"], .field[data-key="ipf_gray"]').length + ("ipf_lightness" in window.ze.settings) + ("ipf_gray" in window.ze.settings) };
     await pick("classic");
     out.back = [...document.querySelectorAll("#map-legend .key span")].map((e) => e.textContent).join(" ");
-    out.dimmedAfter = [...document.querySelectorAll('.field[data-key^="ipf_"]')].map((f) => f.dataset.off).join("");
     return out;`);
-  check("the colours can be the paper's, by orientation", keyed.changed && keyed.setting === "perfect_rotation" && keyed.w > 20 && keyed.names === "001 101 111 011" && keyed.dimmed === "00" && keyed.back === "001 101 111" && keyed.dimmedAfter === "11",
-    `the key's corners ${keyed.names}; its two gradients' controls in use, and dimmed again under the classic colours`);
+  check("the colours can be the paper's, by orientation", keyed.changed && keyed.setting === "perfect_rotation" && keyed.w > 20 && keyed.names === "001 101 111 011" && keyed.back === "001 101 111" && keyed.lambdas === 0,
+    `the key's corners ${keyed.names}; its gradients the paper's, not settings`);
 
   // a toy scan made from the master loaded: it replaces the scan, indexes, and is checked against its own answer
   const toy = await evaluate(`
@@ -644,7 +672,7 @@ try {
   check("the Simulate step simulates a crystal's master and adds it as a phase", /P 63 m c\s*\(186\)/.test(sim.group) && /directions/.test(sim.readout) && sim.shown && sim.dock === "master" && sim.added === 1 && sim.last.name === "GaN" && sim.last.side === 121 && sim.npz > 1000,
     `${sim.readout.split("\n")[0]}; phase ${sim.last?.name} ${sim.last?.pointGroupName} ${sim.last?.side} px a side`);
   check("the master view draws four projections, and lists every master", sim.distinct === 4 && sim.sources.split(",").includes("-1") && sim.sources.split(",").length >= 2, `${sim.distinct} distinct pictures; sources ${sim.sources}`);
-  // the flat projections' lock, control-scroll's spin, the cell and the master turning together,
+  // the flat projections' lock, control-scroll's spin, the cell and the master rotating together,
   // the arrow keys through the energy bins and the integrated button
   const views = await evaluate(`
     const mc = document.querySelector("#master-well canvas");
@@ -688,7 +716,7 @@ try {
     document.getElementById("energy-all").click();
     await wait(300);
     return { panned, spun, linked, right, right2, allOff, back: picked() === "" && document.getElementById("energy-all").getAttribute("aria-pressed") === "true" };`);
-  check("a locked flat projection pans on a drag and spins on control-scroll; linked, the cell turns the master", views.panned && views.spun && views.linked, JSON.stringify(views));
+  check("a locked flat projection pans on a drag and spins on control-scroll; linked, the cell rotates the master", views.panned && views.spun && views.linked, JSON.stringify(views));
   check("the arrow keys step the energy bins, and integrated goes back to them all", views.right === "0" && views.right2 === "1" && views.allOff && views.back, `bins ${views.right}, ${views.right2}`);
   // the Simulate step's dock is the master's alone; a bin's bar and a site's name show their own
   // master; a site's B and the free lattice parameters are typed in, the tied ones following

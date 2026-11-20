@@ -347,7 +347,7 @@ def main():
     # the plane of source points (Winkelmann et al. 2020; kikuchipy's fit_pc): every fit pattern's
     # own source point, and the transformation of the scan's indices through them. Nothing is
     # asked of the steps, the pixel size or the tilt: the plane says them. Here the detector is
-    # turned (also about its normal) on a map wide enough for the beam's travel to show it (a
+    # rotated (also about its normal) on a map wide enough for the beam's travel to show it (a
     # tenth of the pattern), and the fit is told nothing of it.
     rng_pose = np.random.default_rng(11)
     rot_true = np.radians((1.0, -2.0, 1.5))
@@ -372,8 +372,8 @@ def main():
           and e_said < 0.3 and np.abs(np.array(pl["pc"]) - pc_true).max() < 0.001 and gp["pc"] == pl["pc"] and np.abs(np.array(ws["step"]) - 1).max() < 0.02 and abs(np.degrees(ws["skew"])) < 0.5
           and all(v > 0 for v in ws["rot_se"]) and abs(ws["sample_tilt_deg"] - 72) < 0.3 and len(pts["cells"]) == 400 and pts["used"].sum() == pl["n_used"] >= 380 and on_plane < 1e-9 and pl["ncc"] > pl["start_ncc"]
           and 2 < np.median(d_nom) < 3.5,
-          f"swing, tilt, scan turn {np.round(np.degrees(ws['rot']), 2)} ± {np.round(np.degrees(ws['rot_se']), 2)}° for {np.round(np.degrees(rot_true), 1)}; steps {np.round(ws['step'], 3)}; source {np.round(pl['pc'], 5)}; {pl['n_used']} of {pl['n_patterns']} patterns, scatter {np.round(pl['rmsd'], 5)}; "
-          f"with the sample frame as the tilts say, orientations a median {np.median(d_nom):.2f}° from the true ones (the detector's turn)")
+          f"azimuthal, tilt, scan rotation {np.round(np.degrees(ws['rot']), 2)} ± {np.round(np.degrees(ws['rot_se']), 2)}° for {np.round(np.degrees(rot_true), 1)}; steps {np.round(ws['step'], 3)}; source {np.round(pl['pc'], 5)}; {pl['n_used']} of {pl['n_patterns']} patterns, scatter {np.round(pl['rmsd'], 5)}; "
+          f"with the sample frame as the tilts say, orientations a median {np.median(d_nom):.2f}° from the true ones (the detector's rotation)")
     # the sample frame can follow the plane: orientations are then in the frame the plane has
     s.configure(plane_frame="follow", plane_kind="projective")
     s.set_geometry(pc=(0.45, 0.23, 0.54), rot=(0, 0, 0), px_um=560)
@@ -382,7 +382,7 @@ def main():
     d_fol = np.degrees(s.disorientation(rx["quaternions"].reshape(-1, 4), qs))
     check("the sample frame can follow the plane, and the plane can be projective", pf2["kind"] == "projective" and pf2["frame"] == "follow" and np.abs(np.degrees(s.geometry["rot"]) - np.degrees(rot_true)).max() < 0.3
           and np.allclose(s.geometry["rot"], pf2["said"]["rot"]) and np.median(d_fol) < 0.3 and np.abs(pf2["plane"][3, :2]).max() < 1e-3 and abs(pf2["plane"][3, 2] - 1) < 1e-12,
-          f"the geometry's turn {np.round(np.degrees(s.geometry['rot']), 2)}°; orientations a median {np.median(d_fol):.3f}° from the true ones; the plane's projective row {np.round(1e5 * pf2['plane'][3, :2], 2)} e-5")
+          f"the geometry's detector rotation {np.round(np.degrees(s.geometry['rot']), 2)}°; orientations a median {np.median(d_fol):.3f}° from the true ones; the plane's projective row {np.round(1e5 * pf2['plane'][3, :2], 2)} e-5")
     s.configure(plane_frame="nominal", plane_kind="affine")
     # a pattern centre set by hand and the vote go back to one pattern centre and the scan's steps
     s.set_geometry(pc=(0.45, 0.23, 0.54))
@@ -399,7 +399,7 @@ def main():
     e_pc = np.abs(np.array(a["pc"]) - pc_true).max()
     e_vote = np.abs(np.array(a["start_pc"]) - pc_true).max()
     check("the automatic fit is the vote, then the plane", e_rot < 0.3 and e_pc < 0.001 and e_vote < 0.01 and a["start_pc"] != [0.47, 0.21, 0.56] and s.geometry["plane_kind"] == "affine" and len(s.pc_levels()) >= 3,
-          f"the vote's pattern centre within {e_vote:.4f}, the plane's within {e_pc:.5f}; swing, tilt, scan turn within {e_rot:.3f}°")
+          f"the vote's pattern centre within {e_vote:.4f}, the plane's within {e_pc:.5f}; azimuthal, tilt, scan rotation within {e_rot:.3f}°")
     again = s.fit_geometry()
     check("run again, the automatic fit gives the same fit", again["pc"] == a["pc"] and np.array_equal(again["plane"], a["plane"]), f"source {np.round(again['pc'], 5)} both times")
     # the master taken by a higher-order kernel, resampled: the same place
@@ -409,14 +409,14 @@ def main():
     s.configure(plane_interp="bicubic", plane_master_auto=True, plane_master_px=0)
     e_rot = np.abs(np.degrees(bc["said"]["rot"]) - np.degrees(rot_true)).max()
     e_pc = np.abs(np.array(bc["pc"]) - pc_true).max()
-    check("the plane fit can take a resampled master by a higher-order kernel", e_rot < 0.3 and e_pc < 0.001 and bc["ncc"] > bc["start_ncc"], f"turns within {e_rot:.3f}°, pc within {e_pc:.5f}, mean NCC {bc['ncc']:.4f}")
+    check("the plane fit can take a resampled master by a higher-order kernel", e_rot < 0.3 and e_pc < 0.001 and bc["ncc"] > bc["start_ncc"], f"rotations within {e_rot:.3f}°, pc within {e_pc:.5f}, mean NCC {bc['ncc']:.4f}")
     # the pixel size is not the plane's business: given wrong, the plane is where it was, and
     # it says the beam went 400 / 560 of what the steps and that pixel size say
     s.set_geometry(pc=(0.45, 0.23, 0.54), rot=(0, 0, 0), px_um=400)
     small = s.fit_plane()
     e_rot = np.abs(np.degrees(small["said"]["rot"]) - np.degrees(rot_true)).max()
     check("a wrong pixel size leaves the plane where it was", e_rot < 0.3 and np.abs(np.array(small["pc"]) - pc_true).max() < 0.001 and np.abs(np.array(small["said"]["step"]) - 400 / 560).max() < 0.02 and s.geometry["px_um"] == 400,
-          f"400 µm for 560: turns within {e_rot:.3f}°, steps {np.round(small['said']['step'], 3)} of what they say (400/560 = {400 / 560:.3f})")
+          f"400 µm for 560: rotations within {e_rot:.3f}°, steps {np.round(small['said']['step'], 3)} of what they say (400/560 = {400 / 560:.3f})")
     # none given: the scan's own (these patterns came from memory and have none), else the
     # detector's width over the pattern's pixels
     s.set_geometry(px_um=0)
@@ -503,7 +503,7 @@ def main():
     ni, gan = s.phases
     # an orientation and its stored form are the same orientation: they simulate the same pattern.
     # For GaN that takes the rotations of 6mm itself (six about c), not its Laue class's twelve,
-    # half of which would turn the polar axis over
+    # half of which would flip the polar axis
     qs = rng.normal(size=(200, 4)).astype(np.float32)
     qs /= np.linalg.norm(qs, axis=1, keepdims=True)
 
@@ -512,10 +512,10 @@ def main():
         a = a - a.mean((1, 2), keepdims=True)
         b = b - b.mean((1, 2), keepdims=True)
         return float(((a * b).sum((1, 2)) / np.sqrt((a * a).sum((1, 2)) * (b * b).sum((1, 2)))).min())
-    flipped = qs.astype(np.float64) @ np.array([[0, -1, 0, 0], [1, 0, 0, 0], [0, 0, 0, 1], [0, 0, -1, 0]])  # q · (a half turn about the crystal's x) … as (w, x, y, z) rows
+    flipped = qs.astype(np.float64) @ np.array([[0, -1, 0, 0], [1, 0, 0, 0], [0, 0, 0, 1], [0, 0, -1, 0]])  # q · (a 180° rotation about the crystal's x) … as (w, x, y, z) rows
     d_flip = np.degrees(s.disorientation(flipped, qs, phase=1))
     check("a polar crystal's orientations are reduced by its own rotations", same(0) > 0.995 and same(1) > 0.995 and d_flip.min() > 1,
-          f"patterns of an orientation and of its stored form correlate at least {same(0):.4f} (nickel), {same(1):.4f} (GaN); GaN turned over about x is {d_flip.min():.0f}° to {d_flip.max():.0f}° away, not 0")
+          f"patterns of an orientation and of its stored form correlate at least {same(0):.4f} (nickel), {same(1):.4f} (GaN); GaN flipped about x is {d_flip.min():.0f}° to {d_flip.max():.0f}° away, not 0")
     # a toy scan from the two masters: a seed is a scan, and its answer comes with it
     s.set_geometry(pc=(0.45, 0.25, 0.52), rot=(0, 0, 0), px_um=0)
     toy = s.synthesize(toy_seed=7, toy_rows=20, toy_cols=28, toy_height=60, toy_width=60, toy_grains=12, toy_counts=20)
@@ -560,10 +560,10 @@ def main():
     check("a toy scan is made from a seed, with its answer", s.scan["rows"] == 20 and s.scan["cols"] == 28 and s.scan["pattern_shape"] == (60, 60) and same_scan and not np.array_equal(other["quaternions"], toy["quaternions"])
           and 2 <= grains <= 12 and set(np.unique(toy["phase"])) <= {0, 1} and ok_ph.mean() > 0.97 and np.nanmedian(dt) < 0.3 and counted and 0.85 < shot < 1.15,
           f"{grains} grains of {len(np.unique(toy['phase']))} phases, {raw.mean():.1f} electrons a pixel, noise variance {shot:.2f} × the mean; indexed: phase right for {100 * ok_ph.mean():.1f} %, median {np.nanmedian(dt):.3f}° from the answer")
-    # the same as an experiment on fitting: a detector turned and a wide map (the true geometry),
+    # the same as an experiment on fitting: a detector rotated and a wide map (the true geometry),
     # an orientation per cell, a tenth of the cells blank, patterns that are mostly background,
     # not square, counted twice over with different noise; then the geometry moved off, for the
-    # plane fit to bring back (the sample frame following the plane, which then has the turn)
+    # plane fit to bring back (the sample frame following the plane, which then has the rotation)
     true_rot = np.radians((0.5, -1.0, 1.0))
     s.set_geometry(pc=(0.45, 0.25, 0.52), rot=tuple(true_rot), px_um=560, step_x_um=150, step_y_um=150)
     exp = dict(toy_seed=11, toy_rows=18, toy_cols=24, toy_height=60, toy_width=72, toy_grains=18 * 24, toy_blank=0.1, toy_contrast=0.3, toy_background_sigma=0.4, toy_counts=200)
@@ -573,7 +573,7 @@ def main():
     recount = np.array_equal(t5["quaternions"], t6["quaternions"]) and np.array_equal(t5["phase"], t6["phase"]) and not np.array_equal(s.pattern(3, processed=False), p5)
     blank = t6["phase"].ravel() < 0
     s.set_geometry(pc=(0.46, 0.24, 0.53), rot=(0, 0, 0))
-    # (every cell: on a map this small, every second one leaves the turns twice as uncertain)
+    # (every cell: on a map this small, every second one leaves the rotations twice as uncertain)
     s.configure(plane_frame="follow", plane_stride=1)
     pf = s.fit_plane()
     s.configure(plane_frame="nominal", plane_stride=2)
@@ -849,13 +849,13 @@ def main():
         s.configure(roi_x=32, roi_y=20, roi_w=3, roi_h=3, plane_method="points", plane_kind=kind, plane_stride=1)
         mid[kind] = np.array(s.fit_plane()["pc"])
     w = np.array(s.geometry["plane"])[3]
-    swing = max(abs(w @ (c, r, 1) / (w @ (37, 27, 1)) - 1) for c in (0, 74) for r in (0, 54))
+    spread = max(abs(w @ (c, r, 1) / (w @ (37, 27, 1)) - 1) for c in (0, 74) for r in (0, 54))
     gap = np.abs(mid["projective"] - mid["affine"]).max()
-    check("a projective plane through points that hardly move keeps its slopes near zero", swing < 0.02 and gap < 0.003,
-          f"the denominator {swing:.4f} from the middle at the corners; the middle's source {gap:.5f} from the affine plane's")
+    check("a projective plane through points that hardly move keeps its slopes near zero", spread < 0.02 and gap < 0.003,
+          f"the denominator {spread:.4f} from the middle at the corners; the middle's source {gap:.5f} from the affine plane's")
     # the joint fit holds them as well: its denominator moved half its value on the 3 × 3 patch,
     # and on a 12 × 12 one went through zero inside the map (there the points' fit moves it 0.06)
-    swing, gap = {}, {}
+    spread, gap = {}, {}
     for patch in ((32, 20, 3), (30, 20, 12)):
         mid = {}
         for kind in ("affine", "projective"):
@@ -863,10 +863,10 @@ def main():
             s.configure(roi_x=patch[0], roi_y=patch[1], roi_w=patch[2], roi_h=patch[2], plane_method="joint", plane_kind=kind, plane_stride=1)
             mid[kind] = np.array(s.fit_plane()["pc"])
         w = np.array(s.geometry["plane"])[3]
-        swing[patch[2]] = max(abs(w @ (c, r, 1) / (w @ (37, 27, 1)) - 1) for c in (0, 74) for r in (0, 54))
+        spread[patch[2]] = max(abs(w @ (c, r, 1) / (w @ (37, 27, 1)) - 1) for c in (0, 74) for r in (0, 54))
         gap[patch[2]] = np.abs(mid["projective"] - mid["affine"]).max()
-    check("the joint fit keeps a projective plane's slopes near zero too", swing[3] < 0.02 and swing[12] < 0.2 and max(gap.values()) < 0.003,
-          "; ".join(f"{k} × {k}: the denominator {swing[k]:.4f} from the middle at the corners, the middle's source {gap[k]:.5f} from the affine plane's" for k in swing))
+    check("the joint fit keeps a projective plane's slopes near zero too", spread[3] < 0.02 and spread[12] < 0.2 and max(gap.values()) < 0.003,
+          "; ".join(f"{k} × {k}: the denominator {spread[k]:.4f} from the middle at the corners, the middle's source {gap[k]:.5f} from the affine plane's" for k in spread))
 
     # the joint projective fit from one pattern centre for every cell (no steps, no plane): the
     # starting sources do not tell the projective row
@@ -1014,14 +1014,14 @@ def main():
     check("a master with its unique axis b keeps the pose it was fitted with, reduced about b",
           (r["phase"] == 0).all() and kept > 0.999 and by_y > 0.99 and by_z < 0.9
           and all(m < 0.05 or abs(m - 180) < 0.05 or pose_apart(q[i], qmul(half_y, raw[i])) < 0.05 for i, m in enumerate(moved)),
-          f"stored and fitted poses simulate patterns correlating at least {kept:.4f}; a half turn about b leaves them {by_y:.4f}, about c {by_z:.2f} at most; "
+          f"stored and fitted poses simulate patterns correlating at least {kept:.4f}; a 180° rotation about b leaves them {by_y:.4f}, about c {by_z:.2f} at most; "
           f"{int((pose_apart(q, raw) > 1).sum())} of 12 stored as their equivalent about b")
     qz, _ = s.reduce(q)
     d_sym = np.degrees(s.disorientation(qmul(half_y, q), q))
     d_c = np.degrees(s.disorientation(qmul(half_z, q), q))
     check("its explicit reduction and disorientation are about b too",
           pose_apart(qz, q).max() < 1e-3 and d_sym.max() < 1e-3 and d_c.min() > 1,
-          f"reduced as stored (to {pose_apart(qz, q).max():.1e}°); a half turn about b is {d_sym.max():.1e}° away, about c {d_c.min():.0f}°")
+          f"reduced as stored (to {pose_apart(qz, q).max():.1e}°); a 180° rotation about b is {d_sym.max():.1e}° away, about c {d_c.min():.0f}°")
     # the export's Bunge angles are those of the stored poses (the engine's convention, here in NumPy)
     with tempfile.TemporaryDirectory() as d:
         s.export(os.path.join(d, "x.ang"))

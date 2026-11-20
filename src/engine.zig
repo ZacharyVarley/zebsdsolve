@@ -276,8 +276,8 @@ const Memory = struct {
 
 /// Tuning how the work is cut up (settings.batch, refine_pixels, wg_refine, wg_fft) to this
 /// machine and this scan. A sample of the region is indexed as indexing would index it, the
-/// front end times that (the engine has no clock of its own), and a few moves are tried in
-/// turn, each climbing from the values held: doubled while that is faster, else halved while
+/// front end times that (the engine has no clock of its own), and a few moves are tried one
+/// after another, each climbing from the values held: doubled while that is faster, else halved while
 /// that is. About ten trials, not a search of every value. Nothing of the map's results is
 /// touched, and neither the orientations indexing finds nor which matches are accepted
 /// depend on these settings.
@@ -312,7 +312,7 @@ pub const Tune = struct {
 
     /// Patterns a trial indexes, by what the search costs, so that a trial stays a fraction of
     /// a second: the spherical correlation's cost follows the cube of its orientation grid
-    /// (64 points a turn up to bandwidth 32, 128 up to 64, 256 up to 128, 512 beyond).
+    /// (64 points per 360° up to bandwidth 32, 128 up to 64, 256 up to 128, 512 beyond).
     pub fn sampleOf(method: settings_mod.Method, bandwidth: u32, dict_grid: u32) usize {
         return switch (method) {
             .spherical => if (bandwidth <= 32) 8192 else if (bandwidth <= 64) 4096 else if (bandwidth <= 128) 1024 else 128,
@@ -368,7 +368,7 @@ const PatternCache = struct {
 
     /// bytes of one pattern
     pb: usize = 0,
-    /// the cell each slot holds; slots fill in order and then turn over from `next`
+    /// the cell each slot holds; slots fill in order and then wrap around from `next`
     cells: std.ArrayList(u64) = .empty,
     data: std.ArrayList(u8) = .empty,
     /// The slot each map cell is in (NO_SLOT: none), by cell: a table, not a hash map. A hash
@@ -2035,7 +2035,7 @@ pub const Engine = struct {
     pub fn ipfKeyOf(self: *const Engine, phase: usize) sym.Key {
         // a direction's colour follows the Laue class; an orientation's, the point group's own rotations
         const m = &self.phases.items[phase].master;
-        return sym.Key.init(if (self.set.ipf_colors == .perfect_rotation) m.rotation else m.laue, self.set.ipf_colors, self.set.ipf_lightness, self.set.ipf_gray);
+        return sym.Key.init(if (self.set.ipf_colors == .perfect_rotation) m.rotation else m.laue, self.set.ipf_colors);
     }
 
     pub fn calibrate(self: *Engine) !void {
@@ -2068,8 +2068,6 @@ pub const Engine = struct {
         k.plane_iters = 0;
         k.refine = false;
         k.ipf_colors = .classic;
-        k.ipf_lightness = 0;
-        k.ipf_gray = 0;
         const json = try k.toJson(gpa);
         defer gpa.free(json);
         var h = std.hash.Wyhash.init(n_ph);
@@ -2415,14 +2413,14 @@ pub const Engine = struct {
                 t.cand = c;
                 return true;
             }
-            self.tuneTurn();
+            self.tuneReverse();
         }
         return false;
     }
 
     /// The candidate in this direction was not kept: try the other way if this was the move's
     /// first step up, else leave the move.
-    fn tuneTurn(self: *Engine) void {
+    fn tuneReverse(self: *Engine) void {
         const t = &self.tune;
         if (t.up and !t.kept) {
             t.up = false;
@@ -2461,7 +2459,7 @@ pub const Engine = struct {
             t.best = t.cand;
             t.kept = true;
         } else {
-            self.tuneTurn();
+            self.tuneReverse();
         }
         t.now[which] = t.best_time;
         t.run = 0;

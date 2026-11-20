@@ -321,9 +321,9 @@ function buildGeometry() {
       continue;
     }
     if (key === "rot") {
-      const box = $("geo-turn-fields");
+      const box = $("geo-rot-fields");
       box.title = hint;
-      box.append(cell(""), cell("h", "swing"), cell("h", "tilt"), cell("h", "twist"), cell("k", label), mk(0), mk(1), mk(2));
+      box.append(cell(""), cell("h", "azimuthal"), cell("h", "tilt"), cell("h", "twist"), cell("k", label), mk(0), mk(1), mk(2));
       continue;
     }
     const el = document.createElement("label");
@@ -342,9 +342,10 @@ function buildGeometry() {
 function showGeometry() {
   const g = st.ze.geometry;
   const per = Object.fromEntries(GEOMETRY.map((f) => [f[0], f[4]]));
-  for (const input of document.querySelectorAll("#geometry-fields input, #pc-grid input, #geo-turn-fields input")) {
+  for (const input of document.querySelectorAll("#geometry-fields input, #pc-grid input, #geo-rot-fields input")) {
     const v = input.dataset.i !== undefined ? g[input.dataset.geo][+input.dataset.i] : g[input.dataset.geo];
-    input.value = String(+(v * per[input.dataset.geo]).toFixed(6));
+    // (the pattern centre to the four places the file's and the change beside it have)
+    input.value = input.dataset.geo === "pc" ? v.toFixed(4) : String(+(v * per[input.dataset.geo]).toFixed(6));
   }
   $("btn-geo-undo").disabled = !st.geoBefore || st.gpuLost;
   $("btn-geo-undo").textContent = st.geoIsBefore ? "redo fit" : "undo fit";
@@ -938,8 +939,8 @@ function showCrystal() {
       }));
     } else {
       const v = document.createElement("span");
-      v.textContent = fixed(c.cell[i], d);
-      v.title = `${sym} = ${fixed(c.cell[i], d)} ${unit}: tied by the crystal's family${i < 3 && tie[i] && Math.abs(c.cell[i] - c.cell[0]) < 1e-9 ? ` (${sym} ${tie[i]})` : ""}`;
+      v.textContent = String(+c.cell[i].toFixed(d + 2));
+      v.title = `${sym} = ${+c.cell[i].toFixed(d + 2)} ${unit}: tied by the crystal's family${i < 3 && tie[i] && Math.abs(c.cell[i] - c.cell[0]) < 1e-9 ? ` (${sym} ${tie[i]})` : ""}`;
       el.append(v);
     }
     pick(el, key);
@@ -1701,7 +1702,7 @@ function planeReadout(r, before = []) {
   if (model !== "centre") {
     shown.push(["tilt", pm(r.saidRot[1], r.saidRotSe[1]), "wide"]);
     more.push(["sample", `${(g.sampleTiltDeg - deg(r.saidRot[1])).toFixed(2)}°`], ["frame", r.frame ? "plane" : "nominal"]);
-    if (model !== "line") more.push(["swing", pm(r.saidRot[0], r.saidRotSe[0]), "wide"], ["scan turn", pm(r.saidRot[2], r.saidRotSe[2]), "wide"], ["skew", pm(r.skew, r.skewSe), "wide"]);
+    if (model !== "line") more.push(["azimuthal", pm(r.saidRot[0], r.saidRotSe[0]), "wide"], ["scan rotation", pm(r.saidRot[2], r.saidRotSe[2]), "wide"], ["skew", pm(r.skew, r.skewSe), "wide"]);
     if (r.step[0] > 0) {
       more.push(["row step", `${r.step[0].toFixed(3)} ± ${r.stepSe[0].toFixed(3)}`, "wide"]);
       if (model !== "line") more.push(["col step", `${r.step[1].toFixed(3)} ± ${r.stepSe[1].toFixed(3)}`, "wide"]);
@@ -1850,7 +1851,8 @@ function drawZ() {
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
   ctx.clearRect(0, 0, W, H);
   const zs = [];
-  if (R) for (let i = 0; i < R.z.length; i++) if (R.phase[i] >= 0) zs.push(R.z[i]);
+  let settled = 0;
+  if (R) for (let i = 0; i < R.z.length; i++) if (R.phase[i] >= 0) { zs.push(R.z[i]); if (R.sweep[i] >= 0) settled++; }
   if (!zs.length) { $("z-hint").textContent = "Not indexed yet"; return; }
   // the threshold on z's scale: the calibration's own, or the absolute NMI's place on it
   const t = st.settings.accept_nmi > 0 && st.chance ? (st.settings.accept_nmi - st.chance.median) / st.chance.spread : st.settings.accept_z;
@@ -1888,7 +1890,7 @@ function drawZ() {
     ctx.fillText(String(z), x(z), H - pad.b + 4);
   }
   const sorted = zs.slice().sort((a, b) => a - b);
-  $("z-hint").textContent = `${zs.length.toLocaleString()} cells · median z ${sorted[sorted.length >> 1].toFixed(1)} · ${accepted.toLocaleString()} (${((100 * accepted) / zs.length).toFixed(1)} %) at or above ${st.settings.accept_nmi > 0 ? `NMI ${st.settings.accept_nmi} (z ${t.toFixed(1)})` : `z ${t}`}`;
+  $("z-hint").textContent = `${zs.length.toLocaleString()} cells · median z ${sorted[sorted.length >> 1].toFixed(1)} · ${accepted.toLocaleString()} (${((100 * accepted) / zs.length).toFixed(1)} %) at or above ${st.settings.accept_nmi > 0 ? `NMI ${st.settings.accept_nmi} (z ${t.toFixed(1)})` : `z ${t}`} · ${settled.toLocaleString()} accepted (settled too)`;
 }
 
 // ── docks, enabling, files ──
@@ -1919,7 +1921,7 @@ function setProjection(p) {
 }
 
 /** The lock applies to the flat projections only (dimmed on the globe); while it holds, the
- *  buttons that would turn the sphere are dimmed too (the first view is still there). */
+ *  buttons that would rotate the sphere are dimmed too (the first view is still there). */
 function showViewLock() {
   const flat = st.projection !== "globe";
   $("view-lock").disabled = !flat;
@@ -2179,12 +2181,13 @@ function themeChoice() {
   try { return localStorage.getItem("zebsdsolve.theme") || "dark"; } catch { return "dark"; }
 }
 
-function buildMenu() {
-  const btn = $("btn-file"), menu = $("file-menu-list");
+/** A dropdown menu: `root` holds its button and its list. `pick(item)` hears an item chosen (and
+ *  returns true to keep the menu open); `opening()` runs before it shows. */
+function wireMenu(root, { pick, opening = () => {} }) {
+  const btn = root.querySelector("[aria-haspopup]"), menu = root.querySelector('[role="menu"]');
   const close = () => { menu.hidden = true; btn.setAttribute("aria-expanded", "false"); };
   const open = () => {
-    // each item as able as the control it stands for
-    for (const item of menu.querySelectorAll("[data-click]")) item.disabled = $(item.dataset.click).disabled || app.dataset.busy === "1";
+    opening();
     menu.hidden = false;
     btn.setAttribute("aria-expanded", "true");
     menu.querySelector("button:not(:disabled)")?.focus();
@@ -2193,18 +2196,30 @@ function buildMenu() {
   menu.addEventListener("click", (e) => {
     const item = e.target.closest("button");
     if (!item || item.disabled) return;
-    if (item.dataset.theme) { setTheme(item.dataset.theme); return; }
-    close();
-    if (item.dataset.click) $(item.dataset.click).click();
-    if (item.id === "btn-conventions") conventions.open();
+    if (!pick(item)) close();
   });
-  document.addEventListener("pointerdown", (e) => { if (!menu.hidden && !$("file-menu").contains(e.target)) close(); });
+  document.addEventListener("pointerdown", (e) => { if (!menu.hidden && !root.contains(e.target)) close(); });
   menu.addEventListener("keydown", (e) => {
     const items = [...menu.querySelectorAll('[role="menuitem"]:not(:disabled), [role="radio"]')];
     const at = items.indexOf(document.activeElement);
     if (e.key === "Escape") { e.preventDefault(); close(); btn.focus(); }
     else if (e.key === "ArrowDown" || e.key === "ArrowUp") { e.preventDefault(); items[(at + (e.key === "ArrowDown" ? 1 : items.length - 1)) % items.length]?.focus(); }
   });
+}
+
+function buildMenu() {
+  wireMenu($("file-menu"), {
+    // each item as able as the control it stands for
+    opening: () => { for (const item of $("file-menu").querySelectorAll("[data-click]")) item.disabled = $(item.dataset.click).disabled || app.dataset.busy === "1"; },
+    pick: (item) => {
+      if (item.dataset.theme) { setTheme(item.dataset.theme); return true; }
+      if (item.dataset.click) $(item.dataset.click).click();
+      if (item.id === "btn-conventions") conventions.open();
+      return false;
+    },
+  });
+  // the export formats beyond .ang and .ctf (each item's own listener does the work)
+  wireMenu($("export-more"), { pick: () => false });
   setTheme(themeChoice());
   matchMedia("(prefers-color-scheme: dark)").addEventListener("change", () => { if (themeChoice() === "system") setTheme("system"); });
   conventions = createConventions({
@@ -2212,11 +2227,11 @@ function buildMenu() {
     current: () => {
       if (!st.ze || app.dataset.scan !== "1") return null;
       const s = st.ze.scan, g = st.ze.geometry, set = st.ze.settings;
-      const turned = (180 / Math.PI) * Math.hypot(...g.rot);
+      const rotated = (180 / Math.PI) * Math.hypot(...g.rot);
       return {
         format: s.format, found: st.frameFound, sampleTilt: g.sampleTiltDeg, detectorTilt: g.detectorTiltDeg, pc: g.pc,
         shape: [s.patH, s.patW], signs: [set.scan_x_sign, set.scan_y_sign],
-        detector: turned > 0.005 ? `the tilts, then rotated ${turned.toFixed(2)}° (as the file stores it, or as fitted)` : "sample and detector tilts",
+        detector: rotated > 0.005 ? `the tilts, then rotated ${rotated.toFixed(2)}° (as the file stores it, or as fitted)` : "sample and detector tilts",
       };
     },
   });
@@ -2243,7 +2258,7 @@ async function main() {
     if (source === null) return null;
     return st.ze.sphereView({ ...o, source, stored: source >= 0 && st.masterStage === "stored", bin: source < 0 ? st.simBin : null, site: source < 0 ? st.simSite : null });
   }, (rot) => { if (st.link) st.cellView.setRotation(rot); });
-  // (the cell and the master share the crystal's Cartesian frame: linked, one rotation turns both)
+  // (the cell and the master share the crystal's Cartesian frame: linked, one rotation rotates both)
   st.cellView = new CellView($("cell-well"), (o) => (st.ze && st.crystal && !st.gpuLost ? st.ze.cellView(o) : null), (rot) => { if (st.link) st.masterView.setRotation(rot); });
   let projection = "globe";
   try { projection = localStorage.getItem("zebsdsolve.projection") || "globe"; } catch { /* private window */ }
@@ -2449,7 +2464,7 @@ function updateWiring() {
   });
   $("cell-link").addEventListener("change", (e) => {
     st.link = e.target.checked;
-    // linked: the master turns to the cell as it is
+    // linked: the master rotates to the cell as it is
     if (st.link && st.cellView.rot) st.masterView.setRotation(st.cellView.rot);
   });
   $("energy-all").addEventListener("click", () => { if (st.simBin !== null) pickSimPart("bin", st.simBin); });

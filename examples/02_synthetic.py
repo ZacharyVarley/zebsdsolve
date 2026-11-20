@@ -90,7 +90,7 @@ said = fit["said"]
 print("true          ", pc_true)
 print("vote          ", np.round(fit["start_pc"], 4))
 print("plane         ", np.round(fit["pc"], 5), f" mean NCC {fit['ncc']:.4f}  over {fit['n_used']} patterns")
-print(f"the plane says: tilt {np.degrees(said['rot'][1]):+.2f}° ± {np.degrees(said['rot_se'][1]):.2f}°, the scan turned {np.degrees(said['rot'][2]):+.2f}° ± {np.degrees(said['rot_se'][2]):.2f}°, "
+print(f"the plane says: tilt {np.degrees(said['rot'][1]):+.2f}° ± {np.degrees(said['rot_se'][1]):.2f}°, scan rotation {np.degrees(said['rot'][2]):+.2f}° ± {np.degrees(said['rot_se'][2]):.2f}°, "
       f"steps {np.round(said['step'], 3)} ± {np.round(said['step_se'], 3)}")
 
 # %% [markdown]
