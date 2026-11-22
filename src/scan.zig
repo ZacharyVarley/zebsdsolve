@@ -10,8 +10,8 @@
 //! unset here and is the caller's to supply: `Hints` for the shape, the engine's geometry for
 //! the rest.
 //!
-//! Patterns are numbered row-major over the map (row · cols + col) and returned as stored:
-//! `bytes_per_px` bytes per pixel, top row first.
+//! Patterns are numbered row-major over the map (row · cols + col), top row first.
+//! Signed 16-bit Oxford unprocessed pixels are returned losslessly as f32.
 const std = @import("std");
 const file_mod = @import("io/file.zig");
 const File = file_mod.File;
@@ -29,6 +29,27 @@ pub const OverviewKind = enum(u32) { none = 0, band_contrast = 1, image_quality 
 
 pub const Pixel = enum(u32) { u8 = 0, u16 = 1, f32 = 2 };
 
+pub const OxfordPatternChoice = enum(u32) { auto = 0, ask = 1, processed = 2, unprocessed = 3 };
+
+pub const OxfordPatternSource = enum(u32) {
+    processed = 1,
+    unprocessed = 2,
+
+    pub fn datasetName(self: OxfordPatternSource) []const u8 {
+        return switch (self) {
+            .processed => "Processed Patterns",
+            .unprocessed => "Unprocessed Patterns",
+        };
+    }
+
+    fn backgroundName(self: OxfordPatternSource) []const u8 {
+        return switch (self) {
+            .processed => "Processed Static Background",
+            .unprocessed => "Unprocessed Static Background",
+        };
+    }
+};
+
 /// What the caller knows that the file may not say (0: not given).
 pub const Hints = struct {
     rows: u32 = 0,
@@ -37,6 +58,7 @@ pub const Hints = struct {
     pat_w: u32 = 0,
     /// which scan of a multi-scan HDF5 file (empty: the first)
     scan_name: []const u8 = "",
+    oxford_patterns: OxfordPatternChoice = .auto,
 };
 
 /// Metadata as the file gives it; NaN where it gives none.
@@ -133,6 +155,7 @@ pub const Scan = struct {
     /// byte offset of pattern 0 (raw streams)
     data_offset: u64 = 0,
     big_endian: bool = false,
+    oxford_patterns: ?OxfordPatternSource = null,
     h5: ?hdf5.Hdf5 = null,
     ds: hdf5.Dataset = .{},
     /// Oxford .ebsp: file offset of each pattern's pixels (0: not stored)
@@ -167,6 +190,11 @@ pub const Scan = struct {
 
     pub fn patternBytes(self: *const Scan) u64 {
         return @as(u64, self.info.pat_h) * self.info.pat_w * self.bytesPerPx();
+    }
+
+    fn storedPatternBytes(self: *const Scan) u64 {
+        const bpp = if (self.h5 != null) self.ds.dtype.size else self.bytesPerPx();
+        return @as(u64, self.info.pat_h) * self.info.pat_w * bpp;
     }
 
     pub fn readStoredOverview(self: *Scan, out: []f32) !void {
@@ -349,8 +377,13 @@ pub const Scan = struct {
             try self.openNordif(hints);
         } else {
             // HDF5 behind a user block, else unknown
-            self.openHdf5(hints) catch return error.UnknownScanFormat;
+            self.openHdf5(hints) catch |err| switch (err) {
+                error.OxfordPatternChoiceRequired, error.OxfordPatternSourceUnavailable => return err,
+                else => return error.UnknownScanFormat,
+            };
         }
+        if (self.oxford_patterns == null and (hints.oxford_patterns == .processed or hints.oxford_patterns == .unprocessed))
+            return error.OxfordPatternSourceUnavailable;
         if (self.info.rows == 0 or self.info.cols == 0 or self.info.pat_h == 0 or self.info.pat_w == 0) return error.ScanShapeUnknown;
         return self;
     }
@@ -368,12 +401,17 @@ pub const Scan = struct {
         gpa.destroy(self);
     }
 
-    /// Patterns [first, first + n) as stored bytes into `dst` (n · patternBytes()).
+    /// Patterns [first, first + n) in the scan's pixel type into `dst` (n · patternBytes()).
     pub fn read(self: *Scan, first: u64, n: u64, dst: []u8) !void {
-        const pb = self.patternBytes();
         if (first + n > self.count()) return error.OutOfRange;
-        if (dst.len != n * pb) return error.BadLength;
+        if (dst.len != n * self.patternBytes()) return error.BadLength;
         if (n == 0) return;
+        try self.readStored(first, n, dst[0..@intCast(n * self.storedPatternBytes())]);
+        self.decodePixels(dst);
+    }
+
+    fn readStored(self: *Scan, first: u64, n: u64, dst: []u8) !void {
+        const pb = self.storedPatternBytes();
         switch (self.format) {
             .edax_up, .nordif => try self.files[0].read(self.data_offset + first * pb, dst),
             .oxford_ebsp => {
@@ -407,28 +445,39 @@ pub const Scan = struct {
                 }
             },
         }
-        self.toLittle(dst);
     }
 
-    fn toLittle(self: *const Scan, dst: []u8) void {
+    fn decodePixels(self: *const Scan, dst: []u8) void {
+        if (self.ds.dtype.class == .int) {
+            const endian: std.builtin.Endian = if (self.big_endian) .big else .little;
+            // Expand backwards in place so pixels still to be decoded are untouched.
+            var i = dst.len / @sizeOf(f32);
+            while (i > 0) {
+                i -= 1;
+                const value: f32 = @floatFromInt(std.mem.readInt(i16, dst[i * 2 ..][0..2], endian));
+                std.mem.writeInt(u32, dst[i * 4 ..][0..4], @bitCast(value), .little);
+            }
+            return;
+        }
         if (!self.big_endian or self.bytesPerPx() == 1) return;
         const bp = self.bytesPerPx();
         var i: usize = 0;
         while (i + bp <= dst.len) : (i += bp) std.mem.reverse(u8, dst[i..][0..bp]);
     }
 
-    /// The patterns of the given cells (ascending) as stored bytes into `dst`, back to back.
+    /// The patterns of the given cells (ascending) in the scan's pixel type, back to back.
     /// Cells scattered over the file (a preview lattice, the fit patterns, what a sweep left)
     /// are fetched together: one round trip where the format allows it.
     pub fn readCells(self: *Scan, cells: []const u64, dst: []u8) !void {
-        const pb: usize = @intCast(self.patternBytes());
-        if (dst.len != cells.len * pb) return error.BadLength;
+        if (dst.len != cells.len * self.patternBytes()) return error.BadLength;
         const total = self.count();
         for (cells, 0..) |c, i| {
             if (c >= total) return error.OutOfRange;
             if (i > 0 and c <= cells[i - 1]) return error.CellsNotAscending;
         }
         if (cells.len == 0) return;
+        const pb: usize = @intCast(self.storedPatternBytes());
+        const stored = dst[0 .. cells.len * pb];
         const gpa = self.gpa;
         switch (self.format) {
             .edax_up, .nordif => {
@@ -441,7 +490,7 @@ pub const Scan = struct {
                     try ranges.append(gpa, .{ .offset = self.data_offset + cells[i] * pb, .len = (j - i) * pb });
                     i = j;
                 }
-                try self.files[0].readSpans(ranges.items, dst);
+                try self.files[0].readSpans(ranges.items, stored);
             },
             .oxford_ebsp => {
                 var ranges: std.ArrayList(file_mod.Range) = .empty;
@@ -452,14 +501,16 @@ pub const Scan = struct {
                     if (off == 0) missing = true;
                     try ranges.append(gpa, .{ .offset = off, .len = pb });
                 }
-                if (!missing) return self.files[0].readv(ranges.items, dst);
-                for (cells, 0..) |c, i| try self.read(c, 1, dst[i * pb ..][0..pb]);
-                return;
+                if (!missing) {
+                    try self.files[0].readv(ranges.items, stored);
+                } else {
+                    for (cells, 0..) |c, i| try self.readStored(c, 1, stored[i * pb ..][0..pb]);
+                }
             },
             else => {
                 const h = &self.h5.?;
                 if (self.ds.rank == 3) {
-                    try h.readRowList(&self.ds, cells, dst);
+                    try h.readRowList(&self.ds, cells, stored);
                 } else {
                     // (rows, cols, h, w): each map row the cells touch, whole, through a scratch
                     const cols: u64 = self.info.cols;
@@ -470,16 +521,38 @@ pub const Scan = struct {
                         const r = cells[i] / cols;
                         try h.readRows(&self.ds, r, 1, tmp);
                         while (i < cells.len and cells[i] / cols == r) : (i += 1) {
-                            @memcpy(dst[i * pb ..][0..pb], tmp[@intCast((cells[i] % cols) * pb)..][0..pb]);
+                            @memcpy(stored[i * pb ..][0..pb], tmp[@intCast((cells[i] % cols) * pb)..][0..pb]);
                         }
                     }
                 }
             },
         }
-        self.toLittle(dst);
+        self.decodePixels(dst);
     }
 
     // ── HDF5 ──
+
+    fn selectOxfordPatterns(self: *Scan, data: u64, choice: OxfordPatternChoice) !?u64 {
+        const h = &self.h5.?;
+        const processed = if (choice != .unprocessed) try h.child(data, OxfordPatternSource.processed.datasetName()) else null;
+        const unprocessed = if (choice == .ask or (choice != .processed and processed == null))
+            try h.child(data, OxfordPatternSource.unprocessed.datasetName())
+        else
+            null;
+        if (choice == .ask and processed != null and unprocessed != null) return error.OxfordPatternChoiceRequired;
+        if (processed) |addr| {
+            self.oxford_patterns = .processed;
+            return addr;
+        }
+        if (unprocessed) |addr| {
+            self.oxford_patterns = .unprocessed;
+            return addr;
+        }
+        return switch (choice) {
+            .auto, .ask => null,
+            .processed, .unprocessed => error.OxfordPatternSourceUnavailable,
+        };
+    }
 
     fn openHdf5(self: *Scan, hints: Hints) !void {
         const gpa = self.gpa;
@@ -527,12 +600,17 @@ pub const Scan = struct {
             .{ .format = .h5_kikuchipy, .patterns = &.{"patterns"}, .rows = "n_rows", .cols = "n_columns", .pat_h = "pattern_height", .pat_w = "pattern_width", .step_x = "step_x", .step_y = "step_y", .tilt = "sample_tilt", .det_tilt = "elevation_angle", .background = "static_background" },
             .{ .format = .h5_bruker, .patterns = &.{"RawPatterns"}, .rows = "NROWS", .cols = "NCOLS", .pat_h = "PatternHeight", .pat_w = "PatternWidth", .step_x = "XSTEP", .step_y = "YSTEP", .tilt = "SampleTilt", .det_tilt = "CameraTilt", .background = "StaticBackground" },
             .{ .format = .h5_edax, .patterns = &.{"Pattern"}, .rows = "nRows", .cols = "nColumns", .pat_h = "Pattern Height", .pat_w = "Pattern Width", .step_x = "Step X", .step_y = "Step Y", .tilt = "Sample Tilt", .det_tilt = "Camera Elevation Angle", .background = "" },
-            .{ .format = .h5_oxford, .patterns = &.{ "Processed Patterns", "Unprocessed Patterns" }, .rows = "Y Cells", .cols = "X Cells", .pat_h = "Pattern Height", .pat_w = "Pattern Width", .step_x = "X Step", .step_y = "Y Step", .tilt = "Tilt Angle", .det_tilt = "", .background = "Processed Static Background" },
+            .{ .format = .h5_oxford, .patterns = &.{}, .rows = "Y Cells", .cols = "X Cells", .pat_h = "Pattern Height", .pat_w = "Pattern Width", .step_x = "X Step", .step_y = "Y Step", .tilt = "Tilt Angle", .det_tilt = "", .background = "" },
         };
         var vendor: ?V = null;
         var pat_addr: u64 = 0;
         for (vendors) |v| {
             if ((try h.child(header, v.rows)) == null) continue;
+            if (v.format == .h5_oxford) {
+                pat_addr = (try self.selectOxfordPatterns(data, hints.oxford_patterns)) orelse continue;
+                vendor = v;
+                break;
+            }
             for (v.patterns) |pn| if (try h.child(data, pn)) |a| {
                 pat_addr = a;
                 vendor = v;
@@ -553,6 +631,7 @@ pub const Scan = struct {
                 2 => Pixel.u16,
                 else => return error.UnsupportedPixelType,
             },
+            .int => if (self.oxford_patterns == .unprocessed and self.ds.dtype.size == 2) Pixel.f32 else return error.UnsupportedPixelType,
             .float => if (self.ds.dtype.size == 4) Pixel.f32 else return error.UnsupportedPixelType,
             else => return error.UnsupportedPixelType,
         };
@@ -663,7 +742,14 @@ pub const Scan = struct {
             },
             else => unreachable,
         }
-        if (v.background.len != 0) if (try h.child(header, v.background)) |a| {
+        const background = if (self.oxford_patterns) |source| source.backgroundName() else v.background;
+        if (background.len != 0) if (try h.child(header, background)) |a| {
+            if (self.oxford_patterns != null) {
+                // A background is optional and must cover this detector in the right order.
+                var ds = h.dataset(a) catch return;
+                defer ds.deinit(gpa);
+                if (ds.rank != 2 or ds.dims[0] != info.pat_h or ds.dims[1] != info.pat_w) return;
+            }
             const n = @as(usize, info.pat_h) * info.pat_w;
             const vals = try gpa.alloc(f64, n);
             defer gpa.free(vals);
@@ -1008,6 +1094,69 @@ test "the nickel scan opens with its metadata" {
     try s.read(4000, 1, buf[0..3600]);
     try std.testing.expectEqualSlices(u8, buf[0..3600], some[7200..]);
     try std.testing.expectError(error.CellsNotAscending, s.readCells(&.{ 5, 4 }, some[0..7200]));
+}
+
+test "Oxford pattern choices use their own pixels and background" {
+    const W = @import("io/hdf5_write.zig");
+    const testing = std.testing;
+    const gpa = testing.allocator;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    // The writer uses the caller's allocator for temporary serialization buffers.
+    var fixture_arena = std.heap.ArenaAllocator.init(gpa);
+    defer fixture_arena.deinit();
+
+    const modes: []const OxfordPatternChoice = &.{ .auto, .processed, .unprocessed };
+    for (modes) |mode| {
+        var f = try W.File.init(gpa);
+        defer f.deinit();
+        const data = try f.path("1/EBSD/Data");
+        const header = try f.path("1/EBSD/Header");
+        _ = try f.dataset(header, "Y Cells", .{ .dtype = W.Type.u8_, .bytes = &.{1} });
+        _ = try f.dataset(header, "X Cells", .{ .dtype = W.Type.u8_, .bytes = &.{2} });
+        _ = try f.dataset(header, "Processed Static Background", .{ .dtype = W.Type.u8_, .dims = &.{ 1, 2 }, .bytes = &.{ 3, 4 } });
+        _ = try f.dataset(header, "Unprocessed Static Background", .{ .dtype = .{ .class = .int, .size = 2 }, .dims = &.{ 1, 2 }, .bytes = &.{ 0xff, 0xff, 0, 0x80 } });
+        if (mode != .unprocessed)
+            _ = try f.dataset(data, OxfordPatternSource.processed.datasetName(), .{ .dtype = W.Type.u8_, .dims = &.{ 2, 1, 2 }, .bytes = &.{ 70, 71, 72, 73 } });
+        if (mode != .processed)
+            _ = try f.dataset(data, OxfordPatternSource.unprocessed.datasetName(), .{ .dtype = .{ .class = .int, .size = 2 }, .dims = &.{ 2, 1, 2 }, .bytes = &.{ 0, 0x80, 0xff, 0x7f, 0xc9, 0xff, 7, 0 } });
+        const bytes = try f.bytes(fixture_arena.allocator());
+        try tmp.dir.writeFile(testing.io, .{ .sub_path = "scan.h5oina", .data = bytes });
+        const path = try tmp.dir.realPathFileAlloc(testing.io, "scan.h5oina", gpa);
+        defer gpa.free(path);
+
+        if (mode == .auto)
+            try testing.expectError(error.OxfordPatternChoiceRequired, Scan.open(gpa, &.{path}, .{ .oxford_patterns = .ask }));
+        const choices: []const OxfordPatternChoice = if (mode == .auto) modes else &.{ .auto, .ask };
+        for (choices) |choice| {
+            const scan = try Scan.open(gpa, &.{path}, .{ .oxford_patterns = choice });
+            defer scan.close();
+            if (mode == .unprocessed or choice == .unprocessed) {
+                try testing.expectEqual(OxfordPatternSource.unprocessed, scan.oxford_patterns);
+                try testing.expectEqual(Pixel.f32, scan.info.pixel);
+                try testing.expectEqualSlices(f32, &.{ -1, -32768 }, scan.background);
+                var actual: [16]u8 = undefined;
+                const expected: [4]f32 = .{ -32768, 32767, -55, 7 };
+                try scan.read(0, 2, &actual);
+                for (expected, 0..) |value, i|
+                    try testing.expectEqual(value, @as(f32, @bitCast(std.mem.readInt(u32, actual[i * 4 ..][0..4], .little))));
+                var cell: [8]u8 = undefined;
+                try scan.readCells(&.{1}, &cell);
+                try testing.expectEqualSlices(u8, actual[8..], &cell);
+            } else {
+                try testing.expectEqual(OxfordPatternSource.processed, scan.oxford_patterns);
+                try testing.expectEqual(Pixel.u8, scan.info.pixel);
+                try testing.expectEqualSlices(f32, &.{ 3, 4 }, scan.background);
+                var actual: [4]u8 = undefined;
+                try scan.read(0, 2, &actual);
+                try testing.expectEqualSlices(u8, &.{ 70, 71, 72, 73 }, &actual);
+            }
+        }
+        if (mode != .auto) {
+            const unavailable: OxfordPatternChoice = if (mode == .processed) .unprocessed else .processed;
+            try testing.expectError(error.OxfordPatternSourceUnavailable, Scan.open(gpa, &.{path}, .{ .oxford_patterns = unavailable }));
+        }
+    }
 }
 
 test "Oxford's detector orientation as the geometry's rotation, and back" {

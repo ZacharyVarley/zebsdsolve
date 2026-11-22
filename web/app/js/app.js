@@ -25,6 +25,7 @@ const st = {
   ze: null,
   scan: null,          // engine scan info, or null
   scanName: "",
+  scanFiles: [],
   settings: {},
   cell: -1,            // selected map cell
   mapKind: "overview",
@@ -100,6 +101,7 @@ function status(text, err = false) {
 // The engine may still be suspended. Only touch JavaScript and DOM state here.
 function deviceLost({ reason, message }) {
   st.gpuLost = true;
+  $("oxford-patterns").close();
   ++st.showRun;
   ++st.pcRun;
   st.roiDrag = null;
@@ -476,22 +478,38 @@ function sortScanFiles(files) {
   return [...files].sort((a, b) => rank(a) - rank(b));
 }
 
-async function openScan(files, roi) {
-  files = sortScanFiles(files);
-  if (!files.length) return;
-  return busy(`opening ${files[0].name}…`, async () => {
-    invalidateOverview();
-    await st.ze.openScan(files);
-    st.scanFiles = files;
-    st.scanName = files[0].name;
-    afterOpen(roi);
+function chooseOxfordPatterns() {
+  const dialog = $("oxford-patterns");
+  dialog.returnValue = "";
+  return new Promise((resolve) => {
+    dialog.addEventListener("close", () => resolve(dialog.returnValue), { once: true });
+    dialog.showModal();
   });
 }
 
-/** A scan is open: everything drawn from the last one goes. `roi`: a project's region of interest
- *  for it (the engine opens a scan on the whole map). */
-function afterOpen(roi = null) {
-  if (roi) st.ze.configure(roi);
+async function openScan(files, settings, oxfordPatterns) {
+  files = sortScanFiles(files);
+  if (!files.length) return;
+  return busy(`opening ${files[0].name}…`, async () => {
+    try {
+      await st.ze.openScan(files, { settings, oxfordPatterns: oxfordPatterns ?? "ask" });
+    } catch (e) {
+      if (oxfordPatterns != null || !e.message.endsWith(": OxfordPatternChoiceRequired")) throw e;
+      if (st.gpuLost) return;
+      if (st.stop) throw new Error("Cancelled opening scan");
+      const choice = await chooseOxfordPatterns();
+      if (st.gpuLost) return;
+      if (!choice) throw new Error("Cancelled opening scan");
+      await st.ze.openScan(files, { settings, oxfordPatterns: choice });
+    }
+    st.scanName = files[0].name;
+    afterOpen(files);
+  });
+}
+
+/** A scan is open: everything drawn from the last one goes. */
+function afterOpen(files = []) {
+  st.scanFiles = files;
   invalidateOverview();
   ++st.showRun;
   const s = st.ze.scan;
@@ -529,7 +547,7 @@ function afterOpen(roi = null) {
   $("scan-meta").title = $("scan-meta").textContent;
   const facts = [
     ["format", s.format], ["map", `${s.rows} × ${s.cols} (${(s.rows * s.cols).toLocaleString()} patterns)`],
-    ["pattern", `${s.patH} × ${s.patW} ${s.dtype}`], ["size", gb >= 1 ? `${gb.toFixed(2)} GiB` : `${(s.bytes / 2 ** 20).toFixed(1)} MiB`],
+    ["pattern", `${s.patH} × ${s.patW} ${s.dtype}${s.oxfordPatterns ? ` · ${s.oxfordPatterns}` : ""}`], ["size", gb >= 1 ? `${gb.toFixed(2)} GiB` : `${(s.bytes / 2 ** 20).toFixed(1)} MiB`],
     ["background", s.hasBackground ? "stored" : "none"], ["PC", s.hasPc ? st.pcFile.map((v) => v.toFixed(4)).join("  ") : "none"],
     ["pixel", s.hasPx ? `${st.ze.geometry.pxUm.toFixed(1)} µm` : "none"],
   ];
@@ -2010,9 +2028,9 @@ async function takeFiles(files) {
   }
   const projects = files.filter((f) => /\.json$/i.test(f.name));
   const masters = files.filter((f) => !projects.includes(f) && isMaster(f));
-  const scans = files.filter((f) => !projects.includes(f) && !masters.includes(f));
+  let scans = files.filter((f) => !projects.includes(f) && !masters.includes(f));
   let project = null;
-  const roi = { ...FULL_ROI };
+  let settings, oxfordPatterns;
   if (projects.length) {
     try {
       project = JSON.parse(await projects[0].text());
@@ -2022,26 +2040,31 @@ async function takeFiles(files) {
       return;
     }
     if (st.gpuLost) return;
+    oxfordPatterns = project.opening_hints?.oxford_patterns;
+    if (!scans.length && oxfordPatterns != null && oxfordPatterns !== st.scan?.oxfordPatterns) {
+      if (project.scan !== st.scanName || !st.scan?.oxfordPatterns || !st.scanFiles.length) {
+        status("Open this project with its Oxford scan.", true);
+        return;
+      }
+      scans = st.scanFiles;
+    }
     if (project.settings) {
       // (a project saved by another version may hold settings this one does not have)
       const have = st.ze.settings;
       const gone = Object.keys(project.settings).filter((k) => !(k in have));
-      const take = Object.fromEntries(Object.entries(project.settings).filter(([k]) => k in have));
+      settings = Object.fromEntries(Object.entries(project.settings).filter(([k]) => k in have));
       if (gone.length) log(`project ${projects[0].name}: settings this version does not have, left out: ${gone.join(", ")}`);
-      const previousRoi = {};
-      if (scans.length) for (const key of Object.keys(roi)) if (Object.hasOwn(take, key)) {
-        previousRoi[key] = have[key];
-        roi[key] = take[key];
+      if (!scans.length) {
+        try { st.ze.configure(settings); }
+        catch (e) { status(String(e.message || e), true); log(String(e.message || e), true); return; }
+        afterSettings(Object.keys(settings));
       }
-      try {
-        st.ze.configure(take);
-        // Validate the project settings together, then keep the current scan's ROI until the new scan opens.
-        if (Object.keys(previousRoi).length) st.ze.configure(previousRoi);
-      } catch (e) { status(String(e.message || e), true); log(String(e.message || e), true); return; }
-      afterSettings(Object.keys(take).filter((key) => !Object.hasOwn(previousRoi, key)));
     }
   }
-  if (scans.length && !(await openScan(scans, roi))) return;
+  if (scans.length) {
+    if (!(await openScan(scans, settings, oxfordPatterns))) return;
+    if (settings) afterSettings(Object.keys(settings));
+  }
   if (masters.length) await addPhases(masters);
   if (project && !st.gpuLost) {
     if (project.geometry) { beforeFit(); st.ze.setGeometry(project.geometry); geometryChanged(); }
@@ -2120,14 +2143,15 @@ async function loadExample() {
     updateEnabled();
     await st.ze.addPhase(master);
     st.phaseFiles = [{ file: master, on: true, info: null }];
-    afterOpen();
+    afterOpen([scan]);
     phasesChanged();
   });
 }
 
 function projectJson() {
   const { text: _, ...frame } = st.ze.frame;
-  return JSON.stringify({ zebsdsolve: st.ze.version, scan: st.scanName, geometry: st.ze.geometry, settings: st.ze.settings, frame, phases: st.ze.phases.map((p) => p.name) }, null, 2);
+  const opening_hints = st.scan?.oxfordPatterns ? { oxford_patterns: st.scan.oxfordPatterns } : undefined;
+  return JSON.stringify({ zebsdsolve: st.ze.version, scan: st.scanName, geometry: st.ze.geometry, settings: st.ze.settings, frame, phases: st.ze.phases.map((p) => p.name), opening_hints }, null, 2);
 }
 
 // ── the frame the exports write in ──

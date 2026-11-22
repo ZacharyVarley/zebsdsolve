@@ -426,7 +426,7 @@ const SYNC_EXPORTS = new Set(["ze_alloc", "ze_free", "ze_version", "ze_create", 
 
 // Struct layouts (src/engine.zig, geometry.zig, pcfit.zig, planefit.zig): [name, type, byte offset].
 const SCAN = [["rows", "u32", 0], ["cols", "u32", 4], ["patH", "u32", 8], ["patW", "u32", 12], ["pixel", "u32", 16],
-  ["hasBackground", "bool", 20], ["hasPc", "bool", 24], ["formatId", "u32", 28], ["voltageKv", "f64", 32], ["bytes", "f64", 40], ["hasPx", "bool", 48]];
+  ["hasBackground", "bool", 20], ["hasPc", "bool", 24], ["formatId", "u32", 28], ["voltageKv", "f64", 32], ["bytes", "f64", 40], ["hasPx", "bool", 48], ["oxfordPatterns", "u32", 52]];
 const SCAN_SIZE = 56;
 const PHASE = [["side", "u32", 0], ["pointGroup", "u32", 4], ["spaceGroup", "u32", 8], ["laueId", "u32", 12],
   ["nFold", "u32", 16], ["mirror", "bool", 20], ["inversion", "bool", 24], ["voltageKv", "f64", 32]];
@@ -701,12 +701,16 @@ export class Zebsdsolve {
     return `@${this.state.files.length - 1}:${name}`;
   }
 
-  /** Open a scan from Blobs: the pattern file first, then side files (NORDIF's Setting.txt). */
-  openScan(blobs) {
+  /** Open a scan from Blobs (pattern file first). A settings patch applies on success.
+   *  Oxford patterns can be "auto", "ask", "processed" or "unprocessed". */
+  openScan(blobs, { settings = {}, oxfordPatterns = "auto" } = {}) {
     return this._serial(() => this._frame(async (f) => {
+      const choice = ["auto", "ask", "processed", "unprocessed"].indexOf(oxfordPatterns);
+      if (choice < 0) throw new Error("open: InvalidOxfordPatternChoice");
       const tokens = [].concat(blobs).map((b) => this.addFile(b));
       const [p, n] = f.str(tokens.join("\n"));
-      this._check(await this.x.ze_open_scan(this.e, p, n), "open");
+      const [j, len] = f.str(JSON.stringify(settings));
+      this._check(await this.x.ze_open_scan_with(this.e, p, n, j, len, choice), "open");
       return this.scan;
     }));
   }
@@ -748,6 +752,7 @@ export class Zebsdsolve {
     });
     s.format = this._text((p, cap) => this.x.ze_scan_format(this.e, p, cap), 64);
     s.dtype = ["uint8", "uint16", "float32"][s.pixel];
+    s.oxfordPatterns = [null, "processed", "unprocessed"][s.oxfordPatterns];
     return s;
   }
 

@@ -67,7 +67,8 @@ pub const ScanInfo = extern struct {
     bytes: f64 = 0,
     /// 1 when the file gave a pixel size
     has_px: u32 = 0,
-    _pad: u32 = 0,
+    /// 0 for other formats, 1 for processed Oxford patterns, 2 for unprocessed.
+    oxford_patterns: u32 = 0,
 };
 
 pub const PhaseInfo = extern struct {
@@ -803,22 +804,35 @@ pub const Engine = struct {
         self.fit_ncc = &.{};
     }
 
-    /// Open a scan from files (the pattern file first). The geometry takes whatever the file
-    /// records; the rest keeps its current value.
-    pub fn openScan(self: *Engine, paths: []const []const u8) !void {
-        const s = scan_mod.Scan.open(self.gpa, paths, .{
-            .rows = self.set.map_rows,
-            .cols = self.set.map_cols,
-            .pat_h = self.set.pattern_height,
-            .pat_w = self.set.pattern_width,
-        }) catch |e| {
-            return e;
-        };
+    /// Open a scan from files (the pattern file first), with optional settings for this open.
+    /// Geometry starts from the file's calibration where it has one.
+    pub fn openScan(self: *Engine, paths: []const []const u8, settings_json: []const u8, oxford_patterns: scan_mod.OxfordPatternChoice) !void {
+        var settings = self.set;
+        wholeMap(&settings);
+        if (settings_json.len != 0) try settings.apply(self.gpa, settings_json);
+        const s = try scan_mod.Scan.open(self.gpa, paths, .{
+            .rows = settings.map_rows,
+            .cols = settings.map_cols,
+            .pat_h = settings.pattern_height,
+            .pat_w = settings.pattern_width,
+            .oxford_patterns = oxford_patterns,
+        });
+        errdefer s.close();
+
+        // Keep the previous scan and settings until the new scan is ready.
+        const n = std.math.cast(usize, s.count()) orelse return error.ScanShapeTooLarge;
+        if (n > std.math.maxInt(usize) / (4 * @sizeOf(f32))) return error.ScanShapeTooLarge;
+        var results: Results = .{};
+        errdefer results.free(self.gpa);
+        try results.resize(self.gpa, n);
+
         self.closeScan();
         self.source = .{ .file = s };
-        self.wholeMap();
-        try self.adoptInfo(s.info);
+        self.set = settings;
+        self.res = results;
+        self.adoptInfo(s.info);
         self.events.log("opened {s}: {d} × {d} patterns of {d} × {d}", .{ s.formatName(), s.info.rows, s.info.cols, s.info.pat_h, s.info.pat_w });
+        if (s.oxford_patterns) |source| self.events.log("Oxford pattern source: {s}", .{source.datasetName()});
         if (s.info.pc_note.len != 0) self.events.log("{s}", .{s.info.pc_note});
         if (!std.math.isNan(s.info.detector_rot[0])) self.events.log("the detector's orientation as the file stores it: {d:.2}° from the nominal one", .{std.math.radiansToDegrees(rot.norm(s.info.detector_rot))});
     }
@@ -835,7 +849,7 @@ pub const Engine = struct {
         const copy = try self.gpa.dupe(u8, data);
         self.closeScan();
         self.source = .{ .memory = .{ .data = copy, .info = .{ .rows = rows, .cols = cols, .pat_h = h, .pat_w = w, .pixel = pixel } } };
-        self.wholeMap();
+        wholeMap(&self.set);
         try self.res.resize(self.gpa, @as(usize, rows) * cols);
         // (patterns from memory come with no geometry: a pixel size set by hand stays)
         if (!(self.geo.px_um > 0)) self.geo.px_um = self.defaultPx();
@@ -843,15 +857,14 @@ pub const Engine = struct {
 
     /// A new scan (or new patterns) starts at the whole map: a region drawn on another scan
     /// says nothing of this one, and would silently keep the fits and indexing to it.
-    fn wholeMap(self: *Engine) void {
-        self.set.roi_x = 0;
-        self.set.roi_y = 0;
-        self.set.roi_w = 0;
-        self.set.roi_h = 0;
+    fn wholeMap(settings: *Settings) void {
+        settings.roi_x = 0;
+        settings.roi_y = 0;
+        settings.roi_w = 0;
+        settings.roi_h = 0;
     }
 
-    fn adoptInfo(self: *Engine, si: scan_mod.Info) !void {
-        try self.res.resize(self.gpa, @as(usize, si.rows) * si.cols);
+    fn adoptInfo(self: *Engine, si: scan_mod.Info) void {
         const g = &self.geo;
         if (!std.math.isNan(si.pc[0]) and !std.math.isNan(si.pc[1]) and !std.math.isNan(si.pc[2])) {
             g.pc = si.pc;
@@ -892,6 +905,7 @@ pub const Engine = struct {
             .file => |s| {
                 out.has_background = @intFromBool(s.background.len != 0);
                 out.format = @intFromEnum(s.format);
+                if (s.oxford_patterns) |source| out.oxford_patterns = @intFromEnum(source);
                 out.bytes = @floatFromInt(s.files[0].size);
             },
             .memory => |m| {

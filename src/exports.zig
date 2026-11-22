@@ -68,15 +68,27 @@ export fn ze_cancel(e: *Engine) void {
 
 /// Open a scan: `paths` holds one or more names separated by '\n', the pattern file first.
 export fn ze_open_scan(e: *Engine, paths: [*]const u8, len: usize) i32 {
+    return openScan(e, paths[0..len], "", .auto);
+}
+
+/// Open a scan with a prospective settings patch and an Oxford pattern choice (0 auto, 1 ask,
+/// 2 processed, 3 unprocessed).
+export fn ze_open_scan_with(e: *Engine, paths: [*]const u8, len: usize, settings: [*]const u8, settings_len: usize, oxford_patterns: u32) i32 {
+    const choice = std.enums.fromInt(scan_mod.OxfordPatternChoice, oxford_patterns) orelse
+        return failed(e, "open_scan", error.InvalidOxfordPatternChoice);
+    return openScan(e, paths[0..len], settings[0..settings_len], choice);
+}
+
+fn openScan(e: *Engine, paths: []const u8, settings: []const u8, choice: scan_mod.OxfordPatternChoice) i32 {
     var list: [8][]const u8 = undefined;
     var n: usize = 0;
-    var it = std.mem.tokenizeScalar(u8, paths[0..len], '\n');
+    var it = std.mem.tokenizeScalar(u8, paths, '\n');
     while (it.next()) |p| {
         if (n == list.len) break;
         list[n] = p;
         n += 1;
     }
-    e.openScan(list[0..n]) catch |err| return failed(e, "open_scan", err);
+    e.openScan(list[0..n], settings, choice) catch |err| return failed(e, "open_scan", err);
     e.geo_given = e.geo;
     return 0;
 }
