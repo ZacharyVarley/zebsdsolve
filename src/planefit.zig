@@ -247,6 +247,43 @@ fn damped(comptime k: usize, l: *const Local, lambda: f64) struct { A: [k * k]f6
     return .{ .A = A, .g = g };
 }
 
+const LocalStep = struct {
+    lambda: f64 = 1e-3,
+    active: bool,
+    trial: bool = false,
+
+    fn reject(self: *LocalStep) void {
+        if (self.lambda >= 1e8) self.active = false;
+        self.lambda = @min(self.lambda * 5, 1e8);
+    }
+
+    /// Keep the accepted system on rejection so the next trial can use more damping there.
+    fn update(self: *LocalStep, keep: *Local, local: Local) bool {
+        if (!local.ok or !(local.ncc > keep.ncc)) {
+            self.reject();
+            return false;
+        }
+        self.active = local.ncc - keep.ncc >= 1e-7;
+        self.lambda = @max(self.lambda / 3, 1e-4);
+        keep.* = local;
+        return true;
+    }
+};
+
+fn hasPendingSteps(steps: []const LocalStep) bool {
+    for (steps) |step| if (step.active) return true;
+    return false;
+}
+
+fn devicePose(base: rot.Vec3, shift: rot.Vec3, q: rot.Quat, cell: usize) detector.Pose {
+    const t = rot.add(base, shift);
+    return .{
+        .t = .{ @floatCast(t[0]), @floatCast(t[1]), @floatCast(t[2]) },
+        .pat = @floatFromInt(cell),
+        .q = .{ @floatCast(q[0]), @floatCast(q[1]), @floatCast(q[2]), @floatCast(q[3]) },
+    };
+}
+
 /// The fit patterns, indexed at the geometry as it stands and on the device, each with its
 /// orientation and its source's shift away from where the geometry puts it.
 const Fit = struct {
@@ -272,8 +309,8 @@ const Fit = struct {
     /// each pattern's system where it stands, and where `eval` was last
     keep: []Local,
     locals: []Local,
-    /// each pattern's own damping
-    lam: []f64,
+    /// each pattern's own damping and convergence
+    steps: []LocalStep,
     sums: []f32,
     poses: []detector.Pose,
     /// the fit's own copies of the phases' masters, resampled (settings.plane_master_px), and
@@ -330,7 +367,7 @@ const Fit = struct {
         const shift_t = try a.alloc(rot.Vec3, n);
         const keep = try a.alloc(Local, n);
         const locals = try a.alloc(Local, n);
-        const lam = try a.alloc(f64, n);
+        const steps = try a.alloc(LocalStep, n);
         const sums = try a.alloc(f32, n_ph * n * NS);
         const poses = try a.alloc(detector.Pose, n);
         const own = try a.alloc(bool, n_ph);
@@ -354,7 +391,7 @@ const Fit = struct {
             .shift_t = shift_t,
             .keep = keep,
             .locals = locals,
-            .lam = lam,
+            .steps = steps,
             .sums = sums,
             .poses = poses,
             .own = own,
@@ -508,14 +545,7 @@ const Fit = struct {
         const g = &e.g;
         const n = self.n;
         const fr = try e.frame(self.lv);
-        for (0..n) |b| {
-            const t = rot.add(self.base[b], shift[b]);
-            self.poses[b] = .{
-                .t = .{ @floatCast(t[0]), @floatCast(t[1]), @floatCast(t[2]) },
-                .pat = @floatFromInt(b),
-                .q = .{ @floatCast(q[b][0]), @floatCast(q[b][1]), @floatCast(q[b][2]), @floatCast(q[b][3]) },
-            };
-        }
+        for (0..n) |b| self.poses[b] = devicePose(self.base[b], shift[b], q[b], b);
         e.det.setPoses(self.poses);
         e.det.interp = switch (e.set.plane_interp) {
             .bilinear => 0,
@@ -544,47 +574,57 @@ const Fit = struct {
     /// score: over its orientation alone (`k` 3), or with the place of its own source (`k` 6:
     /// what Winkelmann et al. and kikuchipy's refine_orientation_projection_center do a
     /// pattern at a time). All the patterns take a step together, a pattern's step kept where
-    /// its own score rose, until a round gains the mean less than 1e-7 (about what single
-    /// precision on the device leaves of it) or after `most` rounds. A source may move
-    /// `trust` pixels each way from where it started. Returns the rounds taken; leaves the
-    /// mean score in `ncc` and the patterns' systems in `keep`.
+    /// its own score rose. A rejected step retries with more damping, up to the damping limit.
+    /// Each pattern stops when its step leaves the pose unchanged or improves its score by
+    /// less than 1e-7 (about what single precision on the device leaves of it). A source may
+    /// move `trust` pixels each way from where it started. Returns the rounds taken, at most
+    /// `most`, leaving the mean score in `ncc` and the patterns' systems in `keep`.
     fn settle(self: *Fit, comptime k: usize, trust: f64, most: u32) !u32 {
         const n = self.n;
         const count: f64 = @floatFromInt(self.n_used);
         self.ncc = try self.eval(self.q, self.shift);
         @memcpy(self.keep, self.locals);
-        @memset(self.lam, 1e-3);
+        for (self.steps, self.use, self.keep) |*step, used, local| step.* = .{ .active = used and local.ok };
         var it: u32 = 0;
-        while (it < most) : (it += 1) {
+        while (it < most and hasPendingSteps(self.steps)) : (it += 1) {
             if (self.e.cancel) return error.Cancelled;
+            var trial = false;
             for (0..n) |b| {
+                const step = &self.steps[b];
+                step.trial = false;
                 self.q_t[b] = self.q[b];
                 self.shift_t[b] = self.shift[b];
-                if (!self.use[b]) continue;
-                const sys = damped(k, &self.keep[b], self.lam[b]);
-                const d = solve(k, sys.A, sys.g) orelse continue;
+                if (!step.active) continue;
+                const sys = damped(k, &self.keep[b], step.lambda);
+                const d = solve(k, sys.A, sys.g) orelse {
+                    step.reject();
+                    continue;
+                };
                 if (k == 6) {
                     var sh = rot.add(self.shift[b], .{ d[0], d[1], d[2] });
                     for (&sh) |*v| v.* = std.math.clamp(v.*, -trust, trust);
                     self.shift_t[b] = sh;
                 }
                 self.q_t[b] = rot.qstd(rot.qmul(rot.so3Exp(.{ d[k - 3], d[k - 2], d[k - 1] }), self.q[b]));
+                const previous = devicePose(self.base[b], self.shift[b], self.q[b], b);
+                const next = devicePose(self.base[b], self.shift_t[b], self.q_t[b], b);
+                if (std.meta.eql(previous, next)) {
+                    step.active = false;
+                    continue;
+                }
+                step.trial = true;
+                trial = true;
             }
+            if (!trial) continue;
             _ = try self.eval(self.q_t, self.shift_t);
-            var gain: f64 = 0;
             for (0..n) |b| {
-                if (!self.use[b]) continue;
-                const now = self.locals[b].ncc;
-                if (now > self.keep[b].ncc) {
-                    gain += now - self.keep[b].ncc;
+                const step = &self.steps[b];
+                if (step.trial and step.update(&self.keep[b], self.locals[b])) {
                     self.q[b] = self.q_t[b];
                     self.shift[b] = self.shift_t[b];
-                    self.keep[b] = self.locals[b];
-                    self.lam[b] = @max(self.lam[b] / 3, 1e-4);
-                } else self.lam[b] = @min(self.lam[b] * 5, 1e8);
+                }
             }
             if (k == 6) self.e.events.emit(.{ .kind = "progress", .stage = "plane", .done = it + 1, .total = most });
-            if (gain / count < 1e-7) break;
         }
         var mean: f64 = 0;
         for (0..n) |b| {
@@ -1196,4 +1236,31 @@ test "small dense solve" {
     const x = solve(3, .{ 2, 1, 0, 1, 3, 1, 0, 1, 4 }, .{ 3, 5, 5 }).?;
     for (x) |v| try std.testing.expectApproxEqAbs(@as(f64, 1), v, 1e-12);
     try std.testing.expect(solve(2, .{ 1, 2, 2, 4 }, .{ 1, 1 }) == null);
+}
+
+test "a rejected local plane fit step retries from the accepted system" {
+    const objective = struct {
+        fn at(x: f64) Local {
+            var local: Local = .{ .ok = true, .ncc = 0.7 + 0.1 * x * (2 - x) };
+            local.g[3] = 0.2 * (1 - x);
+            // An inexact curvature makes the first trial overshoot the maximum.
+            local.H[21] = 0.2 / 2.006;
+            return local;
+        }
+    };
+    var step: LocalStep = .{ .active = true };
+    const start = objective.at(0);
+    var keep = start;
+    const first = damped(3, &keep, step.lambda);
+    const x = solve(3, first.A, first.g).?[0];
+    try std.testing.expect(x > 2);
+    try std.testing.expect(!step.update(&keep, objective.at(x)));
+    try std.testing.expect(hasPendingSteps(&.{step}));
+    try std.testing.expectEqual(start, keep);
+
+    const retry = damped(3, &keep, step.lambda);
+    const y = solve(3, retry.A, retry.g).?[0];
+    try std.testing.expect(y < 2);
+    try std.testing.expect(step.update(&keep, objective.at(y)));
+    try std.testing.expect(keep.ncc > start.ncc);
 }
