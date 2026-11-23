@@ -118,6 +118,10 @@ fn axis(gpa: std.mem.Allocator, centre: f64, span: f64, steps: u32) ![]f64 {
     return a;
 }
 
+fn validDepth(z: f64, min: f64) bool {
+    return std.math.isFinite(z) and z > 0 and z >= min;
+}
+
 /// Offset of a parabola's maximum through three equally spaced values (in steps).
 fn vertex(lo: f64, mid: f64, hi: f64) f64 {
     const den = lo - 2 * mid + hi;
@@ -159,21 +163,32 @@ pub const Level = struct {
 };
 
 const Ballot = struct { at: [3]f64, w: f64 };
+const Peak = struct { at: [3]f64, candidate: usize };
 
-/// The maximum of a volume (x innermost), each coordinate moved between candidates by the
-/// parabola through its neighbours.
-fn peakOf(m: []const f32, n: [3]u32) [3]f64 {
-    var best: usize = 0;
+/// The maximum of a volume over candidates with positive mean correlation.
+fn supportedMaximum(m: []const f32, scores: []const f32) !usize {
+    var best: ?usize = null;
+    var top: f32 = 0;
     for (m, 0..) |v, i| {
-        if (v > m[best]) best = i;
+        if (scores[i] > 0 and std.math.isFinite(v) and v > top) {
+            best = i;
+            top = v;
+        }
     }
+    return best orelse error.NoPcSupport;
+}
+
+/// Interpolate the peak only where both neighbouring candidates have support.
+fn peakAt(m: []const f32, scores: []const f32, n: [3]u32, best: usize) [3]f64 {
     const at = [3]u32{ @intCast(best % n[0]), @intCast((best / n[0]) % n[1]), @intCast(best / (n[0] * n[1])) };
     const strides = [3]usize{ 1, n[0], n[0] * n[1] };
     var out: [3]f64 = undefined;
     for (0..3) |a| {
         out[a] = @floatFromInt(at[a]);
         if (n[a] < 3 or at[a] == 0 or at[a] == n[a] - 1) continue;
-        out[a] += vertex(m[best - strides[a]], m[best], m[best + strides[a]]);
+        const lo = best - strides[a];
+        const hi = best + strides[a];
+        if (scores[lo] > 0 and scores[hi] > 0) out[a] += vertex(m[lo], m[best], m[hi]);
     }
     return out;
 }
@@ -185,7 +200,7 @@ fn splat(ballots: []const Ballot, n: [3]u32, sigma: [3]f64, out: []f32) void {
     var r: [3]i64 = undefined;
     var inv: [3]f64 = undefined;
     for (0..3) |a| {
-        r[a] = if (n[a] > 1) @intFromFloat(@ceil(3 * sigma[a])) else 0;
+        r[a] = @intFromFloat(@min(@ceil(3 * sigma[a]), @as(f64, @floatFromInt(n[a] - 1))));
         inv[a] = 1.0 / (2 * sigma[a] * sigma[a]);
     }
     for (ballots) |b| {
@@ -210,7 +225,7 @@ fn splat(ballots: []const Ballot, n: [3]u32, sigma: [3]f64, out: []f32) void {
 /// those alone. `step`: the candidates' spacing along x, y, z (the spread and the inlier
 /// radius are widths on the detector, the same on every grid). Returns where the choice lies
 /// in candidate steps; `density` gets the first density.
-fn consensus(gpa: std.mem.Allocator, set: *const engine.Settings, pat_scores: []const f32, n_pat: u32, n: [3]u32, step: [3]f64, density: []f32, counts: *[2]u32) ![3]f64 {
+fn consensus(gpa: std.mem.Allocator, set: *const engine.Settings, pat_scores: []const f32, n_pat: u32, n: [3]u32, step: [3]f64, scores: []const f32, density: []f32, counts: *[2]u32) !Peak {
     const n_c: usize = n[0] * n[1] * n[2];
     const k: usize = @min(set.pc_top_k, n_c);
     // (never narrower than the candidates can show)
@@ -255,10 +270,11 @@ fn consensus(gpa: std.mem.Allocator, set: *const engine.Settings, pat_scores: []
             cast += 1;
         }
     }
+    if (ballots.items.len == 0) return error.NoPcSupport;
     counts.* = .{ @intCast(ballots.items.len), 0 };
     splat(ballots.items, n, sigma, density);
-    var pk = peakOf(density, n);
-    if (ballots.items.len == 0) return pk;
+    const best = try supportedMaximum(density, scores);
+    const mode = peakAt(density, scores, n, best);
     const r2 = set.pc_inlier_radius * set.pc_inlier_radius;
     const near = struct {
         fn of(b: Ballot, p: [3]f64, st: [3]f64, lim: f64) bool {
@@ -268,11 +284,11 @@ fn consensus(gpa: std.mem.Allocator, set: *const engine.Settings, pat_scores: []
     }.of;
     // once to the weighted centre of the ballots around the mode …
     var sum = [4]f64{ 0, 0, 0, 0 };
-    for (ballots.items) |b| if (near(b, pk, step, r2)) {
+    for (ballots.items) |b| if (near(b, mode, step, r2)) {
         for (0..3) |a| sum[a] += b.w * b.at[a];
         sum[3] += b.w;
     };
-    if (sum[3] > 0) pk = .{ sum[0] / sum[3], sum[1] / sum[3], sum[2] / sum[3] };
+    const pk: [3]f64 = if (sum[3] > 0) .{ sum[0] / sum[3], sum[1] / sum[3], sum[2] / sum[3] } else mode;
     // … then the mode of those ballots alone
     var kept: usize = 0;
     for (ballots.items) |b| if (near(b, pk, step, r2)) {
@@ -280,11 +296,12 @@ fn consensus(gpa: std.mem.Allocator, set: *const engine.Settings, pat_scores: []
         kept += 1;
     };
     counts[1] = @intCast(kept);
-    if (kept == 0) return pk;
+    if (kept == 0) return error.NoPcSupport;
     const inl = try gpa.alloc(f32, n_c);
     defer gpa.free(inl);
     splat(ballots.items[0..kept], n, sigma, inl);
-    return peakOf(inl, n);
+    const winner = try supportedMaximum(inl, scores);
+    return .{ .at = peakAt(inl, scores, n, winner), .candidate = winner };
 }
 
 pub fn clearHistory(e: *Engine) void {
@@ -294,18 +311,18 @@ pub fn clearHistory(e: *Engine) void {
 
 pub fn run(e: *Engine) !Result {
     const gpa = e.gpa;
-    clearHistory(e);
     const g = &e.g;
     const s = &e.set;
     e.cancel = false;
-    // (the vote moves one pattern centre, the scan's steps saying how the beam went from it:
-    // a plane fitted before goes)
-    e.geo.plane_kind = 0;
+    // Use the scan's steps for the search. Drop a previous plane only when installing a fit.
+    var geo = e.geo;
+    geo.plane_kind = 0;
+    const n_ph = e.phases.items.len;
+    if (n_ph == 0) return error.NoPhases;
     const lv = e.levelOf(.search);
     const k_lv = @intFromEnum(lv);
     const bd = try e.band(s.fit_bandwidth, lv);
     const sp = &e.sp;
-    const n_ph = e.phases.items.len;
     const sz = try e.sizeOf(lv);
     const fr = try e.frame(lv);
 
@@ -313,6 +330,7 @@ pub fn run(e: *Engine) !Result {
     errdefer gpa.free(cells);
     const n_pat: u32 = @intCast(cells.len);
     try e.uploadCells(cells, &.{lv});
+    if (e.cancel) return error.Cancelled;
     const pats = e.pats[k_lv];
 
     var tile: u32 = 4096;
@@ -327,6 +345,12 @@ pub fn run(e: *Engine) !Result {
     const steps = [3]u32{ s.pc_steps, s.pc_steps, s.pc_steps_z };
     const n_c: u32 = steps[0] * steps[1] * steps[2];
     if (@as(u64, n_c) * n_pat > 4 << 20) return error.SearchTooLarge;
+    const xy = steps[0] * steps[1];
+    var history: std.ArrayList(Level) = .empty;
+    defer {
+        for (history.items) |*lvl| lvl.deinit(gpa);
+        history.deinit(gpa);
+    }
 
     // per phase: every candidate's peaks of this level, and (several phases) its records
     const lvl_peaks = try gpa.alloc(Buf, n_ph);
@@ -361,7 +385,7 @@ pub fn run(e: *Engine) !Result {
     // each pattern's beam offset (pixels of the search's level), the same under every candidate
     const offs = try gpa.alloc([3]f64, n_pat);
     defer gpa.free(offs);
-    for (cells, 0..) |c, b| offs[b] = e.offsetOf(&e.geo, c, lv);
+    for (cells, 0..) |c, b| offs[b] = e.offsetOf(&geo, c, lv);
 
     var best_c: u32 = 0;
     var level: u32 = 0;
@@ -372,16 +396,26 @@ pub fn run(e: *Engine) !Result {
             axes[a] = &.{};
             axes[a] = try axis(gpa, pc[a], span[a], steps[a]);
         }
-        var c0: u32 = 0;
+        for (axes[0..2]) |a| for (a) |v| {
+            if (!std.math.isFinite(v)) return error.NoPcCandidates;
+        };
+        // The legal depth slices form a contiguous range on the grid.
+        var z0: usize = 0;
+        while (z0 < axes[2].len and !validDepth(axes[2][z0], s.pc_z_min)) : (z0 += 1) {}
+        if (z0 == axes[2].len) return error.NoPcCandidates;
+        var z1 = z0 + 1;
+        while (z1 < axes[2].len and validDepth(axes[2][z1], s.pc_z_min)) : (z1 += 1) {}
+        const first_c: u32 = @intCast(z0 * xy);
+        const end_c: u32 = @intCast(z1 * xy);
+        var c0 = first_c;
         var since_wait: u32 = 0;
-        while (c0 < n_c) : (c0 += cand_per_tile) {
+        while (c0 < end_c) : (c0 += cand_per_tile) {
             if (e.cancel) return error.Cancelled;
-            const k = @min(cand_per_tile, n_c - c0);
+            const k = @min(cand_per_tile, end_c - c0);
             for (0..k) |j| {
                 const c = c0 + @as(u32, @intCast(j));
-                var geo = e.geo;
-                geo.pc = .{ axes[0][c % steps[0]], axes[1][(c / steps[0]) % steps[1]], axes[2][c / (steps[0] * steps[1])] };
-                const t = geo.translation(sz[0], sz[1]);
+                const candidate = [3]f64{ axes[0][c % steps[0]], axes[1][(c / steps[0]) % steps[1]], axes[2][c / xy] };
+                const t = geo.translationFor(candidate, sz[0], sz[1]);
                 windows[j] = .{ @floatCast(t[0]), @floatCast(t[1]), @floatCast(t[2]), 0 };
                 for (0..n_pat) |b| {
                     items[j * n_pat + b] = .{ @floatCast(t[0] - offs[b][0]), @floatCast(t[1] - offs[b][1]), @floatCast(t[2] - offs[b][2]), @floatFromInt(b) };
@@ -409,7 +443,7 @@ pub fn run(e: *Engine) !Result {
                 first += ni;
                 since_wait += ni;
             }
-            if (since_wait >= 2048 and c0 + cand_per_tile < n_c) {
+            if (since_wait >= 2048 and c0 + k < end_c) {
                 try g.wait();
                 since_wait = 0;
                 e.events.emit(.{ .kind = "progress", .stage = "fit_pc", .done = @min(level, s.pc_levels - 1) * n_c + c0 + k, .total = s.pc_levels * n_c });
@@ -419,20 +453,19 @@ pub fn run(e: *Engine) !Result {
         for (lvl_peaks, 0..) |b, pi| g.read(b, 0, std.mem.sliceAsBytes(peaks_h[pi * per_phase ..][0..per_phase]));
         if (n_ph > 1) g.read(lvl_recs, 0, std.mem.sliceAsBytes(recs_h));
         try g.wait();
+        if (e.cancel) return error.Cancelled;
 
-        // a candidate nearer the source than pc_z_min has no score, and neither has one whose
-        // score is not a number
-        for (0..n_c) |c| {
-            const near = axes[2][c / (steps[0] * steps[1])] < s.pc_z_min;
+        // The skipped depths stay at zero in the reported score volumes.
+        for (first_c..end_c) |c| {
             for (0..n_ph) |p| for (0..n_pat) |b| {
                 const v = &peaks_h[p * per_phase + (c * n_pat + b) * 8 + 4];
-                if (near or !std.math.isFinite(v.*)) v.* = 0;
+                if (!std.math.isFinite(v.*)) v.* = 0;
             };
         }
 
         // the votes
-        best_c = 0;
-        for (0..n_c) |c| {
+        @memset(scores, 0);
+        for (first_c..end_c) |c| {
             var sum: f64 = 0;
             for (0..n_pat) |b| {
                 const at = c * n_pat + b;
@@ -451,9 +484,9 @@ pub fn run(e: *Engine) !Result {
                 sum += peaks_h[p * per_phase + at * 8 + 4];
             }
             scores[c] = @floatCast(sum / @as(f64, @floatFromInt(n_pat)));
-            if (scores[c] > scores[best_c]) best_c = @intCast(c);
         }
-        res.n_candidates += n_c;
+        best_c = @intCast(try supportedMaximum(scores, scores));
+        res.n_candidates += end_c - first_c;
         {
             // this grid, for the record
             var lvl: Level = .{ .axes = .{ &.{}, &.{}, &.{} }, .scores = &.{}, .pat_best = &.{}, .pat_ncc = &.{}, .pat_scores = &.{}, .best = best_c, .walked = 0 };
@@ -463,10 +496,11 @@ pub fn run(e: *Engine) !Result {
             lvl.pat_best = try gpa.alloc(u32, n_pat);
             lvl.pat_ncc = try gpa.alloc(f32, n_pat);
             lvl.pat_scores = try gpa.alloc(f32, @as(usize, n_pat) * n_c);
+            @memset(lvl.pat_scores, 0);
             for (0..n_pat) |b| {
                 var top: f32 = -std.math.inf(f32);
-                var at_c: u32 = 0;
-                for (0..n_c) |c| {
+                var at_c = first_c;
+                for (first_c..end_c) |c| {
                     const at = c * n_pat + b;
                     var p: usize = 0;
                     if (n_ph > 1) {
@@ -490,38 +524,40 @@ pub fn run(e: *Engine) !Result {
                 lvl.pat_best[b] = at_c;
                 lvl.pat_ncc[b] = top;
             }
-            try e.pc_history.append(gpa, lvl);
+            try history.append(gpa, lvl);
         }
         // the grid's choice, in candidate steps: the mean vote's best candidate (moved between
         // candidates on the last grid by the parabola through its neighbours), or the ballots'
-        var bi = [3]u32{ best_c % steps[0], (best_c / steps[0]) % steps[1], best_c / (steps[0] * steps[1]) };
-        var peak = [3]f64{ @floatFromInt(bi[0]), @floatFromInt(bi[1]), @floatFromInt(bi[2]) };
-        const lvl = &e.pc_history.items[e.pc_history.items.len - 1];
+        const lvl = &history.items[history.items.len - 1];
+        var voted_peak: ?[3]f64 = null;
         if (s.pc_vote == .ballots) {
             lvl.density = try gpa.alloc(f32, n_c);
             var counts: [2]u32 = .{ 0, 0 };
             var step: [3]f64 = undefined;
             for (0..3) |a| step[a] = if (steps[a] > 1) axes[a][1] - axes[a][0] else 0;
-            peak = try consensus(gpa, s, lvl.pat_scores, n_pat, steps, step, lvl.density, &counts);
+            const winner = try consensus(gpa, s, lvl.pat_scores, n_pat, steps, step, scores, lvl.density, &counts);
             lvl.ballots = counts[0];
             lvl.inliers = counts[1];
-            for (0..3) |a| bi[a] = @intFromFloat(std.math.clamp(@round(peak[a]), 0, @as(f64, @floatFromInt(steps[a] - 1))));
-            best_c = bi[0] + steps[0] * (bi[1] + steps[1] * bi[2]);
+            best_c = @intCast(winner.candidate);
+            voted_peak = winner.at;
             lvl.best = best_c;
-        } else if (level + 1 == s.pc_levels) {
-            const strides = [3]u32{ 1, steps[0], steps[0] * steps[1] };
-            for (0..3) |a| {
-                if (steps[a] < 3 or bi[a] == 0 or bi[a] == steps[a] - 1) continue;
-                peak[a] += vertex(scores[best_c - strides[a]], scores[best_c], scores[best_c + strides[a]]);
-            }
         }
+        const bi = [3]u32{ best_c % steps[0], (best_c / steps[0]) % steps[1], best_c / xy };
+        const peak = voted_peak orelse if (level + 1 == s.pc_levels)
+            peakAt(scores, scores, steps, best_c)
+        else
+            [3]f64{ @floatFromInt(bi[0]), @floatFromInt(bi[1]), @floatFromInt(bi[2]) };
         lvl.peak = peak;
         if (level == 0 and walked == 0) {
             // the start's own score: the candidate at the grid's centre (odd step counts)
             const mid = (steps[0] / 2) + steps[0] * ((steps[1] / 2) + steps[1] * (steps[2] / 2));
             res.start_score = scores[mid];
         }
-        for (0..3) |a| pc[a] = if (steps[a] > 1) axes[a][0] + peak[a] * (axes[a][1] - axes[a][0]) else axes[a][0];
+        for (0..3) |a| {
+            const step = if (steps[a] > 1) axes[a][1] - axes[a][0] else 0;
+            pc[a] = axes[a][bi[a]] + (peak[a] - @as(f64, @floatFromInt(bi[a]))) * step;
+        }
+        if (!std.math.isFinite(pc[0]) or !std.math.isFinite(pc[1]) or !validDepth(pc[2], s.pc_z_min)) return error.NoPcCandidates;
         res.score = scores[best_c];
         res.at_border = 0;
         for (0..3) |a| {
@@ -541,26 +577,12 @@ pub fn run(e: *Engine) !Result {
         }
     }
 
-    // keep the outcome: the geometry, the last level's votes, the fit patterns' orientations
-    e.geo.pc = pc;
-    res.pc = pc;
-    gpa.free(e.pc_scores);
-    e.pc_scores = scores;
-    for (0..3) |a| {
-        gpa.free(e.pc_axes[a]);
-        e.pc_axes[a] = axes[a];
-    }
-    gpa.free(e.fit_cells);
-    gpa.free(e.fit_quats);
-    gpa.free(e.fit_phase);
-    gpa.free(e.fit_ncc);
-    e.fit_cells = cells;
-    e.fit_quats = &.{};
-    e.fit_phase = &.{};
-    e.fit_ncc = &.{};
-    e.fit_quats = try gpa.alloc(f32, 4 * @as(usize, n_pat));
-    e.fit_phase = try gpa.alloc(i32, n_pat);
-    e.fit_ncc = try gpa.alloc(f32, n_pat);
+    const fit_quats = try gpa.alloc(f32, 4 * @as(usize, n_pat));
+    errdefer gpa.free(fit_quats);
+    const fit_phase = try gpa.alloc(i32, n_pat);
+    errdefer gpa.free(fit_phase);
+    const fit_ncc = try gpa.alloc(f32, n_pat);
+    errdefer gpa.free(fit_ncc);
     const per_phase = @as(usize, n_c) * n_pat * 8;
     for (0..n_pat) |b| {
         const at = @as(usize, best_c) * n_pat + b;
@@ -578,10 +600,29 @@ pub fn run(e: *Engine) !Result {
         }
         const pk = peaks_h[p * per_phase + at * 8 ..][0..8];
         const q = sym.toFz(.{ pk[0], pk[1], pk[2], pk[3] }, e.phases.items[p].master.rotations());
-        for (0..4) |k| e.fit_quats[4 * b + k] = @floatCast(q[k]);
-        e.fit_phase[b] = @intCast(p);
-        e.fit_ncc[b] = pk[4];
+        for (0..4) |k| fit_quats[4 * b + k] = @floatCast(q[k]);
+        fit_phase[b] = @intCast(p);
+        fit_ncc[b] = pk[4];
     }
+    if (e.cancel) return error.Cancelled;
+
+    // Install the geometry and diagnostics together after all fallible work.
+    geo.pc = pc;
+    e.geo = geo;
+    res.pc = pc;
+    std.mem.swap(std.ArrayList(Level), &e.pc_history, &history);
+    gpa.free(e.pc_scores);
+    e.pc_scores = scores;
+    for (0..3) |a| gpa.free(e.pc_axes[a]);
+    e.pc_axes = axes;
+    gpa.free(e.fit_cells);
+    gpa.free(e.fit_quats);
+    gpa.free(e.fit_phase);
+    gpa.free(e.fit_ncc);
+    e.fit_cells = cells;
+    e.fit_quats = fit_quats;
+    e.fit_phase = fit_phase;
+    e.fit_ncc = fit_ncc;
     // the reference geometry changed: its denominators are stale (keyed, so nothing to do here)
     e.events.log("pattern centre {d:.5} {d:.5} {d:.5}  mean NCC {d:.4} (was {d:.4})", .{ pc[0], pc[1], pc[2], res.score, res.start_score });
     return res;

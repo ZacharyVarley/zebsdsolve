@@ -456,21 +456,21 @@ class Solver:
             nz, ny, nx = (int(v) for v in shape)
             axes = np.empty(nx + ny + nz, np.float64)
             scores = np.empty(n, np.float32)
-            best = np.empty(1024, np.uint32)
-            ncc = np.empty(1024, np.float32)
-            self._lib.ze_pc_level(self._e, i, shape, info, _ptr(axes, _n.f64p), axes.size, _ptr(scores, _n.f32p), n, _ptr(best, _n.u32p), _ptr(ncc, _n.f32p), best.size)
-            n_pat = self._lib.ze_fit_patterns(self._e, None, None, None, None, 0) or len(best)
+            per = np.empty(self._lib.ze_pc_level_scores(self._e, i, None, 0), np.float32)
+            n_pat = per.size // n
+            best = np.empty(n_pat, np.uint32)
+            ncc = np.empty(n_pat, np.float32)
+            self._lib.ze_pc_level(self._e, i, shape, info, _ptr(axes, _n.f64p), axes.size, _ptr(scores, _n.f32p), n, _ptr(best, _n.u32p), _ptr(ncc, _n.f32p), n_pat)
 
             def split(c):
                 return np.stack([c % nx, (c // nx) % ny, c // (nx * ny)], -1)
 
-            per = np.empty(self._lib.ze_pc_level_scores(self._e, i, None, 0), np.float32)
             self._lib.ze_pc_level_scores(self._e, i, _ptr(per, _n.f32p), per.size)
             out.append({"scores": scores.reshape(nz, ny, nx), "x": axes[:nx], "y": axes[nx:nx + ny], "z": axes[nx + ny:],
                         "pattern_scores": per.reshape(-1, nz, ny, nx),
                         **self._pc_ballots(i, (nz, ny, nx)),
                         "winner": tuple(int(v) for v in split(np.array(int(info[0])))), "walked": bool(info[1]),
-                        "pattern_best": split(best[:n_pat].astype(np.int64)), "pattern_ncc": ncc[:n_pat].copy()})
+                        "pattern_best": split(best.astype(np.int64)), "pattern_ncc": ncc})
         return out
 
     def _pc_ballots(self, i, shape):
