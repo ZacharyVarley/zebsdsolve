@@ -34,8 +34,8 @@ export const FIELDS = {
   resolution: [
     { key: "binning", label: "reduce by", type: "num", step: 0.5, min: 1, max: 64, hint: "Patterns are reduced by this factor as they are read, on the CPU: each pixel of the reduced pattern is the average of the detector area it covers. A whole factor is binning; any other factor is area resampling." },
     { key: "full_resolution", label: "full size for", type: "enum", when: (s) => s.binning !== 1,
-      options: [["none", "nothing"], ["scores", "final scores"], ["refine", "refine + scores"], ["all", "everything"]],
-      hint: "What still works on the patterns as stored. The search (and the pattern-centre vote) is the costly part and needs the least resolution; refinement and the final scores gain the most from all of it." },
+      options: [["none", "nothing"], ["scores", "final scores"], ["refine", "refine + scores"]],
+      hint: "Which stages use the stored detector pixels after a reduced-resolution search. Set Reduce by to 1 to use the stored pixels for search, refinement and scoring." },
   ],
   nlpar: [
     { key: "nlpar", label: "NLPAR", type: "bool", hint: "Before every filter: replace each pattern by a weighted mean of itself and its neighbours in the map. A neighbour weighs as much as it looks like the same pattern under other noise (Brewick, Wright and Rowenhorst 2019). As the settings below stand, this is the published method: one averaging over 7 × 7 cells at λ 0.7. The pattern view shows the result, and in its corner which neighbours went into it." },
