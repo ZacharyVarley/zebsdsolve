@@ -876,6 +876,15 @@ def main():
     check("the joint projective fit can start at a constant pattern centre",
           joint["kind"] == "projective" and np.isfinite(joint["plane"]).all() and joint["ncc"] > joint["start_ncc"])
 
+    s.configure(accept_nmi=1)
+    before = s.geometry
+    try:
+        s.fit_plane()
+    except ze.Error as e:
+        check("plane fitting requires accepted matches", "TooFewFitPatterns" in str(e) and s.geometry == before)
+    else:
+        check("plane fitting requires accepted matches", False)
+
     s.close()
 
     # ── a master pattern simulated from a crystal ──

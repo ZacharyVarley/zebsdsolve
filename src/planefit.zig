@@ -375,11 +375,10 @@ const Fit = struct {
             self.base[b] = try e.placeOf(&e.geo, cells[b], lv);
         }
         if (self.n_used < 3) {
-            // nothing to choose among: a start this far off, or a threshold this high, leaves the fit all of them
-            e.events.log("plane fit: {d} of the {d} fit patterns have a match that would be accepted here; fitting to all of them", .{ self.n_used, n });
-            @memset(self.use, true);
-            self.n_used = n;
-        } else if (self.n_used < n) {
+            e.events.log("plane fit: {d} of {d} matches passed; at least three are required", .{ self.n_used, n });
+            return error.TooFewFitPatterns;
+        }
+        if (self.n_used < n) {
             e.events.log("plane fit: {d} of the {d} fit patterns left out, their matches not accepted", .{ n - self.n_used, n });
         }
         if (s.plane_master_auto) {
