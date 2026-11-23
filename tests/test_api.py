@@ -341,6 +341,33 @@ def main():
     d = np.degrees(s.disorientation(rp["quaternions"].reshape(-1, 4), q_true))
     check("indexed where the plane puts the sources, the orientations are the true ones", len(cells) == 96 and np.median(d) < 0.15,
           f"median {np.median(d):.3f}° (the fit patterns' own, each with its own source: {np.median(d_own):.3f}°)")
+
+    # Neither vote can replace a fitted plane when the entire grid falls below pc_z_min.
+    before_geometry = s.geometry
+    before_scores = s.pc_scores()
+    before_levels = s.pc_levels()
+    before_patterns = s.fit_patterns()
+    before_points = s.plane_points()
+    refused = []
+    for vote in ("mean", "ballots"):
+        s.configure(pc_vote=vote, pc_z_min=1)
+        try:
+            s.fit_pc()
+        except ze.Error as err:
+            if "NoPcCandidates" in str(err):
+                refused.append(vote)
+            else:
+                raise
+    check("a PC grid below the minimum leaves geometry and fit outputs intact",
+          refused == ["mean", "ballots"] and s.geometry == before_geometry
+          and all(np.array_equal(a, b) for a, b in zip(s.pc_scores(), before_scores))
+          and len(s.pc_levels()) == len(before_levels)
+          and all(len(level["pattern_best"]) == len(level["pattern_scores"])
+                  and all(np.array_equal(level[k], previous[k]) for k in ("pattern_scores", "pattern_best", "pattern_ncc"))
+                  for level, previous in zip(s.pc_levels(), before_levels))
+          and all(np.array_equal(a, b) for a, b in zip(s.fit_patterns(), before_patterns))
+          and all(np.array_equal(s.plane_points()[k], v) for k, v in before_points.items()))
+    s.configure(pc_z_min=0.1)
     s.configure(plane_stride=2)
     s.set_geometry(pc=p["pc"], rot=(0, 0, 0))
 

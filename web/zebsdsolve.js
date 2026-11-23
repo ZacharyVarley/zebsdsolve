@@ -419,7 +419,7 @@ const SYNC_EXPORTS = new Set(["ze_alloc", "ze_free", "ze_version", "ze_create", 
   "ze_configure", "ze_settings", "ze_events", "ze_cancel", "ze_close_scan", "ze_scan_info", "ze_scan_format", "ze_scan_overview_kind",
   "ze_get_geometry", "ze_set_geometry", "ze_clear_phases", "ze_phase_count", "ze_phase_info", "ze_pattern_shape", "ze_nlpar_view",
   "ze_pc_scores", "ze_fit_patterns", "ze_results", "ze_map", "ze_ipf_key", "ze_export", "ze_frame", "ze_set_frame", "ze_reduce", "ze_disorientation", "ze_shader",
-  "ze_index_status", "ze_tune_begin", "ze_tune_report", "ze_pixel_angle", "ze_lattice", "ze_sweep", "ze_pc_level_count", "ze_pc_level", "ze_pc_level_ballots",
+  "ze_index_status", "ze_tune_begin", "ze_tune_report", "ze_pixel_angle", "ze_lattice", "ze_sweep", "ze_pc_level_count", "ze_pc_level", "ze_pc_level_scores", "ze_pc_level_ballots",
   "ze_gpu_counts", "ze_profile", "ze_profile_report", "ze_compile_wgsl", "ze_plane_points",
   "ze_sim_read_cif", "ze_sim_set_crystal", "ze_sim_edit_crystal", "ze_sim_crystal", "ze_sim_sheets", "ze_sim_add_phase", "ze_sim_npz",
   "ze_cell_info", "ze_sim_energy"]);
@@ -1104,10 +1104,10 @@ export class Zebsdsolve {
     return this._frame((f) => {
       const out = [];
       const count = this.x.ze_pc_level_count(this.e);
-      const nPat = Math.max(1, this.x.ze_fit_patterns(this.e, 0, 0, 0, 0, 0));
       const sp = f.alloc(12), ip = f.alloc(8);
       for (let i = 0; i < count; i++) {
         const n = this.x.ze_pc_level(this.e, i, sp, ip, 0, 0, 0, 0, 0, 0, 0);
+        const nPat = this.x.ze_pc_level_scores(this.e, i, 0, 0) / n;
         const [nz, ny, nx] = new Uint32Array(this.mem, sp, 3);
         const ap = f.alloc((nx + ny + nz) * 8), cp = f.alloc(n * 4), bp = f.alloc(nPat * 4), np = f.alloc(nPat * 4);
         this.x.ze_pc_level(this.e, i, sp, ip, ap, nx + ny + nz, cp, n, bp, np, nPat);

@@ -384,8 +384,7 @@ function geometryChanged(byFit = false) {
 }
 
 /** Remember the pattern centre and rotation a fit is about to change. */
-function beforeFit() {
-  const g = st.ze.geometry;
+function beforeFit(g = st.ze.geometry) {
   st.geoBefore = { pc: g.pc, rot: g.rot, pxUm: g.pxUm, plane: g.plane, planeKind: g.planeKind };
   st.geoIsBefore = false;
 }
@@ -1658,8 +1657,9 @@ function drawVotes() {
 
 async function fitPc() {
   await busy("fitting the pattern centre…", async () => {
-    beforeFit();
+    const before = st.ze.geometry;
     const r = await st.ze.fitPc();
+    beforeFit(before);
     st.fit = st.ze.fitPatterns();
     st.votes = st.ze.pcLevels();
     st.pcStart = r.start;
