@@ -27,7 +27,7 @@ pub const Interp = enum { bilinear, bicubic, keys6 };
 /// How inverse pole figure colours are assigned (sym.Colors).
 pub const IpfColors = @import("sym.zig").Colors;
 /// Which stages work on patterns at their stored size rather than the reduced one.
-pub const FullResolution = enum { none, scores, refine, all };
+pub const FullResolution = enum { none, scores, refine };
 
 pub const Settings = struct {
     // ── scan ──
@@ -104,7 +104,6 @@ pub const Settings = struct {
     ///   none    nothing: the fits, the search, the refinement and the scores use the reduced size
     ///   scores  the final scores (NCC, NMI) and with them the choice of phase and acceptance
     ///   refine  the refinement too (and the pose fit, which is one)
-    ///   all     everything: the reduced size is for looking at patterns only
     full_resolution: FullResolution = .none,
 
     // ── averaging with neighbours (before every filter) ──
@@ -491,6 +490,7 @@ test "apply" {
     try std.testing.expectEqual(Method.dictionary, s.method);
     try std.testing.expectEqual(Static.file, s.static_background);
     try std.testing.expectEqual(@as(f64, 2.5), s.binning);
+    try std.testing.expectError(error.InvalidEnumTag, s.apply(std.testing.allocator, "{\"full_resolution\":\"all\"}"));
     try std.testing.expectError(error.UnknownSetting, s.apply(std.testing.allocator, "{\"nope\":1}"));
     // a rejected value leaves the settings as they were
     try std.testing.expectError(error.BadSetting, s.apply(std.testing.allocator, "{\"bandwidth\":4,\"binning\":2}"));

@@ -105,7 +105,7 @@ The orientations do not depend on these settings beyond rounding, and neither do
 
 ### Reduced patterns
 
-`binning` reduces every pattern on the CPU as it is read: each pixel of the reduced pattern is the average of the detector area it covers. A whole factor that divides the pattern is binning; any other factor resamples by area. `full_resolution` says what still works on the patterns as stored: nothing, the final scores (and with them the phase and the acceptance), the refinement too, or everything (the reduced size is then only for looking). The file is read once per batch either way.
+`binning` reduces every pattern on the CPU as it is read: each pixel of the reduced pattern is the average of the detector area it covers. A whole factor that divides the pattern is binning; any other factor resamples by area. `full_resolution` says what still works on the patterns as stored: nothing, the final scores (and with them the phase and the acceptance), or refinement and scores. Set `binning=1` to use the stored size throughout. The file is read once per batch either way.
 
 ### Filters
 

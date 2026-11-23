@@ -922,7 +922,6 @@ pub const Engine = struct {
             .none => .reduced,
             .scores => if (stage == .score) .full else .reduced,
             .refine => if (stage == .search) .reduced else .full,
-            .all => .full,
         };
     }
 

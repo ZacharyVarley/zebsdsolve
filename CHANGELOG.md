@@ -47,6 +47,11 @@ notes.
 
 ### Changed
 
+- **Full size for: everything** is gone (`full_resolution` `"all"`): it ran the search, the
+  refinement and the scores on the patterns as stored while the reduced size was only looked
+  at, which is what `binning` 1 does without reading every pattern twice. A project or a
+  script that sets it is refused; set `binning` 1 instead (#19, by
+  [Tijmenvermeij](https://github.com/Tijmenvermeij)).
 - The inverse pole figure keys' gradients are no longer settings: `ipf_lightness` and
   `ipf_gray` are gone, and the Nolze–Hielscher keys use the λ_L and λ_S of a quarter each that
   the paper recommends, so a map's key is always one others draw. The key itself is still a
