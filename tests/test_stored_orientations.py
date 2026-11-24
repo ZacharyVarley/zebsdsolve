@@ -272,18 +272,18 @@ class StoredOrientations(unittest.TestCase):
             np.testing.assert_array_equal(d["Phase"][:], np.where(ok, ph + 1, 0))
             np.testing.assert_array_equal(d["Error"][:], ok.astype(np.uint8))
             np.testing.assert_array_equal(d["Band Contrast"][:], np.arange(len(ph), dtype=np.uint8))
-            self.assertEqual(d["X"].attrs["Unit"], b"um")
+            self.assertEqual(d["X"].attrs["Unit"], "um")
             self.assertNotIn("Processed Patterns", d)
             self.assertNotIn("Spectrum", f["1/EDS/Data"])
             self.assertEqual(f["1/Electron Image/Data/SE/Image"].shape, (48, 64))
             self.assertEqual(h["X Cells"][0], self.cols)
-            self.assertEqual(h["X Cells"].attrs["Unit"], b"px")
+            self.assertEqual(h["X Cells"].attrs["Unit"], "px")
             self.assertAlmostEqual(float(h["Hit Rate"][0]), 100 * ok.mean(), places=3)
             # the detector orientation the orientations were found under: the geometry's, here
             # set to the nominal one
             got_det = h["Detector Orientation Euler"][0].astype(np.float64)
             self.assertLess(np.abs(np.angle(np.exp(1j * (got_det - [0, np.pi / 2, 0])))).max(), 1e-5, got_det)
-            self.assertEqual(h["Detector Orientation Euler"].attrs["Unit"], b"rad")
+            self.assertEqual(h["Detector Orientation Euler"].attrs["Unit"], "rad")
             self.assertEqual(sorted(h["Phases"].keys()), ["1", "2"])
             self.assertEqual(h["Phases/2/Phase Name"][0], b"GaN")
             z = f["zebsdsolve"]
@@ -292,11 +292,17 @@ class StoredOrientations(unittest.TestCase):
             self.assertIn("Spectrum", z["Left Out"][()].decode())
             self.assertIn("X||a* Z||c", z["Convention"][()].decode())
             self.assertEqual(f["Manufacturer"][()], b"Oxford Instruments")
+            # strings as the acquisition stored them, and the engine's as Oxford's files have
+            # theirs: variable-length UTF-8
+            def vlen(t):
+                return t.get_class() == h5py.h5t.STRING and t.is_variable_str() and t.get_cset() == h5py.h5t.CSET_UTF8
+            for t in (d["X"].attrs.get_id("Unit").get_type(), f["Manufacturer"].id.get_type(), h["Phases/2/Phase Name"].id.get_type(), z["Version"].id.get_type(), z["Left Out"].id.get_type()):
+                self.assertTrue(vlen(t))
             # (as #13 found Oxford's files want them) the maker's other measures kept but
             # cleared; its earlier processing left out; its calibration kept beside the
             # geometry's
             self.assertTrue(np.isnan(d["Mean Angular Deviation"][:]).all())
-            self.assertEqual(d["Mean Angular Deviation"].attrs["Unit"], b"rad")
+            self.assertEqual(d["Mean Angular Deviation"].attrs["Unit"], "rad")
             np.testing.assert_array_equal(d["Bands"][:], 0)
             self.assertNotIn("Data Processing", f["1"])
             self.assertIn("Data Processing", z["Left Out"][()].decode())

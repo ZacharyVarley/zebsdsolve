@@ -116,6 +116,8 @@ pub const Attribute = struct {
     rank: u8 = 0,
     dims: [MAX_RANK]u64 = @splat(1),
     data: []u8,
+    /// stored as variable-length strings (`data` holds them as fixed-length ones)
+    vlen: bool = false,
 
     pub fn deinit(self: *Attribute, gpa: Allocator) void {
         gpa.free(self.name);
@@ -1174,6 +1176,7 @@ pub const Hdf5 = struct {
             @memset(data, 0);
             for (strs.items, 0..) |s, i| @memcpy(data[i * longest ..][0..s.len], s);
             dtype = .{ .class = .string, .size = @intCast(longest) };
+            return .{ .name = name, .dtype = dtype, .rank = rank, .dims = dims, .data = data, .vlen = true };
         } else data = try gpa.dupe(u8, raw);
         return .{ .name = name, .dtype = dtype, .rank = rank, .dims = dims, .data = data };
     }

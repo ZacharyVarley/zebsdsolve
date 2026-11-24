@@ -74,7 +74,7 @@ const Copy = struct {
             for (attrs) |*a| a.deinit(self.gpa);
             self.gpa.free(attrs);
         }
-        for (attrs) |a| try self.out.attribute(dst, a.name, valueOf(a.dtype, a.dims[0..a.rank], a.data) orelse continue);
+        for (attrs) |a| try putAttr(self.out, self.gpa, dst, a);
     }
 
     fn group(self: *Copy, src: u64, dst: *W.Node, path: []const u8) !void {
@@ -136,27 +136,17 @@ const Copy = struct {
         }
         var node: *W.Node = undefined;
         if (ds.dtype.class == .vlen_string) {
-            // as fixed-length strings, as long as the longest
+            // as variable-length strings still (each to its first null, as attributes are)
             const n: usize = @intCast(ds.elements());
             const es: usize = ds.dtype.size;
-            var strs = try gpa.alloc([]u8, n);
-            var made: usize = 0;
-            defer {
-                for (strs[0..made]) |s| gpa.free(s);
-                gpa.free(strs);
-            }
-            var longest: usize = 1;
+            var strs: std.ArrayList(u8) = .empty;
+            defer strs.deinit(gpa);
             var buf: [65536]u8 = undefined;
             for (0..n) |i| {
-                strs[i] = try gpa.dupe(u8, try self.h.vlenString(raw[i * es ..][0..es], &buf));
-                made += 1;
-                longest = @max(longest, strs[i].len);
+                if (i != 0) try strs.append(gpa, 0);
+                try strs.appendSlice(gpa, std.mem.sliceTo(try self.h.vlenString(raw[i * es ..][0..es], &buf), 0));
             }
-            const fixed = try gpa.alloc(u8, n * longest);
-            defer gpa.free(fixed);
-            @memset(fixed, 0);
-            for (strs, 0..) |s, i| @memcpy(fixed[i * longest ..][0..s.len], s);
-            node = try self.out.dataset(dst, name, .{ .dtype = W.Type.str(longest), .dims = dims, .bytes = fixed });
+            node = try self.out.dataset(dst, name, .{ .dtype = W.Type.vstr, .dims = dims, .bytes = strs.items });
         } else {
             if (ds.dtype.big_endian and ds.dtype.class != .string) swap(raw, ds.dtype.size);
             node = try self.out.dataset(dst, name, valueOf(ds.dtype, dims, raw) orelse return self.omit(path, "an element size no writer type has"));
@@ -230,12 +220,30 @@ fn valueOf(t: hdf5.Dtype, dims: []const u64, bytes: []const u8) ?W.Value {
         .uint, .int => if (t.size != 1 and t.size != 2 and t.size != 4 and t.size != 8) return null,
         .float => if (t.size != 4 and t.size != 8) return null,
         .string => if (t.size == 0) return null,
+        .vstring => unreachable,
     }
     return .{ .dtype = wt, .dims = dims, .bytes = bytes };
 }
 
-fn putAttrs(out: *W.File, node: *W.Node, attrs: ?[]hdf5.Attribute) !void {
-    for (attrs orelse return) |a| try out.attribute(node, a.name, valueOf(a.dtype, a.dims[0..a.rank], a.data) orelse continue);
+/// An attribute as the acquisition stored it (variable-length strings so still).
+fn putAttr(out: *W.File, gpa: Allocator, node: *W.Node, a: hdf5.Attribute) !void {
+    if (a.vlen) {
+        // (the reader's fixed-length slots, each to its first null, separated by nulls)
+        var strs: std.ArrayList(u8) = .empty;
+        defer strs.deinit(gpa);
+        const size: usize = a.dtype.size;
+        var i: usize = 0;
+        while (i + size <= a.data.len) : (i += size) {
+            if (i != 0) try strs.append(gpa, 0);
+            try strs.appendSlice(gpa, std.mem.sliceTo(a.data[i..][0..size], 0));
+        }
+        return out.attribute(node, a.name, .{ .dtype = W.Type.vstr, .dims = a.dims[0..a.rank], .bytes = strs.items });
+    }
+    try out.attribute(node, a.name, valueOf(a.dtype, a.dims[0..a.rank], a.data) orelse return);
+}
+
+fn putAttrs(out: *W.File, gpa: Allocator, node: *W.Node, attrs: ?[]hdf5.Attribute) !void {
+    for (attrs orelse return) |a| try putAttr(out, gpa, node, a);
 }
 
 /// The .h5oina's bytes (caller frees).
@@ -291,23 +299,24 @@ pub fn write(e: *Engine) ![]u8 {
         var nb: [16]u8 = undefined;
         const g = try out.group(phases_node, try std.fmt.bufPrint(&nb, "{d}", .{ids[i]}));
         const m = &p.master;
-        _ = try out.text(g, "Phase Name", if (m.name.len != 0) m.name else "phase");
-        _ = try out.text(g, "Reference", "zebsdsolve master pattern");
+        // (strings as Oxford's: variable-length, one in an array of one)
         const one = [_]u64{1};
+        _ = try out.dataset(g, "Phase Name", .{ .dtype = W.Type.vstr, .dims = &one, .bytes = if (m.name.len != 0) m.name else "phase" });
+        _ = try out.dataset(g, "Reference", .{ .dtype = W.Type.vstr, .dims = &one, .bytes = "zebsdsolve master pattern" });
         const sg: i32 = @intCast(m.space_group);
         _ = try out.dataset(g, "Space Group", .{ .dtype = W.Type.i32_, .dims = &one, .bytes = std.mem.asBytes(&sg) });
         const laue: i32 = @intFromEnum(m.laue);
         const lg = try out.dataset(g, "Laue Group", .{ .dtype = W.Type.i32_, .dims = &one, .bytes = std.mem.asBytes(&laue) });
         const lname = m.laue.name();
-        try out.attribute(lg, "Symbol", .{ .dtype = W.Type.str(lname.len), .bytes = lname });
+        try out.attribute(lg, "Symbol", .{ .dtype = W.Type.vstr, .bytes = lname });
         const l = m.lattice.?;
         const dims13 = [_]u64{ 1, 3 };
         const lengths = [_]f32{ @floatCast(l[0]), @floatCast(l[1]), @floatCast(l[2]) };
         const angles = [_]f32{ @floatCast(std.math.degreesToRadians(l[3])), @floatCast(std.math.degreesToRadians(l[4])), @floatCast(std.math.degreesToRadians(l[5])) };
         const ld = try out.dataset(g, "Lattice Dimensions", .{ .dtype = W.Type.f32_, .dims = &dims13, .bytes = std.mem.sliceAsBytes(&lengths) });
-        try out.attribute(ld, "Unit", .{ .dtype = W.Type.str(8), .bytes = "angstrom" });
+        try out.attribute(ld, "Unit", .{ .dtype = W.Type.vstr, .bytes = "angstrom" });
         const la = try out.dataset(g, "Lattice Angles", .{ .dtype = W.Type.f32_, .dims = &dims13, .bytes = std.mem.sliceAsBytes(&angles) });
-        try out.attribute(la, "Unit", .{ .dtype = W.Type.str(3), .bytes = "rad" });
+        try out.attribute(la, "Unit", .{ .dtype = W.Type.vstr, .bytes = "rad" });
     }
     if (next > 256) return error.TooManyPhases;
 
@@ -339,9 +348,9 @@ pub fn write(e: *Engine) ![]u8 {
     }
     const cells = [_]u64{n};
     const cells3 = [_]u64{ n, 3 };
-    try putAttrs(&out, try out.dataset(data, "Euler", .{ .dtype = W.Type.f32_, .dims = &cells3, .bytes = std.mem.sliceAsBytes(euler) }), copy.kept.get("Euler"));
-    try putAttrs(&out, try out.dataset(data, "Phase", .{ .dtype = W.Type.u8_, .dims = &cells, .bytes = phase }), copy.kept.get("Phase"));
-    try putAttrs(&out, try out.dataset(data, "Error", .{ .dtype = W.Type.u8_, .dims = &cells, .bytes = err }), copy.kept.get("Error"));
+    try putAttrs(&out, gpa, try out.dataset(data, "Euler", .{ .dtype = W.Type.f32_, .dims = &cells3, .bytes = std.mem.sliceAsBytes(euler) }), copy.kept.get("Euler"));
+    try putAttrs(&out, gpa, try out.dataset(data, "Phase", .{ .dtype = W.Type.u8_, .dims = &cells, .bytes = phase }), copy.kept.get("Phase"));
+    try putAttrs(&out, gpa, try out.dataset(data, "Error", .{ .dtype = W.Type.u8_, .dims = &cells, .bytes = err }), copy.kept.get("Error"));
     // each cell's pattern centre as the geometry has the beam there, in Oxford's convention
     {
         const geo = e.geo;
@@ -357,7 +366,7 @@ pub fn write(e: *Engine) ![]u8 {
             pcs[2 * n + i] = @floatCast(pc[2] * ratio);
         }
         for ([_][]const u8{ "Pattern Center X", "Pattern Center Y", "Detector Distance" }, 0..) |name, k| {
-            try putAttrs(&out, try out.dataset(data, name, .{ .dtype = W.Type.f32_, .dims = &cells, .bytes = std.mem.sliceAsBytes(pcs[k * n ..][0..n]) }), copy.kept.get(name));
+            try putAttrs(&out, gpa, try out.dataset(data, name, .{ .dtype = W.Type.f32_, .dims = &cells, .bytes = std.mem.sliceAsBytes(pcs[k * n ..][0..n]) }), copy.kept.get(name));
         }
     }
     // the detector's orientation and the sample's tilt the orientations were found under, where
@@ -370,11 +379,11 @@ pub fn write(e: *Engine) ![]u8 {
         if (v.dtype.class != .float or v.bytes.len != count * @as(usize, v.dtype.size)) continue;
         var radians = false;
         for (l.node.attrs.items) |a| if (std.mem.eql(u8, a.name, "Unit")) {
-            radians = std.mem.eql(u8, std.mem.trim(u8, std.mem.sliceTo(a.value.bytes, 0), " "), "rad");
+            radians = std.mem.eql(u8, std.mem.trim(u8, out.textOf(a.value) orelse "", " "), "rad");
         };
         if (!radians) continue;
         const kept = try out.dataset(original, l.name, v.*);
-        for (l.node.attrs.items) |a| try out.attribute(kept, a.name, a.value);
+        for (l.node.attrs.items) |a| try out.attributeStored(kept, a.name, a.value);
         const vals: [3]f64 = if (is_euler) scan_mod.oxfordDetectorEuler(e.geo.rot) else .{ std.math.degreesToRadians(e.geo.sample_tilt_deg), 0, 0 };
         const bytes = try out.arena.allocator().alloc(u8, v.bytes.len);
         for (0..count) |k| {

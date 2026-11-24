@@ -61,7 +61,7 @@ notes.
   kept, cleared; its own detector orientation and tilt kept under
   `/zebsdsolve/OriginalCalibration`, the geometry's written in their place; an acquisition
   that already holds this writer's results, or whose cells' positions do not follow its raster,
-  refused.
+  refused; strings variable-length UTF-8, as AZtec and #13 write them.
 
 ### Changed
 
