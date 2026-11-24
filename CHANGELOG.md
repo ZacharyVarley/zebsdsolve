@@ -8,6 +8,13 @@ notes.
 
 ### Added
 
+- **`scripts/bench.py`**: a fixed set of synthetic scans with their answers (the engine's toy
+  scans from fixed seeds, over pattern sizes from 60 × 60 to 240 × 320, noise, faint bands,
+  a rotated detector, a wide map, a hexagonal phase, two phases with blank cells, a start far
+  off), on which the vote, the plane fit, Auto and indexing are measured against the answer.
+  `--root` runs another checkout and `--compare` sets runs side by side: changes to the fits
+  and to indexing are decided on it.
+
 - **Reference frames found from the data.** A convention (the sample's axes as signed axes of
   the frame the engine computes in, kikuchipy's; passive or active angles; the crystal's axes
   on the lattice, X ∥ a or X ∥ a\* and the like) is described as data, never by a maker's name,
