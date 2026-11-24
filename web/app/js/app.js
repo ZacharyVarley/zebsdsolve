@@ -491,6 +491,7 @@ async function openScan(files, roi) {
 /** A scan is open: everything drawn from the last one goes. `roi`: a project's region of interest
  *  for it (the engine opens a scan on the whole map). */
 function afterOpen(roi = null) {
+  $("map-hover").textContent = hoverText(null);
   if (roi) st.ze.configure(roi);
   invalidateOverview();
   ++st.showRun;
@@ -1346,11 +1347,17 @@ function mapCellAt(ev) {
   return { r, c, cell: r * cols + c };
 }
 
-function hoverText(p) {
-  const parts = [`row ${p.r}  col ${p.c}`];
-  const R = st.results;
-  if (R && R.phase[p.cell] >= 0) parts.push(`NCC ${R.ncc[p.cell].toFixed(3)}`, `NMI ${R.nmi[p.cell].toFixed(3)}`, `z ${R.z[p.cell].toFixed(1)}`);
-  return parts.join("   ");
+function hoverText(point) {
+  const results = st.results;
+  const cell = point?.cell;
+  const indexed = point && results && results.phase[cell] >= 0;
+  const score = (value, digits) => Number.isFinite(value) ? value.toFixed(digits) : "—";
+  return [
+    `row ${point?.r ?? "—"}  col ${point?.c ?? "—"}`,
+    `NCC ${score(indexed ? results.ncc[cell] : undefined, 3)}`,
+    `NMI ${score(indexed ? results.nmi[cell] : undefined, 3)}`,
+    `z ${score(indexed ? results.z[cell] : undefined, 1)}`,
+  ].join("   ");
 }
 
 // ── the pattern ──
@@ -2567,7 +2574,7 @@ function updateWiring() {
   map.addEventListener("mousemove", (e) => {
     if (!st.scan) return;
     const p = mapCellAt(e);
-    $("map-hover").textContent = p ? hoverText(p) : "";
+    $("map-hover").textContent = hoverText(p);
   });
   window.addEventListener("mousemove", (e) => {
     if (!st.scan) return;
@@ -2604,7 +2611,7 @@ function updateWiring() {
     setRoi(whole ? FULL_ROI : { roi_x: x, roi_y: y, roi_w: w, roi_h: h });
     status(whole ? "region of interest: the whole map" : `region of interest: ${w} × ${h} cells from column ${x}, row ${y}`);
   });
-  map.addEventListener("mouseleave", () => { $("map-hover").textContent = ""; });
+  map.addEventListener("mouseleave", () => { $("map-hover").textContent = hoverText(null); });
   // whatever is laid out by hand follows its pane
   new ResizeObserver(() => { if (st.scan) { layoutMap(); drawMapOverlay(); } }).observe(well);
   new ResizeObserver(() => { if (st.scan) { drawPc(); if (st.cmp.mode === "split") drawCompare(); } }).observe($("pats"));
