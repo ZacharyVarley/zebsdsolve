@@ -616,6 +616,9 @@ pub const Engine = struct {
     chance_med: []f32 = &.{},
     chance_spread: []f32 = &.{},
     chance_key: u64 = 0,
+    /// counts the scans opened, made or given (closeScan), so that what is measured on one is
+    /// not taken for the next's
+    scan_serial: u64 = 0,
     res: Results = .{},
     /// indexing in progress: the cells of the sweep in progress and how many are done
     index_cells: []u64 = &.{},
@@ -741,6 +744,7 @@ pub const Engine = struct {
             .none => {},
         }
         self.source = .none;
+        self.scan_serial += 1;
         self.convention = .{};
         self.gpa.free(self.export_held);
         self.export_held = &.{};
@@ -2040,12 +2044,6 @@ pub const Engine = struct {
         }
     }
 
-    /// Measure, once for the scan as it is prepared now, what mutual information chance gives:
-    /// a sample of the region's patterns (about 256 on a lattice) against each phase at random
-    /// orientations, at the level the scores are taken. Its median and spread (1.4826 × the
-    /// median deviation) per phase are the scale every match's NMI is then read on; they are
-    /// measured again only when what the scores depend on changes (the patterns' preparation,
-    /// the geometry, the phases, the region).
     /// The key to a phase's inverse pole figure colours, as the settings have them.
     pub fn ipfKeyOf(self: *const Engine, phase: usize) sym.Key {
         // a direction's colour follows the Laue class; an orientation's, the point group's own rotations
@@ -2053,6 +2051,12 @@ pub const Engine = struct {
         return sym.Key.init(if (self.set.ipf_colors == .perfect_rotation) m.rotation else m.laue, self.set.ipf_colors);
     }
 
+    /// Measure, once for the scan as it is prepared now, what mutual information chance gives:
+    /// a sample of the region's patterns (about 256 on a lattice) against each phase at random
+    /// orientations, at the level the scores are taken. Its median and spread (1.4826 × the
+    /// median deviation) per phase are the scale every match's NMI is then read on; they are
+    /// measured again only when what the scores depend on changes (the scan, the patterns'
+    /// preparation, the geometry, the phases, the region).
     pub fn calibrate(self: *Engine) !void {
         const gpa = self.gpa;
         const g = &self.g;
@@ -2088,6 +2092,7 @@ pub const Engine = struct {
         var h = std.hash.Wyhash.init(n_ph);
         h.update(json);
         h.update(std.mem.asBytes(&self.geo));
+        h.update(std.mem.asBytes(&self.scan_serial));
         for (self.phases.items) |*p| h.update(std.mem.asBytes(&p.serial));
         const key = h.final() | 1;
         if (key == self.chance_key and self.chance_med.len == n_ph) return;
