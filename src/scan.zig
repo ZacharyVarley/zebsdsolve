@@ -76,6 +76,19 @@ pub const Info = struct {
     /// are the unprocessed
     pattern_kinds: u32 = 0,
     unprocessed: bool = false,
+    /// −1 where the file's scan was turned half round from the one the settings' scan signs
+    /// describe, so that the beam went the other way along both directions; what says so
+    /// (`turn_note`)
+    scan_turn: i32 = 1,
+    turn_note: []const u8 = "",
+    /// the sample's tilt axis away from the scan's x, where the file says so (Oxford's Tilt
+    /// Axis), which the geometry does not take (it tilts the sample about x); NaN: not said
+    tilt_axis_deg: f64 = std.math.nan(f64),
+    /// how the pattern centres the file stores per cell change from one column to the next
+    /// and from one row to the next (in this engine's convention, as `pc`), where it stores
+    /// them; NaN where it does not
+    pc_per_col: [3]f64 = @splat(std.math.nan(f64)),
+    pc_per_row: [3]f64 = @splat(std.math.nan(f64)),
 };
 
 /// Oxford's nominal detector orientation, (0, 90°, 0): Bunge angles of the detector's axes (x
@@ -618,6 +631,24 @@ pub const Scan = struct {
                 const a = (hh.child(group, name) catch null) orelse return std.math.nan(f64);
                 return hh.number(a) catch std.math.nan(f64);
             }
+            /// how a per-pattern array changes from one column to the next and from one row to
+            /// the next, on average (the last column less the first, over the columns between,
+            /// and likewise down the rows)
+            fn drift(hh: *hdf5.Hdf5, g: Allocator, group: u64, name: []const u8, rows: u32, cols: u32) [2]f64 {
+                const none: [2]f64 = @splat(std.math.nan(f64));
+                if (rows < 2 or cols < 2) return none;
+                const a = (hh.child(group, name) catch null) orelse return none;
+                const n = @as(usize, rows) * cols;
+                if (n > 1 << 24) return none;
+                const vals = g.alloc(f64, n) catch return none;
+                defer g.free(vals);
+                if ((hh.numbers(a, vals) catch 0) != n) return none;
+                var dc: f64 = 0;
+                var dr: f64 = 0;
+                for (0..rows) |r| dc += vals[r * cols + cols - 1] - vals[r * cols];
+                for (0..cols) |c| dr += vals[(rows - 1) * cols + c] - vals[c];
+                return .{ dc / @as(f64, @floatFromInt(rows * (cols - 1))), dr / @as(f64, @floatFromInt(cols * (rows - 1))) };
+            }
             /// mean of a per-pattern array
             fn mean(hh: *hdf5.Hdf5, g: Allocator, group: u64, name: []const u8) f64 {
                 const a = (hh.child(group, name) catch null) orelse return std.math.nan(f64);
@@ -706,7 +737,28 @@ pub const Scan = struct {
                 const y = num.mean(h, gpa, data, "Pattern Center Y");
                 const z = num.mean(h, gpa, data, "Detector Distance");
                 info.pc = .{ x, 1 - y * ratio, z * ratio };
+                // (and how they move over the map: x as it is, y turned over, both scaled as above)
+                const dx = num.drift(h, gpa, data, "Pattern Center X", info.rows, info.cols);
+                const dy = num.drift(h, gpa, data, "Pattern Center Y", info.rows, info.cols);
+                const dz = num.drift(h, gpa, data, "Detector Distance", info.rows, info.cols);
+                info.pc_per_col = .{ dx[0], -dy[0] * ratio, dz[0] * ratio };
+                info.pc_per_row = .{ dx[1], -dy[1] * ratio, dz[1] * ratio };
+                // The scan's turn (Scanning Rotation Angle): at a half turn the beam goes as the
+                // settings' signs say (checked on an AZtec acquisition: its stored pattern
+                // centres move as the engine's do); unturned, the other way along both (as #13,
+                // by Tijmenvermeij, found on Oxford's files); any other angle is not read.
+                const turn = num.get(h, header, "Scanning Rotation Angle");
+                if (std.math.isFinite(turn)) {
+                    const w = @mod(turn, 2 * std.math.pi);
+                    if (@abs(w - std.math.pi) <= 1e-4) {
+                        info.turn_note = "a half turn: the beam as the scan signs say";
+                    } else if (@min(w, 2 * std.math.pi - w) <= 1e-4) {
+                        info.scan_turn = -1;
+                        info.turn_note = "none: the beam the other way from what the scan signs say";
+                    } else info.turn_note = "neither none nor a half turn, which is not read: the beam as the scan signs say";
+                }
                 info.sample_tilt_deg = std.math.radiansToDegrees(info.sample_tilt_deg);
+                info.tilt_axis_deg = std.math.radiansToDegrees(num.get(h, header, "Tilt Axis"));
                 if (try h.child(header, "Detector Orientation Euler")) |a| {
                     var eu: [3]f64 = undefined;
                     if ((h.numbers(a, &eu) catch 0) == 3) if (oxfordDetectorRot(eu)) |r| {

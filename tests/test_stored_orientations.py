@@ -11,6 +11,7 @@ convention and measures each misorientation, which no export applies.
 import os
 from pathlib import Path
 import sys
+import shutil
 import tempfile
 import unittest
 
@@ -138,8 +139,8 @@ class StoredOrientations(unittest.TestCase):
     def tearDownClass(cls):
         cls.tmp.cleanup()
 
-    def write(self, layout):
-        path = Path(self.tmp.name) / f"{layout}.h5"
+    def write(self, layout, name=None, scan_rotation=None, pcs=None):
+        path = Path(self.tmp.name) / f"{name or layout}.h5"
         e = written(self.q, self.phase, PLANTED[layout], MISORIENTED[layout])
         n, rows, cols = len(e), self.rows, self.cols
         with h5py.File(path, "w") as f:
@@ -152,6 +153,12 @@ class StoredOrientations(unittest.TestCase):
                     h[k].attrs["Unit"] = unit
                 h["Detector Orientation Euler"] = DETECTOR_EULER[None].astype(np.float32)
                 h["Detector Orientation Euler"].attrs["Unit"] = "rad"
+                if scan_rotation is not None:
+                    h["Scanning Rotation Angle"] = np.array([scan_rotation], np.float32)
+                    h["Scanning Rotation Angle"].attrs["Unit"] = "rad"
+                if pcs is not None:
+                    for k, v in pcs.items():
+                        d[k] = v
                 for pid, (name, sg, laue) in enumerate([("Ni", 225, 11), ("GaN", 186, 9)], 1):
                     g = h.create_group(f"Phases/{pid}")
                     g["Phase Name"] = [name]
@@ -163,6 +170,13 @@ class StoredOrientations(unittest.TestCase):
                 d["Band Contrast"] = np.arange(n, dtype=np.uint8)
                 d["X"] = np.tile(np.arange(cols, dtype=np.float32), rows)
                 d["X"].attrs["Unit"] = "um"
+                d["Y"] = np.repeat(np.arange(rows, dtype=np.float32), cols)
+                d["Y"].attrs["Unit"] = "um"
+                # the maker's measures of its indexing, and an earlier processing's solution
+                d["Mean Angular Deviation"] = np.full(n, 0.01, np.float32)
+                d["Mean Angular Deviation"].attrs["Unit"] = "rad"
+                d["Bands"] = np.full(n, 8, np.uint8)
+                f["1/Data Processing/1/EBSD/Data/Euler"] = e.astype(np.float32)
                 # what a results file has no use for (a spectrum per cell), and what it keeps
                 f["1/EDS/Data/Spectrum"] = np.zeros((n, 100), np.float32)
                 f["1/Electron Image/Data/SE/Image"] = np.arange(64 * 48, dtype=np.uint8).reshape(48, 64)
@@ -278,6 +292,42 @@ class StoredOrientations(unittest.TestCase):
             self.assertIn("Spectrum", z["Left Out"][()].decode())
             self.assertIn("X||a* Z||c", z["Convention"][()].decode())
             self.assertEqual(f["Manufacturer"][()], b"Oxford Instruments")
+            # (as #13 found Oxford's files want them) the maker's other measures kept but
+            # cleared; its earlier processing left out; its calibration kept beside the
+            # geometry's
+            self.assertTrue(np.isnan(d["Mean Angular Deviation"][:]).all())
+            self.assertEqual(d["Mean Angular Deviation"].attrs["Unit"], b"rad")
+            np.testing.assert_array_equal(d["Bands"][:], 0)
+            self.assertNotIn("Data Processing", f["1"])
+            self.assertIn("Data Processing", z["Left Out"][()].decode())
+            np.testing.assert_allclose(z["OriginalCalibration/Detector Orientation Euler"][0], DETECTOR_EULER, atol=1e-6)
+            self.assertAlmostEqual(float(h["Tilt Angle"][0]), np.radians(self.geometry["sample_tilt_deg"]), places=5)
+        # not from an acquisition that holds this writer's results (its orientations an earlier
+        # run's), nor from one whose cells are off its raster
+        s = Solver()
+        try:
+            again = Path(self.tmp.name) / "again.h5"
+            shutil.copy(src, again)
+            with h5py.File(again, "r+") as f:
+                f["zebsdsolve/Version"] = "0.2.2"
+            s.open(again)
+            s.add_phase(NI)
+            s.add_phase(GAN)
+            s.set_geometry(**self.geometry)
+            s.index()
+            with self.assertRaisesRegex(Exception, "AlreadyAZebsdsolveExport"):
+                s.export(Path(self.tmp.name) / "again.h5oina")
+            off = Path(self.tmp.name) / "off.h5"
+            shutil.copy(src, off)
+            with h5py.File(off, "r+") as f:
+                f["1/EBSD/Data/X"][3] += 0.5
+            s.open(off)
+            s.set_geometry(**self.geometry)
+            s.index()
+            with self.assertRaisesRegex(Exception, "CellsOffTheRaster"):
+                s.export(Path(self.tmp.name) / "off.h5oina")
+        finally:
+            s.close()
         # only from an Oxford acquisition
         s = Solver()
         try:
@@ -290,6 +340,38 @@ class StoredOrientations(unittest.TestCase):
                 s.export(Path(self.tmp.name) / "no.h5oina")
         finally:
             s.close()
+
+    def test_oxford_scan_turn(self):
+        """Which way the beam went: unturned (Scanning Rotation Angle 0) the other way from a
+        half turn, as #13 found Oxford's files; the file's own pattern centres, where they
+        move, over what it says."""
+        def exported(name, **kw):
+            s = Solver()
+            try:
+                s.open(self.write("oxford", name, **kw))
+                s.add_phase(NI)
+                s.add_phase(GAN)
+                s.set_geometry(**self.geometry)
+                s.index()
+                out = Path(self.tmp.name) / f"{name}.h5oina"
+                s.export(out)
+            finally:
+                s.close()
+            with h5py.File(out, "r") as f:
+                d = f["1/EBSD/Data"]
+                return {k: d[k][:] for k in ("Pattern Center X", "Pattern Center Y", "Detector Distance")}
+
+        def drift(pcs):
+            x = pcs["Pattern Center X"].reshape(self.rows, self.cols).astype(np.float64)
+            return (x[:, -1] - x[:, 0]).mean()
+
+        half = exported("half", scan_rotation=np.pi)
+        none = exported("none", scan_rotation=0.0)
+        self.assertGreater(abs(drift(half)), 1e-5)
+        self.assertAlmostEqual(drift(none), -drift(half), delta=1e-3 * abs(drift(half)))
+        # unturned, but its stored pattern centres moving as a half turn's: they decide
+        stored = exported("stored", scan_rotation=0.0, pcs=half)
+        self.assertAlmostEqual(drift(stored), drift(half), delta=1e-3 * abs(drift(half)))
 
     def test_bruker(self):
         self.check("bruker")

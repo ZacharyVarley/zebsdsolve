@@ -982,7 +982,7 @@ fn fitPlane(e: *Engine, compare: bool) !PlaneResult {
             P = plane_mod.toPlane(model, theta, fr) orelse return error.TooFewFitPatterns;
         } else P = plane_mod.fitModel(model, pts, fr) orelse return error.TooFewFitPatterns;
     }
-    const said = plane_mod.said(P, &before, info.rows, info.cols, aspect, h_px, s.scan_x_sign, s.scan_y_sign);
+    const said = plane_mod.said(P, &before, info.rows, info.cols, aspect, h_px, e.scanSigns()[0], e.scanSigns()[1]);
     return finishPlane(e, fit, &res, &before, P, model, full, kind, pts, fr, aspect, said, info);
 }
 
@@ -1113,7 +1113,7 @@ fn finishPlane(e: *Engine, fit: *Fit, res_out: *PlaneResult, before_in: *const G
             }
             if (!any) continue;
             const Pg = plane_mod.fitModel(model, pts, fr) orelse continue;
-            const w = plane_mod.said(Pg, &before, info.rows, info.cols, aspect, h_px, s.scan_x_sign, s.scan_y_sign);
+            const w = plane_mod.said(Pg, &before, info.rows, info.cols, aspect, h_px, e.scanSigns()[0], e.scanSigns()[1]);
             val[got] = .{ w.rot[0], w.rot[1], w.rot[2], w.step[0], w.step[1], w.skew, w.pc[0], w.pc[1], w.pc[2] };
             for (0..9) |i| mean[i] += val[got][i];
             got += 1;

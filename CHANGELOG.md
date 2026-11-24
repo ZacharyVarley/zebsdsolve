@@ -31,6 +31,11 @@ notes.
 - **The detector orientation an Oxford file stores** (`Detector Orientation Euler`) is read
   into the geometry, as #13 read it. Left out, the engine's orientations on an AZtec map lay
   3.4° from AZtec's; with it, 0.10°.
+- **An Oxford acquisition's scan turn** (`Scanning Rotation Angle`): unturned, the beam went
+  the other way from what the scan signs say, along both directions, as #13 (by
+  [Tijmenvermeij](https://github.com/Tijmenvermeij)) found on Oxford's files; at a half turn,
+  as they say (on an AZtec map so, the cells' pattern centres agree with AZtec's to 2 × 10⁻⁶).
+  Where a file's own per-pattern pattern centres move measurably, they decide.
 - **Processed or unprocessed patterns** from a file that stores both side by side, as an
   Oxford acquisition can: the setting `stored_patterns` (in the app, "patterns" under the
   scan's facts, which opens the scan again with the other kind) reads the processed ones, as
@@ -50,7 +55,13 @@ notes.
   scores under `/zebsdsolve`. On an Oxford zirconium map its orientations lie a median 0.20°
   from AZtec's, and its header's detector orientation is the geometry's. The file is written by the engine's own HDF5 writer, in both the browser and
   Python, so neither needs an HDF5 library; the HDF5 reader now reads attributes. After #13 (by
-  [Tijmenvermeij](https://github.com/Tijmenvermeij)), which wrote it from the front ends.
+  [Tijmenvermeij](https://github.com/Tijmenvermeij)), which wrote it from the front ends, and
+  as it found Oxford's files to need: an earlier processing's solutions left out; the
+  acquisition's other measures of its indexing (mean angular deviation, bands and the like)
+  kept, cleared; its own detector orientation and tilt kept under
+  `/zebsdsolve/OriginalCalibration`, the geometry's written in their place; an acquisition
+  that already holds this writer's results, or whose cells' positions do not follow its raster,
+  refused.
 
 ### Changed
 

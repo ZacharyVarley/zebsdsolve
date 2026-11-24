@@ -619,6 +619,9 @@ pub const Engine = struct {
     /// counts the scans opened, made or given (closeScan), so that what is measured on one is
     /// not taken for the next's
     scan_serial: u64 = 0,
+    /// −1 where the scan open went the other way from what the settings' scan signs say
+    /// (Info.scan_turn, or the file's own pattern centres): `scanSigns`
+    scan_turn: i32 = 1,
     res: Results = .{},
     /// indexing in progress: the cells of the sweep in progress and how many are done
     index_cells: []u64 = &.{},
@@ -745,6 +748,7 @@ pub const Engine = struct {
         }
         self.source = .none;
         self.scan_serial += 1;
+        self.scan_turn = 1;
         self.convention = .{};
         self.gpa.free(self.export_held);
         self.export_held = &.{};
@@ -840,6 +844,60 @@ pub const Engine = struct {
         }
         if (s.info.pc_note.len != 0) self.events.log("{s}", .{s.info.pc_note});
         if (!std.math.isNan(s.info.detector_rot[0])) self.events.log("the detector's orientation as the file stores it: {d:.2}° from the nominal one", .{std.math.radiansToDegrees(rot.norm(s.info.detector_rot))});
+        self.takeTurn(s.info);
+        // (as #13 found: a tilt about another axis than the scan's x is not what the geometry is)
+        if (@abs(s.info.tilt_axis_deg) > 1e-4) self.events.log("the file tilts the sample about an axis {d:.2}° from the scan's x, which is not read: the geometry tilts it about x", .{s.info.tilt_axis_deg});
+    }
+
+    /// Which way the beam went: as the scan signs say, or the other way along both. The file's
+    /// own pattern centres decide where they move measurably from cell to cell (a maker's
+    /// calibration moves them with the beam), else what the file says of its scan's turn.
+    fn takeTurn(self: *Engine, si: scan_mod.Info) void {
+        self.scan_turn = 1;
+        const said = si.scan_turn;
+        if (si.turn_note.len != 0) self.events.log("the scan's turn as the file stores it: {s}", .{si.turn_note});
+        const stored = [2]rot.Vec3{ si.pc_per_col, si.pc_per_row };
+        var ok = si.rows >= 2 and si.cols >= 2;
+        for (stored) |v| for (v) |x| {
+            ok = ok and std.math.isFinite(x);
+        };
+        if (ok) ok = rot.norm(stored[0]) > 1e-7 and rot.norm(stored[1]) > 1e-7;
+        if (ok) {
+            // the engine's own change from the middle cell to the next column and the next row,
+            // the beam as the signs say
+            const R = self.geo.rotation();
+            const sz = self.sizeOf(.full) catch {
+                self.scan_turn = said;
+                return;
+            };
+            const mid = @as(u64, si.rows / 2) * si.cols + si.cols / 2;
+            const at = [3]u64{ mid, mid + 1, mid + si.cols };
+            var pc: [3]rot.Vec3 = undefined;
+            for (at, &pc) |c, *p| p.* = Geometry.pcOf(R, self.placeOf(&self.geo, c, .full) catch {
+                self.scan_turn = said;
+                return;
+            }, sz[0], sz[1]);
+            var agree: [2]f64 = undefined;
+            for (0..2) |k| {
+                const ours = rot.sub(pc[k + 1], pc[0]);
+                agree[k] = rot.dot(ours, stored[k]) / @max(rot.norm(ours) * rot.norm(stored[k]), 1e-300);
+            }
+            if (agree[0] > 0.5 and agree[1] > 0.5) {
+                self.scan_turn = 1;
+            } else if (agree[0] < -0.5 and agree[1] < -0.5) {
+                self.scan_turn = -1;
+            } else ok = false;
+            if (ok) {
+                self.events.log("the file's own pattern centres move {s} the scan signs say{s}", .{ if (self.scan_turn == 1) "as the beam does where" else "as the beam does going the other way from where", if (self.scan_turn != said) " (taken over what it says of its scan's turn)" else "" });
+                return;
+            }
+        }
+        self.scan_turn = said;
+    }
+
+    /// The scan's signs (settings.scan_x_sign, scan_y_sign) as the scan open went.
+    pub fn scanSigns(self: *const Engine) [2]i32 {
+        return .{ self.set.scan_x_sign * self.scan_turn, self.set.scan_y_sign * self.scan_turn };
     }
 
     /// Take patterns from memory: rows · cols patterns of h × w pixels, row-major, copied.
@@ -1528,7 +1586,8 @@ pub const Engine = struct {
         const i = self.info() catch return .{ 0, 0, 0 };
         const row: f64 = @floatFromInt(cell / i.cols);
         const col: f64 = @floatFromInt(cell % i.cols);
-        return geo.scanOffset(row, col, 0.5 * @as(f64, @floatFromInt(i.rows - 1)), 0.5 * @as(f64, @floatFromInt(i.cols - 1)), self.set.scan_x_sign, self.set.scan_y_sign, self.binOf(lv));
+        const signs = self.scanSigns();
+        return geo.scanOffset(row, col, 0.5 * @as(f64, @floatFromInt(i.rows - 1)), 0.5 * @as(f64, @floatFromInt(i.cols - 1)), signs[0], signs[1], self.binOf(lv));
     }
 
     /// The detector's position for a cell under `geo`, in a level's pixels.
@@ -1537,7 +1596,8 @@ pub const Engine = struct {
         const sz = try self.sizeOf(lv);
         const row: f64 = @floatFromInt(cell / i.cols);
         const col: f64 = @floatFromInt(cell % i.cols);
-        return geo.positionFor(row, col, 0.5 * @as(f64, @floatFromInt(i.rows - 1)), 0.5 * @as(f64, @floatFromInt(i.cols - 1)), self.set.scan_x_sign, self.set.scan_y_sign, self.binOf(lv), sz[0], sz[1]);
+        const signs = self.scanSigns();
+        return geo.positionFor(row, col, 0.5 * @as(f64, @floatFromInt(i.rows - 1)), 0.5 * @as(f64, @floatFromInt(i.cols - 1)), signs[0], signs[1], self.binOf(lv), sz[0], sz[1]);
     }
 
     pub fn positionOf(self: *const Engine, geo: *const Geometry, cell: u64, lv: Level) ![3]f32 {

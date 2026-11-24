@@ -3,12 +3,19 @@
 //! The file is new (io/hdf5_write.zig), not the acquisition edited: every group, dataset and
 //! attribute of the acquisition is copied through the engine's own reader, except the patterns
 //! and anything else stored per map cell with more than 64 values (spectra), which a results
-//! file has no use for, and except the indexing, which is this engine's: the orientations in the
-//! engine's convention (convention.zig: found from the acquisition's own orientations, or set),
-//! the phase of each cell as the acquisition numbers its phases (new ones added for phases it
-//! does not have), whether a cell was indexed, and the pattern centre of each cell in Oxford's
-//! convention. The engine's own scores go under /zebsdsolve, with the convention used, the
-//! geometry and what was left out.
+//! file has no use for, an earlier processing's solutions (the scan's Data Processing), and
+//! the indexing, which is this engine's: the orientations in the engine's convention
+//! (convention.zig: found from the acquisition's own orientations, or set), the phase of each
+//! cell as the acquisition numbers its phases (new ones added for phases it does not have),
+//! whether a cell was indexed, and the pattern centre of each cell in Oxford's convention. The
+//! acquisition's other measures of its indexing (the mean angular deviation, the bands found
+//! and the like) are kept with their values cleared, NaN or 0, so that a reader that expects
+//! them finds them. The header's detector orientation and tilt become the geometry's, the
+//! acquisition's kept under /zebsdsolve/OriginalCalibration. The engine's own scores go under
+//! /zebsdsolve, with the convention used, the geometry and what was left out. An acquisition
+//! that is already such a file, or whose cells' positions do not follow its raster, is refused.
+//! (What is left out, cleared, kept and refused is as #13, by Tijmenvermeij, found it on
+//! Oxford's files.)
 //!
 //! Oxford's layout, as its files have it: /<n>/EBSD/Header (Phases/<id>/...) and
 //! /<n>/EBSD/Data, a value per map cell, row-major; Euler as passive Bunge angles in radians;
@@ -28,7 +35,10 @@ const Engine = engine.Engine;
 const Allocator = std.mem.Allocator;
 
 /// The datasets of the acquisition's Data group that are its own indexing, written anew.
-const replaced = [_][]const u8{ "Euler", "Phase", "Error", "Mean Angular Deviation", "Bands", "Pattern Center X", "Pattern Center Y", "Detector Distance" };
+const replaced = [_][]const u8{ "Euler", "Phase", "Error", "Pattern Center X", "Pattern Center Y", "Detector Distance" };
+/// Its other measures of its indexing, which the engine does not give: kept, their values
+/// cleared (NaN, or 0 for integers).
+const cleared = [_][]const u8{ "Mean Angular Deviation", "MAD", "Mean Angular Error", "Bands", "Band Count", "Number of Bands", "Bands Detected", "Bands Indexed", "Confidence Index", "Fit", "Pattern Fit" };
 
 const Copy = struct {
     gpa: Allocator,
@@ -78,6 +88,12 @@ const Copy = struct {
             defer self.gpa.free(sub);
             const addr = (try self.h.child(src, name)) orelse continue;
             if (self.h.isGroup(addr) catch false) {
+                // (a scan's Data Processing: an earlier processing's solutions, of indexing no
+                // longer in the file)
+                if (std.mem.eql(u8, name, "Data Processing") and std.mem.count(u8, sub, "/") == 2) {
+                    try self.omit(sub, "an earlier processing's solutions");
+                    continue;
+                }
                 try self.group(addr, try self.out.group(dst, name), sub);
                 continue;
             }
@@ -87,11 +103,12 @@ const Copy = struct {
                 try self.kept.put(self.gpa, try self.gpa.dupe(u8, name), attrs);
                 continue;
             }
-            self.dataset(addr, dst, name, sub) catch |err| try self.omit(sub, @errorName(err));
+            const clear = src == self.data_src and isCleared(name);
+            self.dataset(addr, dst, name, sub, clear) catch |err| try self.omit(sub, @errorName(err));
         }
     }
 
-    fn dataset(self: *Copy, addr: u64, dst: *W.Node, name: []const u8, path: []const u8) !void {
+    fn dataset(self: *Copy, addr: u64, dst: *W.Node, name: []const u8, path: []const u8, clear: bool) !void {
         const gpa = self.gpa;
         var ds = try self.h.dataset(addr);
         defer ds.deinit(gpa);
@@ -104,6 +121,19 @@ const Copy = struct {
         defer gpa.free(raw);
         try self.h.readAll(&ds, raw);
         const dims = ds.dims[0..rank];
+        if (clear and (ds.dtype.class == .float or ds.dtype.class == .int or ds.dtype.class == .uint)) {
+            @memset(raw, 0);
+            if (ds.dtype.class == .float) {
+                const es: usize = ds.dtype.size;
+                var i: usize = 0;
+                while (i + es <= raw.len) : (i += es) switch (es) {
+                    4 => std.mem.writeInt(u32, raw[i..][0..4], @bitCast(std.math.nan(f32)), .little),
+                    8 => std.mem.writeInt(u64, raw[i..][0..8], @bitCast(std.math.nan(f64)), .little),
+                    else => {},
+                };
+                ds.dtype.big_endian = false;
+            }
+        }
         var node: *W.Node = undefined;
         if (ds.dtype.class == .vlen_string) {
             // as fixed-length strings, as long as the longest
@@ -138,6 +168,47 @@ const Copy = struct {
 fn isReplaced(name: []const u8) bool {
     for (replaced) |r| if (std.mem.eql(u8, r, name)) return true;
     return false;
+}
+
+fn isCleared(name: []const u8) bool {
+    for (cleared) |r| if (std.mem.eql(u8, r, name)) return true;
+    return false;
+}
+
+/// A dataset's "Unit" attribute, lower case, into `buf` (empty: none).
+fn unitOf(h: *hdf5.Hdf5, gpa: Allocator, addr: u64, buf: []u8) []const u8 {
+    const attrs = h.attributes(addr) catch return "";
+    defer {
+        for (attrs) |*a| a.deinit(gpa);
+        gpa.free(attrs);
+    }
+    for (attrs) |a| if (std.mem.eql(u8, a.name, "Unit") and a.dtype.class == .string) {
+        const s = std.mem.trim(u8, std.mem.sliceTo(a.data, 0), " ");
+        const n = @min(s.len, buf.len);
+        return std.ascii.lowerString(buf[0..n], s[0..n]);
+    };
+    return "";
+}
+
+/// Whether the acquisition's cells lie where its raster puts them, row-major: X and Y (µm) a
+/// step apart along the columns and the rows, as the engine numbers the cells.
+fn followsRaster(h: *hdf5.Hdf5, gpa: Allocator, data: u64, info: scan_mod.Info) !bool {
+    const n: usize = @as(usize, info.rows) * info.cols;
+    const vals = try gpa.alloc(f64, n);
+    defer gpa.free(vals);
+    for ([_][]const u8{ "X", "Y" }, [_]f64{ info.step_x_um, info.step_y_um }, 0..) |name, step, axis| {
+        const addr = (try h.child(data, name)) orelse return false;
+        var ub: [16]u8 = undefined;
+        const unit = unitOf(h, gpa, addr, &ub);
+        if (!(std.mem.eql(u8, unit, "um") or std.mem.eql(u8, unit, "\xc2\xb5m") or std.mem.eql(u8, unit, "\xce\xbcm"))) return false;
+        if (!(step > 0) or (h.numbers(addr, vals) catch 0) != n) return false;
+        const tol = @max(1e-6, step * 1e-3);
+        for (0..n) |i| {
+            const k: f64 = @floatFromInt(if (axis == 0) i % info.cols else i / info.cols);
+            if (!(@abs(vals[i] - (vals[0] + k * step)) <= tol)) return false;
+        }
+    }
+    return true;
 }
 
 fn swap(raw: []u8, size: u32) void {
@@ -187,13 +258,17 @@ pub fn write(e: *Engine) ![]u8 {
         if (!got.installed) return error.FrameNotFound;
     }
     const frame = e.convention;
+    const h = &s.h5.?;
+    // (a file this writer made: its orientations are an earlier run's, not the acquisition's)
+    if ((try h.child(h.root, "zebsdsolve")) != null) return error.AlreadyAZebsdsolveExport;
+    // (the engine numbers the cells row-major over the raster; the acquisition's must be so)
+    if (!try followsRaster(h, gpa, s.h5_data.?, info)) return error.CellsOffTheRaster;
     var stored = (try s.storedOrientations(gpa)) orelse return error.NoStoredOrientations;
     defer stored.deinit(gpa);
     const matched = try convention.matchLabels(gpa, e.res.phase, stored.phase, e.phases.items.len);
 
     var out = try W.File.init(gpa);
     defer out.deinit();
-    const h = &s.h5.?;
     var copy: Copy = .{ .gpa = gpa, .h = h, .out = &out, .cells = n, .data_src = s.h5_data.?, .header_src = s.h5_header.? };
     defer copy.deinit();
     try copy.group(h.root, out.root, "");
@@ -285,14 +360,25 @@ pub fn write(e: *Engine) ![]u8 {
             try putAttrs(&out, try out.dataset(data, name, .{ .dtype = W.Type.f32_, .dims = &cells, .bytes = std.mem.sliceAsBytes(pcs[k * n ..][0..n]) }), copy.kept.get(name));
         }
     }
-    // the detector's orientation the orientations were found under, where the acquisition
-    // stores one
-    for (header.links.items) |*l| if (std.mem.eql(u8, l.name, "Detector Orientation Euler")) if (l.node.value) |*v| {
-        if (v.dtype.class != .float or v.bytes.len != 3 * @as(usize, v.dtype.size)) continue;
-        const eu = scan_mod.oxfordDetectorEuler(e.geo.rot);
+    // the detector's orientation and the sample's tilt the orientations were found under, where
+    // the acquisition stores them (in radians), the acquisition's own kept beside the results
+    const original = try out.group(try out.group(out.root, "zebsdsolve"), "OriginalCalibration");
+    for (header.links.items) |*l| if (l.node.value) |*v| {
+        const is_euler = std.mem.eql(u8, l.name, "Detector Orientation Euler");
+        if (!is_euler and !std.mem.eql(u8, l.name, "Tilt Angle")) continue;
+        const count: usize = if (is_euler) 3 else 1;
+        if (v.dtype.class != .float or v.bytes.len != count * @as(usize, v.dtype.size)) continue;
+        var radians = false;
+        for (l.node.attrs.items) |a| if (std.mem.eql(u8, a.name, "Unit")) {
+            radians = std.mem.eql(u8, std.mem.trim(u8, std.mem.sliceTo(a.value.bytes, 0), " "), "rad");
+        };
+        if (!radians) continue;
+        const kept = try out.dataset(original, l.name, v.*);
+        for (l.node.attrs.items) |a| try out.attribute(kept, a.name, a.value);
+        const vals: [3]f64 = if (is_euler) scan_mod.oxfordDetectorEuler(e.geo.rot) else .{ std.math.degreesToRadians(e.geo.sample_tilt_deg), 0, 0 };
         const bytes = try out.arena.allocator().alloc(u8, v.bytes.len);
-        for (0..3) |k| {
-            if (v.dtype.size == 4) std.mem.writeInt(u32, bytes[4 * k ..][0..4], @bitCast(@as(f32, @floatCast(eu[k]))), .little) else std.mem.writeInt(u64, bytes[8 * k ..][0..8], @bitCast(eu[k]), .little);
+        for (0..count) |k| {
+            if (v.dtype.size == 4) std.mem.writeInt(u32, bytes[4 * k ..][0..4], @bitCast(@as(f32, @floatCast(vals[k]))), .little) else std.mem.writeInt(u64, bytes[8 * k ..][0..8], @bitCast(vals[k]), .little);
         }
         v.bytes = bytes;
     };
