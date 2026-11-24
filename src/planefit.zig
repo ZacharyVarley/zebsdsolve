@@ -247,6 +247,14 @@ fn damped(comptime k: usize, l: *const Local, lambda: f64) struct { A: [k * k]f6
     return .{ .A = A, .g = g };
 }
 
+/// How far above chance (in chance's spreads) a match must stand to take part when too few are
+/// accepted, and the share of the fit patterns that must: on the synthetic maps of
+/// scripts/bench.py, cells with no crystal match at a median of about 1, and 1.5–3.4 % of them
+/// at 3 or more; the faintest crystals' patterns there at about 4, 82 % of them at 3 or more.
+/// (Higher, fewer of a faint map's patterns take part, and its plane is the worse for it.)
+const CHANCE_Z: f32 = 3;
+const CHANCE_SHARE = 10;
+
 /// The fit patterns, indexed at the geometry as it stands and on the device, each with its
 /// orientation and its source's shift away from where the geometry puts it.
 const Fit = struct {
@@ -375,10 +383,19 @@ const Fit = struct {
             self.base[b] = try e.placeOf(&e.geo, cells[b], lv);
         }
         if (self.n_used < 3) {
-            // nothing to choose among: a start this far off, or a threshold this high, leaves the fit all of them
-            e.events.log("plane fit: {d} of the {d} fit patterns have a match that would be accepted here; fitting to all of them", .{ self.n_used, n });
-            @memset(self.use, true);
-            self.n_used = n;
+            // too few to fit to (a start this far off, or a threshold this high): the matches
+            // that stand above chance instead, three of its spreads above it, so that cells with
+            // no crystal to find (pores, a phase with no master, the sample's edge) do not take
+            // part; fewer than three of those, or than a tenth of the fit patterns (what chance
+            // alone might leave), and nothing is fitted
+            const accepted = self.n_used;
+            self.n_used = 0;
+            for (0..n) |b| {
+                self.use[b] = recs[@as(usize, @intCast(phase[b])) * n + b].z >= CHANCE_Z;
+                if (self.use[b]) self.n_used += 1;
+            }
+            e.events.log("plane fit: {d} of the {d} fit patterns have a match that would be accepted here; fitting to the {d} above chance (z ≥ {d})", .{ accepted, n, self.n_used, CHANCE_Z });
+            if (self.n_used < 3 or self.n_used * CHANCE_SHARE < n) return error.TooFewFitPatterns;
         } else if (self.n_used < n) {
             e.events.log("plane fit: {d} of the {d} fit patterns left out, their matches not accepted", .{ n - self.n_used, n });
         }

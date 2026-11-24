@@ -617,6 +617,29 @@ def main():
     check("a toy scan can be an experiment on fitting", s.scan["pattern_shape"] == (60, 72) and 0.05 < blank.mean() < 0.16 and recount and len(np.unique(t6["grain"])) > 300
           and np.allclose(t6["geometry"]["rot"], true_rot) and e_pc < 0.002 and e_rot < 0.5 and not acc[blank].any() and acc[~blank].mean() > 0.9 and np.nanmedian(dx) < 0.5,
           f"{100 * blank.mean():.0f} % blank cells, none accepted ({100 * acc[~blank].mean():.0f} % of the crystals are); the plane fit from 0.01 off and no rotation: pattern centre within {e_pc:.5f}, rotation within {e_rot:.3f}°; orientations a median {np.nanmedian(dx):.3f}° from the answer")
+    # a threshold no match reaches: the plane fit takes the matches above chance instead, which
+    # leave the blank cells out (after #17); on noise alone (its background subtracted, as by
+    # default: left on it, the master can find the background's hump and stand above chance),
+    # too few of those, and it fits nothing
+    s.configure(accept_z=1e6, plane_stride=1)
+    s.set_geometry(pc=(0.46, 0.24, 0.53), rot=(0, 0, 0), plane_kind="none")
+    pz = s.fit_plane()
+    e_z = np.abs(np.array(pz["pc"]) - t6["geometry"]["pc"]).max()
+    pts = s.plane_points()
+    on_blank = blank[pts["cells"].astype(np.int64)]
+    blank_in, crystal_in = pts["used"][on_blank].mean(), pts["used"][~on_blank].mean()
+    was = {k: s.settings[k] for k in ("static_background", "dynamic_background")}
+    s.configure(toy_contrast=0.001, toy_counts=1, static_background="average", dynamic_background="subtract")
+    s.synthesize()
+    try:
+        noise_fit = s.fit_plane()
+        none_fitted, noise_said = False, f"{noise_fit['n_used']} of {noise_fit['n_patterns']} fitted"
+    except ze.Error as err:
+        none_fitted, noise_said = "TooFewFitPatterns" in str(err), str(err).split(": ")[-1]
+    s.configure(accept_z=15, plane_stride=2, **was)
+    check("with no match accepted, the plane fit takes those above chance, and none without them",
+          blank_in < 0.15 and crystal_in > 0.9 and e_z < 0.003 and none_fitted,
+          f"{100 * crystal_in:.0f} % of the crystals' fit patterns took part and {100 * blank_in:.0f} % of the blank cells'; pattern centre within {e_z:.5f}; on noise alone: {noise_said}")
     s.configure(toy_blank=0, toy_contrast=1, toy_background_sigma=0, toy_noise_seed=0, toy_counts=20, toy_height=60, toy_width=60, toy_grains=24)
     check("the masters' symmetries shape the search", ni["n_fold"] == 4 and ni["inversion"] and gan["n_fold"] in (2, 6) and not gan["inversion"], f"nickel: order {ni['n_fold']} about z, inversion; GaN: order {gan['n_fold']} at least, none")
     s.close()

@@ -12,8 +12,9 @@ The cases span the pattern's size (60 × 60 to 240 × 320, one not square), the 
 and the share of the intensity that is pattern rather than background, a detector rotated off
 its nominal attitude, a map wide enough for the beam's travel to move the pattern centre a
 lot, a hexagonal phase without a centre of symmetry, two phases with blank cells, patterns
-faint enough that much of the map cannot be indexed, faint large patterns searched binned, and
-a start further off than the others.
+faint enough that much of the map cannot be indexed, faint large patterns searched binned, a
+start further off than the others, and maps mostly of cells with no crystal (as a real scan's
+pores, another phase or a sample's edge make them), one of them faint as well.
 
 Each case starts from the true geometry with the pattern centre moved off (START_OFF) and
 runs what a user would: the pattern-centre vote, the plane fit from the vote's geometry, the
@@ -63,6 +64,8 @@ CASES = {
     "faint": ([NI], dict(toy_height=60, toy_width=60, toy_counts=3, toy_contrast=0.2, toy_background_sigma=0.4), {}),
     "faint-160-binned": ([NI], dict(toy_height=160, toy_width=160, toy_rows=20, toy_cols=24, toy_counts=4, toy_contrast=0.25, toy_background_sigma=0.4), {"settings": dict(binning=4, full_resolution="refine")}),
     "far-start": ([NI], dict(toy_height=60, toy_width=60, toy_counts=8, toy_contrast=0.5, toy_background_sigma=0.4), {"start_off": (0.045, -0.04, 0.035)}),
+    "mostly-blank": ([NI], dict(toy_height=60, toy_width=60, toy_counts=8, toy_contrast=0.5, toy_background_sigma=0.4, toy_blank=0.8), {}),
+    "faint-mostly-blank": ([NI], dict(toy_height=60, toy_width=60, toy_counts=3, toy_contrast=0.2, toy_background_sigma=0.4, toy_blank=0.6), {}),
 }
 
 

@@ -106,6 +106,19 @@ notes.
   has a centre to put in their place; the slices nearer than `pc_z_min` are no longer scored at
   all. Identical results on every case of `scripts/bench.py` (#16, by
   [Tijmenvermeij](https://github.com/Tijmenvermeij)).
+- What NMI chance gives (the scale z is read on, and so acceptance) was measured once and kept
+  while the settings, the geometry and the phases stayed as they were, even when another scan
+  was opened or a toy scan made: a scan could be read on the last one's scale. It is measured
+  again for each scan.
+- A plane fit for which fewer than three fit patterns had a match that would be accepted fitted
+  all of them, so on a map mostly of cells with no crystal (pores, a phase with no master, the
+  sample's edge) their chance matches set the plane. It now fits the matches that stand above
+  chance (z ≥ 3), and refuses (`TooFewFitPatterns`) when fewer than three, or than a tenth of
+  the fit patterns, do: on a faint map 60 % blank in `scripts/bench.py` the pattern centre came
+  out 0.0072 off before and 0.0009 now; on noise alone nothing is fitted. #17 (by
+  [Tijmenvermeij](https://github.com/Tijmenvermeij)) refused the fit outright, which on faint
+  maps that the fallback rescues left Auto failing. A background left uncorrected can lift
+  noise above chance, and the fallback then fits it, as before.
 - The plane fit's patterns, each taken to its own best, stopped as soon as a round gained
   nothing, so a round in which every pattern's step overshot ended the fit before any had
   tried the smaller step its damping now asked for. Such a round now goes again; otherwise the
