@@ -16,7 +16,6 @@ const js = struct {
     extern "zegpu" fn writeBuffer(id: u32, offset: f64, ptr: [*]const u8, len: usize) void;
     extern "zegpu" fn createPipeline(code: [*]const u8, code_len: usize, entry: [*]const u8, entry_len: usize) u32;
     extern "zegpu" fn dispatch(pipe: u32, x: u32, y: u32, z: u32, binds: [*]const api.Bind, n: usize) void;
-    extern "zegpu" fn dispatchIndirect(pipe: u32, buf: u32, offset: f64, binds: [*]const api.Bind, n: usize) void;
     extern "zegpu" fn clearBuffer(id: u32, offset: f64, size: f64) void;
     extern "zegpu" fn copyBuffer(src: u32, soff: f64, dst: u32, doff: f64, size: f64) void;
     extern "zegpu" fn readBuffer(src: u32, offset: f64, size: f64, dst: [*]u8) void;
@@ -78,12 +77,6 @@ pub const Device = struct {
     pub fn dispatch(self: *Device, pipe: u32, x: u32, y: u32, z: u32, binds: []const api.Bind) void {
         _ = self;
         js.dispatch(pipe, x, y, z, binds.ptr, binds.len);
-    }
-
-    /// A dispatch whose workgroup counts (3 × u32) the GPU reads from `buf` at byte `offset`.
-    pub fn dispatchIndirect(self: *Device, pipe: u32, buf: u32, offset: u64, binds: []const api.Bind) void {
-        _ = self;
-        js.dispatchIndirect(pipe, buf, @floatFromInt(offset), binds.ptr, binds.len);
     }
 
     pub fn clearBuffer(self: *Device, id: u32, offset: u64, size: u64) void {

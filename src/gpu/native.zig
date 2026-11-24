@@ -56,7 +56,6 @@ const Procs = struct {
     ComputePassEncoderSetPipeline: c.WGPUProcComputePassEncoderSetPipeline,
     ComputePassEncoderSetBindGroup: c.WGPUProcComputePassEncoderSetBindGroup,
     ComputePassEncoderDispatchWorkgroups: c.WGPUProcComputePassEncoderDispatchWorkgroups,
-    ComputePassEncoderDispatchWorkgroupsIndirect: c.WGPUProcComputePassEncoderDispatchWorkgroupsIndirect,
     ComputePassEncoderEnd: c.WGPUProcComputePassEncoderEnd,
     ComputePassEncoderRelease: c.WGPUProcComputePassEncoderRelease,
     DevicePoll: DevicePollFn,
@@ -390,7 +389,7 @@ pub const Device = struct {
         var d = std.mem.zeroes(c.WGPUBufferDescriptor);
         d.size = size;
         d.usage = switch (usage) {
-            .storage => c.WGPUBufferUsage_Storage | c.WGPUBufferUsage_CopySrc | c.WGPUBufferUsage_CopyDst | c.WGPUBufferUsage_Indirect,
+            .storage => c.WGPUBufferUsage_Storage | c.WGPUBufferUsage_CopySrc | c.WGPUBufferUsage_CopyDst,
             .uniform => c.WGPUBufferUsage_Uniform | c.WGPUBufferUsage_CopyDst,
         };
         const b = self.p.DeviceCreateBuffer.?(self.device, &d);
@@ -533,17 +532,6 @@ pub const Device = struct {
     }
 
     pub fn dispatch(self: *Device, pipe: u32, x: u32, y: u32, z: u32, binds: []const api.Bind) void {
-        self.launch(pipe, .{ .direct = .{ x, y, z } }, binds);
-    }
-
-    /// A dispatch whose workgroup counts (3 × u32) the GPU reads from `buf` at byte `offset`.
-    pub fn dispatchIndirect(self: *Device, pipe: u32, buf: u32, offset: u64, binds: []const api.Bind) void {
-        self.launch(pipe, .{ .indirect = .{ .buf = buf, .offset = offset } }, binds);
-    }
-
-    const Launch = union(enum) { direct: [3]u32, indirect: struct { buf: u32, offset: u64 } };
-
-    fn launch(self: *Device, pipe: u32, how: Launch, binds: []const api.Bind) void {
         const pp = self.pipes.items[pipe];
         const timed = self.prof_on and self.prof_pipes.items.len < PROF_QUERIES / 2;
         if (timed) {
@@ -575,10 +563,7 @@ pub const Device = struct {
         const bg = self.p.DeviceCreateBindGroup.?(self.device, &bd);
         self.p.ComputePassEncoderSetPipeline.?(self.pass, pp.pipeline);
         self.p.ComputePassEncoderSetBindGroup.?(self.pass, 0, bg, 0, null);
-        switch (how) {
-            .direct => |n| self.p.ComputePassEncoderDispatchWorkgroups.?(self.pass, @max(n[0], 1), @max(n[1], 1), @max(n[2], 1)),
-            .indirect => |ind| self.p.ComputePassEncoderDispatchWorkgroupsIndirect.?(self.pass, self.buffers.items[ind.buf], ind.offset),
-        }
+        self.p.ComputePassEncoderDispatchWorkgroups.?(self.pass, @max(x, 1), @max(y, 1), @max(z, 1));
         self.p.BindGroupRelease.?(bg);
     }
 

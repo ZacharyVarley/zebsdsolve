@@ -119,14 +119,12 @@ function gpuImports(state) {
   };
 
   // ── operations, issued directly (or replayed from the backlog) ──
-  // indirect: [buffer, byte offset] of the workgroup counts (3 × u32) instead of x, y, z
-  const doDispatch = (p, x, y, z, entries, indirect) => {
+  const doDispatch = (p, x, y, z, entries) => {
     if (state.deviceLoss || !p.pipeline) return; // compile failures are reported through takeError
     if (!pass) pass = encoder().beginComputePass();
     pass.setPipeline(p.pipeline);
     pass.setBindGroup(0, device.createBindGroup({ layout: p.layout, entries }));
-    if (indirect) pass.dispatchWorkgroupsIndirect(indirect[0], indirect[1]);
-    else pass.dispatchWorkgroups(Math.max(1, x), Math.max(1, y), Math.max(1, z));
+    pass.dispatchWorkgroups(Math.max(1, x), Math.max(1, y), Math.max(1, z));
   };
   const bindEntries = (bindsPtr, n) => {
     const v = new DataView(mem(), bindsPtr, n * 24);
@@ -231,7 +229,7 @@ function gpuImports(state) {
     createBuffer(size, usage) {
       const u = usage === 1
         ? GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST
-        : GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST | GPUBufferUsage.INDIRECT;
+        : GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST;
       const b = device.createBuffer({ size, usage: u });
       const id = freeIds.length ? freeIds.pop() : bufs.length;
       bufs[id] = b;
@@ -287,15 +285,6 @@ function gpuImports(state) {
       if (!p.ready) blocking.add(p);
       if (backlog || !p.ready) defer(() => doDispatch(p, x, y, z, entries));
       else doDispatch(p, x, y, z, entries);
-    },
-    dispatchIndirect(pipe, buf, offset, bindsPtr, n) {
-      st.dispatches++;
-      const p = pipes[pipe];
-      const entries = bindEntries(bindsPtr, n);
-      const ind = [bufs[buf], offset];
-      if (!p.ready) blocking.add(p);
-      if (backlog || !p.ready) defer(() => doDispatch(p, 0, 0, 0, entries, ind));
-      else doDispatch(p, 0, 0, 0, entries, ind);
     },
     clearBuffer(id, offset, size) {
       const b = bufs[id];

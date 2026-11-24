@@ -43,42 +43,9 @@ const UNIFORM_ARENA = 256 * 1024;
 pub const MAX_GROUPS = 65535;
 const STORAGE_ARENA = 1024 * 1024;
 
-/// Gated recording: dispatch slots per gate session.
-pub const GATE_SLOTS = 4096;
-
-/// A gated dispatch waits on the done flag only.
-pub const NO_FLAG: u32 = 0xffffffff;
-
 /// The pipeline index callers use for a pipeline that failed to build: its dispatches are
 /// skipped and the next wait fails (error.PipelineFailed) instead of running another pipeline.
 pub const NO_PIPE: u32 = 0xffffffff;
-
-pub const Gate = struct {
-    flag: Buf,
-    flag_word: u32,
-    /// the second flag word gating the dispatches recorded now (gateOn), or NO_FLAG
-    also: u32 = NO_FLAG,
-    /// slots recorded; the first `flushed` are already uploaded
-    n: u32 = 0,
-    flushed: u32 = 0,
-};
-
-const GATE_WGSL =
-    \\@group(0) @binding(0) var<storage, read> base: array<u32>;
-    \\@group(0) @binding(1) var<storage, read> flag: array<f32>;
-    \\@group(0) @binding(2) var<storage, read_write> live: array<u32>;
-    \\@group(0) @binding(3) var<uniform> u: vec4<u32>;
-    \\// slot s (base: x, y, z, its own flag word) runs its recorded workgroups unless the done
-    \\// flag (flag[u.y]) or its own flag is set (> 0.5)
-    \\@compute @workgroup_size(256)
-    \\fn main(@builtin(global_invocation_id) g: vec3<u32>) {
-    \\    let s = g.x;
-    \\    if (s >= u.x) { return; }
-    \\    let f = base[s * 4u + 3u];
-    \\    let off = flag[u.y] > 0.5 || (f != 0xffffffffu && flag[f] > 0.5);
-    \\    for (var c = 0u; c < 3u; c++) { live[s * 3u + c] = select(base[s * 4u + c], 0u, off); }
-    \\}
-;
 
 /// GPU traffic counters: dispatches recorded, submits, reads queued and waits (round trips).
 pub const Counts = extern struct { dispatches: u32 = 0, submits: u32 = 0, reads: u32 = 0, waits: u32 = 0 };
@@ -111,11 +78,6 @@ pub const Gpu = struct {
     open: bool = false,
     /// GPU traffic since the last countsTake (the browser adapter's ze.stats, natively)
     counts: Counts = .{},
-    /// gated recording (beginGate … endGate)
-    gate: ?Gate = null,
-    gate_base: Buf = .{},
-    gate_live: Buf = .{},
-    gate_counts: std.ArrayList(u32) = .empty,
 
     pub fn init(gpa: Allocator, dev: *Backend.Device) !Gpu {
         const lim = dev.limits();
@@ -135,9 +97,6 @@ pub const Gpu = struct {
     }
 
     pub fn deinit(self: *Gpu) void {
-        self.release(&self.gate_base);
-        self.release(&self.gate_live);
-        self.gate_counts.deinit(self.gpa);
         for (self.retired.items) |id| self.dev.destroyBuffer(id);
         self.retired.deinit(self.gpa);
         self.dev.destroyBuffer(self.ubuf);
@@ -293,92 +252,8 @@ pub const Gpu = struct {
             if (self.oversize == null) self.oversize = .{ .pipe = pipe, .n = .{ x, y, z } };
             return;
         }
-        if (self.gate) |*gt| if (gt.n < GATE_SLOTS) {
-            // gated: the GPU reads this dispatch's workgroup counts from its live slot
-            self.gate_counts.appendSlice(self.gpa, &.{ @max(x, 1), @max(y, 1), @max(z, 1), gt.also }) catch {};
-            const slot = gt.n;
-            gt.n += 1;
-            self.dev.dispatchIndirect(pipe, self.gate_live.id, @as(u64, slot) * 12, binds);
-            self.open = true;
-            return;
-        };
         self.dev.dispatch(pipe, x, y, z, binds);
         self.open = true;
-    }
-
-    // ── gated recording ──
-    // A long schedule recorded ahead (the GPU-resident climb) stops costing GPU work once a flag
-    // the GPU itself sets says it is done: between beginGate and endGate every dispatch is
-    // recorded indirect, its workgroup counts read from a live table that gateRefresh fills
-    // from the recorded counts, or with zeros once the flag is set.
-
-    /// Start gating on the f32 flag at word `flag_word` of `flag` (set: > 0.5).
-    pub fn beginGate(self: *Gpu, flag: Buf, flag_word: u32) void {
-        self.ensure(&self.gate_base, GATE_SLOTS * 16);
-        self.ensure(&self.gate_live, GATE_SLOTS * 12);
-        self.gate_counts.clearRetainingCapacity();
-        self.gate = .{ .flag = flag, .flag_word = flag_word };
-    }
-
-    /// Gate the dispatches recorded from now on also on the flag at word `word` of the gate's
-    /// buffer (null: on the done flag only).
-    pub fn gateOn(self: *Gpu, word: ?u32) void {
-        if (self.gate) |*gt| gt.also = word orelse NO_FLAG;
-    }
-
-    /// Record the refresh of the live table from the flags (call wherever a flag may have
-    /// changed, before the gated dispatches that follow).
-    pub fn gateRefresh(self: *Gpu) void {
-        const gt = self.gate orelse return;
-        const pipe = self.pipeline("gpu/gate", GATE_WGSL, "main") catch return;
-        const u = [4]u32{ GATE_SLOTS, gt.flag_word, 0, 0 };
-        self.gate = null; // the refresh itself is not gated
-        defer self.gate = gt;
-        self.dispatch(pipe, (GATE_SLOTS + 255) / 256, 1, 1, &.{ self.gate_base.at(0), gt.flag.at(1), self.gate_live.at(2), self.uniform(3, std.mem.asBytes(&u)) });
-    }
-
-    /// Record a dispatch outside the gate (direct) while gating: for kernels that read the gate's
-    /// flags themselves and skip their work (gateWord says which flag besides the done flag).
-    pub fn dispatchUngated(self: *Gpu, pipe: u32, x: u32, y: u32, z: u32, binds: []const Bind) void {
-        const gt = self.gate;
-        self.gate = null;
-        defer self.gate = gt;
-        self.dispatch(pipe, x, y, z, binds);
-    }
-
-    /// Pause gating (the dispatches until resumeGate run whatever the flags say); returns the
-    /// session for resumeGate.
-    pub fn pauseGate(self: *Gpu) ?Gate {
-        const gt = self.gate;
-        self.gate = null;
-        return gt;
-    }
-
-    pub fn resumeGate(self: *Gpu, gt: ?Gate) void {
-        self.gate = gt;
-    }
-
-    /// The flag word gating the dispatches recorded now besides the done flag (NO_FLAG: none,
-    /// or not gating).
-    pub fn gateWord(self: *const Gpu) u32 {
-        return if (self.gate) |gt| gt.also else NO_FLAG;
-    }
-
-    /// Upload the counts of the slots recorded since the last upload (queue writes, which land
-    /// before the work submitted after them).
-    fn gateFlush(self: *Gpu) void {
-        if (self.gate == null) return;
-        const g = &self.gate.?;
-        if (g.n > g.flushed) {
-            self.dev.writeBuffer(self.gate_base.id, @as(u64, g.flushed) * 16, std.mem.sliceAsBytes(self.gate_counts.items[g.flushed * 4 .. g.n * 4]));
-            g.flushed = g.n;
-        }
-    }
-
-    /// Stop gating (the session's slots stay valid until its work is submitted).
-    pub fn endGate(self: *Gpu) void {
-        self.gateFlush();
-        self.gate = null;
     }
 
     /// Time every dispatch on the GPU (native only; false when unavailable).
@@ -419,7 +294,6 @@ pub const Gpu = struct {
     /// Upload the uniform arena, then submit everything recorded since the last submit.
     pub fn submit(self: *Gpu) void {
         self.counts.submits += 1;
-        self.gateFlush();
         if (self.uoff > 0) {
             self.dev.writeBuffer(self.ubuf, 0, self.ustage[0..self.uoff]);
             self.uoff = 0;
