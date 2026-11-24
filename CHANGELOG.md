@@ -99,6 +99,13 @@ notes.
   has a centre to put in their place; the slices nearer than `pc_z_min` are no longer scored at
   all. Identical results on every case of `scripts/bench.py` (#16, by
   [Tijmenvermeij](https://github.com/Tijmenvermeij)).
+- The plane fit's patterns, each taken to its own best, stopped as soon as a round gained
+  nothing, so a round in which every pattern's step overshot ended the fit before any had
+  tried the smaller step its damping now asked for. Such a round now goes again; otherwise the
+  fit stops as before, so it takes no more rounds and gives the same results on every case of
+  `scripts/bench.py`. `zig build test` now runs the plane fit's host-side test too. After #18,
+  by [Tijmenvermeij](https://github.com/Tijmenvermeij), whose own retry let each pattern run
+  until it alone had settled: the same results in two to three times the rounds.
 - **Auto fit geometry**, asked for a projective plane, said projective when it took a tilt line
   and installed it as the affine plane it is (#10, by [Tijmenvermeij](https://github.com/Tijmenvermeij)).
 - The joint fit of a projective plane stopped with `TooFewFitPatterns` when it started from one

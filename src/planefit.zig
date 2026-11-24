@@ -544,10 +544,12 @@ const Fit = struct {
     /// score: over its orientation alone (`k` 3), or with the place of its own source (`k` 6:
     /// what Winkelmann et al. and kikuchipy's refine_orientation_projection_center do a
     /// pattern at a time). All the patterns take a step together, a pattern's step kept where
-    /// its own score rose, until a round gains the mean less than 1e-7 (about what single
-    /// precision on the device leaves of it) or after `most` rounds. A source may move
-    /// `trust` pixels each way from where it started. Returns the rounds taken; leaves the
-    /// mean score in `ncc` and the patterns' systems in `keep`.
+    /// its own score rose and its damping eased (where it fell, the damping grows), until a
+    /// round gains the mean less than 1e-7 (about what single precision on the device leaves of
+    /// it) or after `most` rounds. A round in which every step overshot is not the end: the
+    /// steps go again, damped more, until one is kept or none can be damped further. A source
+    /// may move `trust` pixels each way from where it started. Returns the rounds taken; leaves
+    /// the mean score in `ncc` and the patterns' systems in `keep`.
     fn settle(self: *Fit, comptime k: usize, trust: f64, most: u32) !u32 {
         const n = self.n;
         const count: f64 = @floatFromInt(self.n_used);
@@ -572,18 +574,26 @@ const Fit = struct {
             }
             _ = try self.eval(self.q_t, self.shift_t);
             var gain: f64 = 0;
+            var kept: usize = 0;
+            var damp: usize = 0;
             for (0..n) |b| {
                 if (!self.use[b]) continue;
                 const now = self.locals[b].ncc;
                 if (now > self.keep[b].ncc) {
                     gain += now - self.keep[b].ncc;
+                    kept += 1;
                     self.q[b] = self.q_t[b];
                     self.shift[b] = self.shift_t[b];
                     self.keep[b] = self.locals[b];
                     self.lam[b] = @max(self.lam[b] / 3, 1e-4);
-                } else self.lam[b] = @min(self.lam[b] * 5, 1e8);
+                } else {
+                    if (self.lam[b] < 1e8) damp += 1;
+                    self.lam[b] = @min(self.lam[b] * 5, 1e8);
+                }
             }
             if (k == 6) self.e.events.emit(.{ .kind = "progress", .stage = "plane", .done = it + 1, .total = most });
+            // (a round whose every step overshot has not converged: they go again, damped more)
+            if (kept == 0 and damp > 0) continue;
             if (gain / count < 1e-7) break;
         }
         var mean: f64 = 0;
