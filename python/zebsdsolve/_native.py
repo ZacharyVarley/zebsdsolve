@@ -18,7 +18,7 @@ class ScanInfo(ctypes.Structure):
     _fields_ = [
         ("rows", U32), ("cols", U32), ("pat_h", U32), ("pat_w", U32),
         ("pixel", U32), ("has_background", U32), ("has_pc", U32), ("format", U32),
-        ("voltage_kv", F64), ("bytes", F64), ("has_px", U32), ("_pad", U32),
+        ("voltage_kv", F64), ("bytes", F64), ("has_px", U32), ("pattern_kinds", U32),
     ]
 
 

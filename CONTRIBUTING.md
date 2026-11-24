@@ -116,6 +116,7 @@ python tests/test_api.py                      # the Python API on the GPU, again
 python tests/test_up_header.py                # EDAX UP headers, on generated files
 python tests/test_stored_overview.py          # stored quality maps in each vendor's layout, on generated files (h5py)
 python tests/test_chunk_tree.py               # chunked patterns found through the part of the chunk tree a read needs (h5py)
+python tests/test_pattern_kinds.py            # processed and unprocessed patterns side by side, each read as asked (h5py)
 python tests/test_app.py                      # the `zebsdsolve` launcher serves every file of the app
 node tests/test_web.mjs                       # the app in headless Chrome (WebGPU); --dir dist/web for a built site
 python scripts/run_tutorials.py out/          # examples/*.py executed as notebooks → out/*.ipynb, out/*.html

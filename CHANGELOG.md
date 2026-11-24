@@ -31,6 +31,13 @@ notes.
 - **The detector orientation an Oxford file stores** (`Detector Orientation Euler`) is read
   into the geometry, as #13 read it. Left out, the engine's orientations on an AZtec map lay
   3.4° from AZtec's; with it, 0.10°.
+- **Processed or unprocessed patterns** from a file that stores both side by side, as an
+  Oxford acquisition can: the setting `stored_patterns` (in the app, "patterns" under the
+  scan's facts, which opens the scan again with the other kind) reads the processed ones, as
+  the acquisition prepared them, or the detector's own, signed 16-bit values widened to f32
+  exactly, each with its own static background. A file with one kind is read as it is;
+  `scan["pattern_kinds"]` names the kinds a file stores (#15, by
+  [Tijmenvermeij](https://github.com/Tijmenvermeij), whose reader this is).
 - **A menu** in the app (the three bars left of the name): opening and saving, the theme
   (dark, light, or as the system is set), and **View conventions**, which draws each reference
   frame and pattern-centre convention (the lab with the sample's axes over the engine's, and

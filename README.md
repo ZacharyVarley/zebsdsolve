@@ -11,7 +11,7 @@ EBSD pattern-centre fitting and indexing on the GPU, in the browser or from Pyth
 - **Prepares patterns**: binning, neighbour averaging (NLPAR), static and dynamic background, CLAHE, band pass, mask.
 - **Simulates master patterns** from a CIF (dynamical Bloch waves, depth-integrated by a low-rank Lyapunov solve corrected by its dual-weighted residual: [ebsdsim](https://github.com/ZacharyVarley/ebsdsim)'s method made 3–6× faster and several times more accurate), in the app's Simulate tab or from Python, to index with at once or save.
 - **Handles several phases**, and writes `.ang` and `.ctf`, and `.h5oina` from an Oxford acquisition, in the reference frame it finds the scan file's own orientations in, reporting the misorientation left between them ([conventions](docs/conventions.md); the app draws each under File › View conventions).
-- **Reads** h5ebsd (kikuchipy, Bruker, EDAX, Oxford `.h5oina`), EDAX `.up1` / `.up2` (with the scan's `.ang` for the map's shape, steps, image quality and pattern centre: `solver.open("scan.up1", "scan.ang")`), Oxford `.ebsp`, NORDIF `Pattern.dat`. Master patterns: [ebsdsim](https://github.com/ZacharyVarley/ebsdsim) `.npz` and EMsoft `.h5`.
+- **Reads** h5ebsd (kikuchipy, Bruker, EDAX, Oxford `.h5oina`, its processed or its unprocessed patterns), EDAX `.up1` / `.up2` (with the scan's `.ang` for the map's shape, steps, image quality and pattern centre: `solver.open("scan.up1", "scan.ang")`), Oxford `.ebsp`, NORDIF `Pattern.dat`. Master patterns: [ebsdsim](https://github.com/ZacharyVarley/ebsdsim) `.npz` and EMsoft `.h5`.
 
 One engine (Zig and WGSL) runs natively through wgpu-native and as WebAssembly on WebGPU, so the app and the Python package do the same thing.
 

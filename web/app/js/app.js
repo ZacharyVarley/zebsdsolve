@@ -249,6 +249,8 @@ async function applySetting(key, value) {
     status(String(e.message || e), true);
   }
   afterSettings([key]);
+  // (the other kind of a file's patterns is read by opening it again)
+  if (key === "stored_patterns" && st.scan?.storedKinds?.length === 2 && st.scanFiles?.length) await openScan(st.scanFiles);
 }
 
 /** Show the engine's settings again and redraw what the changed ones touch. */
@@ -528,7 +530,7 @@ function afterOpen(roi = null) {
   $("scan-meta").title = $("scan-meta").textContent;
   const facts = [
     ["format", s.format], ["map", `${s.rows} × ${s.cols} (${(s.rows * s.cols).toLocaleString()} patterns)`],
-    ["pattern", `${s.patH} × ${s.patW} ${s.dtype}`], ["size", gb >= 1 ? `${gb.toFixed(2)} GiB` : `${(s.bytes / 2 ** 20).toFixed(1)} MiB`],
+    ["pattern", `${s.patH} × ${s.patW} ${s.dtype}${s.storedKinds.length === 2 ? (s.unprocessed ? " · unprocessed" : " · processed") : ""}`], ["size", gb >= 1 ? `${gb.toFixed(2)} GiB` : `${(s.bytes / 2 ** 20).toFixed(1)} MiB`],
     ["background", s.hasBackground ? "stored" : "none"], ["PC", s.hasPc ? st.pcFile.map((v) => v.toFixed(4)).join("  ") : "none"],
     ["pixel", s.hasPx ? `${st.ze.geometry.pxUm.toFixed(1)} µm` : "none"],
   ];
@@ -2246,7 +2248,7 @@ function buildMenu() {
 
 async function main() {
   buildGeometry();
-  fields = buildFields(document, applySetting);
+  fields = buildFields(document, applySetting, () => st.scan);
   votes = createVotes({
     geometry: () => st.ze.geometry,
     // the candidate under the cross-hair becomes the pattern centre, to fit again from there

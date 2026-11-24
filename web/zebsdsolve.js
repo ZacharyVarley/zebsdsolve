@@ -426,7 +426,7 @@ const SYNC_EXPORTS = new Set(["ze_alloc", "ze_free", "ze_version", "ze_create", 
 
 // Struct layouts (src/engine.zig, geometry.zig, pcfit.zig, planefit.zig): [name, type, byte offset].
 const SCAN = [["rows", "u32", 0], ["cols", "u32", 4], ["patH", "u32", 8], ["patW", "u32", 12], ["pixel", "u32", 16],
-  ["hasBackground", "bool", 20], ["hasPc", "bool", 24], ["formatId", "u32", 28], ["voltageKv", "f64", 32], ["bytes", "f64", 40], ["hasPx", "bool", 48]];
+  ["hasBackground", "bool", 20], ["hasPc", "bool", 24], ["formatId", "u32", 28], ["voltageKv", "f64", 32], ["bytes", "f64", 40], ["hasPx", "bool", 48], ["patternKinds", "u32", 52]];
 const SCAN_SIZE = 56;
 const PHASE = [["side", "u32", 0], ["pointGroup", "u32", 4], ["spaceGroup", "u32", 8], ["laueId", "u32", 12],
   ["nFold", "u32", 16], ["mirror", "bool", 20], ["inversion", "bool", 24], ["voltageKv", "f64", 32]];
@@ -748,6 +748,9 @@ export class Zebsdsolve {
     });
     s.format = this._text((p, cap) => this.x.ze_scan_format(this.e, p, cap), 64);
     s.dtype = ["uint8", "uint16", "float32"][s.pixel];
+    // (the kinds of patterns the file stores side by side, and whether those read are the unprocessed)
+    s.storedKinds = ["processed", "unprocessed"].filter((_, i) => s.patternKinds & (1 << i));
+    s.unprocessed = !!(s.patternKinds & 4);
     return s;
   }
 

@@ -11,6 +11,11 @@ const COMPONENTS = "Components kept of a dictionary. More find more patterns and
 const EPOCHS = "Passes of Oja's rule over the dictionary to learn its components. One is nearly enough.";
 
 export const FIELDS = {
+  // (`when` and `of` are given the settings and the scan open, or null)
+  read: [
+    { key: "stored_patterns", label: "patterns", type: "enum", options: [["processed", "processed"], ["unprocessed", "unprocessed"]], when: (s, scan) => scan?.storedKinds?.length === 2,
+      hint: "Which patterns are read from a file that stores two kinds side by side (an Oxford acquisition can): processed, as the acquisition prepared them, or unprocessed, the detector's own values, with their own static background. The scan opens again with the other. A file with one kind is read as it is." },
+  ],
   scan: [
     { key: "map_rows", label: "rows", type: "int", min: 0, hint: "Rows of the map, for files that do not record it. 0: as the file says." },
     { key: "map_cols", label: "columns", type: "int", min: 0, hint: "Columns of the map, for files that do not record it. 0: as the file says." },
@@ -203,8 +208,9 @@ export const GEOMETRY = [
   ["pxUm", "pixel µm", "The size of one stored pattern pixel on the detector (a binned pixel, when the patterns were binned): with the scan's steps, how far the beam moved between patterns, in pixels, until a plane of source points is fitted: the plane then says where the beam stood, and this only how its steps compare with the scan's. It is the file's when the file records one, else the detector's width over the pattern's pixels across, until a value is typed here. Cleared (or 0), it goes back to that. No fit changes it.", 10, 1],
 ];
 
-/** Build the controls of every `.fields[data-group]`; `apply(key, value)` sets the engine's value. */
-export function buildFields(root, apply) {
+/** Build the controls of every `.fields[data-group]`; `apply(key, value)` sets the engine's value,
+ *  and `scan()` gives the scan open (or null) for the fields that depend on it. */
+export function buildFields(root, apply, scan = () => null) {
   const inputs = [];
   for (const box of root.querySelectorAll(".fields[data-group]")) {
     for (const f of FIELDS[box.dataset.group] || []) {
@@ -269,9 +275,9 @@ export function buildFields(root, apply) {
         if (!(f.key in settings)) continue;
         if (f.type === "bool") input.checked = !!settings[f.key]; else input.value = String(settings[f.key]);
         if (readout) readout.textContent = String(settings[f.key]);
-        el.dataset.off = f.when && !f.when(settings) ? "1" : "0";
+        el.dataset.off = f.when && !f.when(settings, scan()) ? "1" : "0";
         // a parameter of a choice (the method's, the early sweeps') shows only under its own
-        if (f.of) el.hidden = !f.of(settings);
+        if (f.of) el.hidden = !f.of(settings, scan());
       }
     },
   };

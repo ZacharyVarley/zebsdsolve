@@ -217,7 +217,9 @@ class Solver:
         """Open a scan file, and any side files it needs after it. NORDIF's Pattern.dat needs its
         Setting.txt, which is picked up from beside it when not given; an EDAX .up1 / .up2 can take
         its scan's .ang (the map's shape, the steps, image quality and the pattern centre). The
-        region of interest goes back to the whole map."""
+        region of interest goes back to the whole map. A file that stores processed and
+        unprocessed patterns side by side (an Oxford acquisition can) is read as the setting
+        `stored_patterns` says; `scan["pattern_kinds"]` names the kinds it stores."""
         paths = [str(p) for p in paths]
         if len(paths) == 1 and paths[0].lower().endswith(".dat"):
             side = os.path.join(os.path.dirname(paths[0]), "Setting.txt")
@@ -286,6 +288,8 @@ class Solver:
             "rows": s.rows, "cols": s.cols, "pattern_shape": (s.pat_h, s.pat_w), "dtype": ["uint8", "uint16", "float32"][s.pixel],
             "format": fmt, "has_background": bool(s.has_background), "has_pc": bool(s.has_pc), "has_px": bool(s.has_px),
             "voltage_kv": s.voltage_kv or None, "bytes": int(s.bytes),
+            "pattern_kinds": tuple(k for b, k in ((1, "processed"), (2, "unprocessed")) if s.pattern_kinds & b),
+            "unprocessed": bool(s.pattern_kinds & 4),
         }
 
     def shape(self, full=False):

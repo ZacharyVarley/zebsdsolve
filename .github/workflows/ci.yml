@@ -140,15 +140,16 @@ jobs:
       - name: App launcher
         run: cd "$RUNNER_TEMP" && "$RUNNER_TEMP/venv/bin/python" test_app.py
 
-      - name: Scan readers on generated files (EDAX UP headers and ANG companions; stored quality maps; HDF5 chunk trees; stored orientations and their frames)
+      - name: Scan readers on generated files (EDAX UP headers and ANG companions; stored quality maps; HDF5 chunk trees; processed and unprocessed patterns; stored orientations and their frames)
         run: |
           "$RUNNER_TEMP/venv/bin/pip" install --quiet h5py
-          cp tests/test_up_header.py tests/test_up_ang.py tests/test_stored_overview.py tests/test_chunk_tree.py tests/test_stored_orientations.py "$RUNNER_TEMP/"
+          cp tests/test_up_header.py tests/test_up_ang.py tests/test_stored_overview.py tests/test_chunk_tree.py tests/test_pattern_kinds.py tests/test_stored_orientations.py "$RUNNER_TEMP/"
           cd "$RUNNER_TEMP"
           "$RUNNER_TEMP/venv/bin/python" test_up_header.py
           "$RUNNER_TEMP/venv/bin/python" test_up_ang.py
           "$RUNNER_TEMP/venv/bin/python" test_stored_overview.py
           "$RUNNER_TEMP/venv/bin/python" test_chunk_tree.py
+          "$RUNNER_TEMP/venv/bin/python" test_pattern_kinds.py
           ZEBSDSOLVE_TESTDATA="$GITHUB_WORKSPACE/testdata" "$RUNNER_TEMP/venv/bin/python" test_stored_orientations.py
 
       - name: Tutorials (examples/ run as notebooks on the installed wheel)

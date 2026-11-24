@@ -28,6 +28,8 @@ pub const Interp = enum { bilinear, bicubic, keys6 };
 pub const IpfColors = @import("sym.zig").Colors;
 /// Which stages work on patterns at their stored size rather than the reduced one.
 pub const FullResolution = enum { none, scores, refine };
+/// Which patterns are read from a file that stores two kinds side by side.
+pub const StoredPatterns = enum { processed, unprocessed };
 
 pub const Settings = struct {
     // ── scan ──
@@ -37,6 +39,11 @@ pub const Settings = struct {
     map_cols: u32 = 0,
     pattern_height: u32 = 0,
     pattern_width: u32 = 0,
+    /// Which patterns are read from a file that stores two kinds side by side (an Oxford
+    /// acquisition's Processed and Unprocessed Patterns): processed, as the acquisition
+    /// prepared them, or unprocessed, the detector's own values (with their own static
+    /// background). A file with one kind is read as it is. Taken when a scan is opened.
+    stored_patterns: StoredPatterns = .processed,
     /// Which way the beam moves on the sample as the map index grows, in the sample frame the
     /// detector geometry is given in (x down the tilted surface toward the detector, y along
     /// the detector's columns): +1 or −1 along y for a column step, along x for a row step.

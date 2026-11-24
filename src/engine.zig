@@ -67,7 +67,10 @@ pub const ScanInfo = extern struct {
     bytes: f64 = 0,
     /// 1 when the file gave a pixel size
     has_px: u32 = 0,
-    _pad: u32 = 0,
+    /// the kinds of patterns the file stores side by side (scan.zig's KIND_*: 1 processed,
+    /// 2 unprocessed, 3 both; 0: one kind it does not name), and (4) when those read are the
+    /// unprocessed
+    pattern_kinds: u32 = 0,
 };
 
 pub const PhaseInfo = extern struct {
@@ -816,6 +819,7 @@ pub const Engine = struct {
             .cols = self.set.map_cols,
             .pat_h = self.set.pattern_height,
             .pat_w = self.set.pattern_width,
+            .unprocessed = self.set.stored_patterns == .unprocessed,
         }) catch |e| {
             return e;
         };
@@ -824,6 +828,12 @@ pub const Engine = struct {
         self.wholeMap();
         try self.adoptInfo(s.info);
         self.events.log("opened {s}: {d} × {d} patterns of {d} × {d}", .{ s.formatName(), s.info.rows, s.info.cols, s.info.pat_h, s.info.pat_w });
+        const kinds = s.info.pattern_kinds;
+        if (kinds == scan_mod.KIND_PROCESSED | scan_mod.KIND_UNPROCESSED) {
+            self.events.log("the file stores processed and unprocessed patterns: reading the {s} (stored_patterns)", .{if (s.info.unprocessed) "unprocessed" else "processed"});
+        } else if (kinds != 0 and s.info.unprocessed != (self.set.stored_patterns == .unprocessed)) {
+            self.events.log("stored_patterns asks for {s} patterns; the file stores only {s} ones, read instead", .{ @tagName(self.set.stored_patterns), if (s.info.unprocessed) "unprocessed" else "processed" });
+        }
         if (s.info.pc_note.len != 0) self.events.log("{s}", .{s.info.pc_note});
         if (!std.math.isNan(s.info.detector_rot[0])) self.events.log("the detector's orientation as the file stores it: {d:.2}° from the nominal one", .{std.math.radiansToDegrees(rot.norm(s.info.detector_rot))});
     }
@@ -897,6 +907,7 @@ pub const Engine = struct {
             .file => |s| {
                 out.has_background = @intFromBool(s.background.len != 0);
                 out.format = @intFromEnum(s.format);
+                out.pattern_kinds = s.info.pattern_kinds | @as(u32, if (s.info.unprocessed) 4 else 0);
                 out.bytes = @floatFromInt(s.files[0].size);
             },
             .memory => |m| {
