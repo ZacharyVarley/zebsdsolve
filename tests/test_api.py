@@ -342,7 +342,8 @@ def main():
     check("indexed where the plane puts the sources, the orientations are the true ones", len(cells) == 96 and np.median(d) < 0.15,
           f"median {np.median(d):.3f}° (the fit patterns' own, each with its own source: {np.median(d_own):.3f}°)")
 
-    # Neither vote can replace a fitted plane when the entire grid falls below pc_z_min.
+    # neither vote replaces a fitted plane, nor the record of the last search, when every
+    # candidate is nearer than pc_z_min
     before_geometry = s.geometry
     before_scores = s.pc_scores()
     before_levels = s.pc_levels()

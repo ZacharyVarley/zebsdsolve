@@ -91,6 +91,14 @@ notes.
   their pattern centre 2 px from it (9 px from the reading before). On a ferrite map the
   misorientation to Esprit's orientations fell from 1.75° to 1.02°.
 
+- A pattern-centre search whose every candidate lay nearer than `pc_z_min` installed a centre
+  anyway (below zero on the nickel scan, from a fitted plane and `pc_z_min` 1), and a search
+  that failed had already dropped the fitted plane and the last search's record. The search now
+  refuses a grid with nothing it may score (`NoPcCandidates`) or no pattern's ballot
+  (`NoPcSupport`), and keeps the geometry, the plane, the record and the fit patterns until it
+  has a centre to put in their place; the slices nearer than `pc_z_min` are no longer scored at
+  all. Identical results on every case of `scripts/bench.py` (#16, by
+  [Tijmenvermeij](https://github.com/Tijmenvermeij)).
 - **Auto fit geometry**, asked for a projective plane, said projective when it took a tilt line
   and installed it as the affine plane it is (#10, by [Tijmenvermeij](https://github.com/Tijmenvermeij)).
 - The joint fit of a projective plane stopped with `TooFewFitPatterns` when it started from one

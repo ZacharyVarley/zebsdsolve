@@ -118,6 +118,8 @@ fn axis(gpa: std.mem.Allocator, centre: f64, span: f64, steps: u32) ![]f64 {
     return a;
 }
 
+/// Whether a candidate's distance may be scored: in front of the detector, and no nearer than
+/// settings.pc_z_min.
 fn validDepth(z: f64, min: f64) bool {
     return std.math.isFinite(z) and z > 0 and z >= min;
 }
@@ -163,23 +165,28 @@ pub const Level = struct {
 };
 
 const Ballot = struct { at: [3]f64, w: f64 };
+/// A grid's choice: where it lies in candidate steps, and the candidate nearest it.
 const Peak = struct { at: [3]f64, candidate: usize };
+/// The candidates a grid scores (x innermost): its slices at or beyond pc_z_min, which are a
+/// range of the grid; the others hold zero.
+const Scored = struct { lo: usize, hi: usize };
 
-/// The maximum of a volume over candidates with positive mean correlation.
-fn supportedMaximum(m: []const f32, scores: []const f32) !usize {
+/// The candidate where a volume is largest among those scored, if it is above zero there.
+fn maxOf(m: []const f32, sc: Scored) !usize {
     var best: ?usize = null;
     var top: f32 = 0;
-    for (m, 0..) |v, i| {
-        if (scores[i] > 0 and std.math.isFinite(v) and v > top) {
+    for (sc.lo..sc.hi) |i| {
+        if (std.math.isFinite(m[i]) and m[i] > top) {
             best = i;
-            top = v;
+            top = m[i];
         }
     }
     return best orelse error.NoPcSupport;
 }
 
-/// Interpolate the peak only where both neighbouring candidates have support.
-fn peakAt(m: []const f32, scores: []const f32, n: [3]u32, best: usize) [3]f64 {
+/// A volume's maximum at `best`, each coordinate moved between candidates by the parabola
+/// through its neighbours, where both are scored.
+fn peakAt(m: []const f32, sc: Scored, n: [3]u32, best: usize) [3]f64 {
     const at = [3]u32{ @intCast(best % n[0]), @intCast((best / n[0]) % n[1]), @intCast(best / (n[0] * n[1])) };
     const strides = [3]usize{ 1, n[0], n[0] * n[1] };
     var out: [3]f64 = undefined;
@@ -188,7 +195,7 @@ fn peakAt(m: []const f32, scores: []const f32, n: [3]u32, best: usize) [3]f64 {
         if (n[a] < 3 or at[a] == 0 or at[a] == n[a] - 1) continue;
         const lo = best - strides[a];
         const hi = best + strides[a];
-        if (scores[lo] > 0 and scores[hi] > 0) out[a] += vertex(m[lo], m[best], m[hi]);
+        if (lo >= sc.lo and hi < sc.hi) out[a] += vertex(m[lo], m[best], m[hi]);
     }
     return out;
 }
@@ -223,9 +230,9 @@ fn splat(ballots: []const Ballot, n: [3]u32, sigma: [3]f64, out: []f32) void {
 /// against its own best and weighted by their scores, spread into a density whose mode wins;
 /// the mode is moved once to the weighted centre of the ballots near it and found again among
 /// those alone. `step`: the candidates' spacing along x, y, z (the spread and the inlier
-/// radius are widths on the detector, the same on every grid). Returns where the choice lies
-/// in candidate steps; `density` gets the first density.
-fn consensus(gpa: std.mem.Allocator, set: *const engine.Settings, pat_scores: []const f32, n_pat: u32, n: [3]u32, step: [3]f64, scores: []const f32, density: []f32, counts: *[2]u32) !Peak {
+/// radius are widths on the detector, the same on every grid). `density` gets the first
+/// density; NoPcSupport when no pattern casts a ballot.
+fn consensus(gpa: std.mem.Allocator, set: *const engine.Settings, pat_scores: []const f32, n_pat: u32, n: [3]u32, step: [3]f64, scored: Scored, density: []f32, counts: *[2]u32) !Peak {
     const n_c: usize = n[0] * n[1] * n[2];
     const k: usize = @min(set.pc_top_k, n_c);
     // (never narrower than the candidates can show)
@@ -273,8 +280,8 @@ fn consensus(gpa: std.mem.Allocator, set: *const engine.Settings, pat_scores: []
     if (ballots.items.len == 0) return error.NoPcSupport;
     counts.* = .{ @intCast(ballots.items.len), 0 };
     splat(ballots.items, n, sigma, density);
-    const best = try supportedMaximum(density, scores);
-    const mode = peakAt(density, scores, n, best);
+    const best = try maxOf(density, scored);
+    const mode = peakAt(density, scored, n, best);
     const r2 = set.pc_inlier_radius * set.pc_inlier_radius;
     const near = struct {
         fn of(b: Ballot, p: [3]f64, st: [3]f64, lim: f64) bool {
@@ -300,8 +307,8 @@ fn consensus(gpa: std.mem.Allocator, set: *const engine.Settings, pat_scores: []
     const inl = try gpa.alloc(f32, n_c);
     defer gpa.free(inl);
     splat(ballots.items[0..kept], n, sigma, inl);
-    const winner = try supportedMaximum(inl, scores);
-    return .{ .at = peakAt(inl, scores, n, winner), .candidate = winner };
+    const winner = try maxOf(inl, scored);
+    return .{ .at = peakAt(inl, scored, n, winner), .candidate = winner };
 }
 
 pub fn clearHistory(e: *Engine) void {
@@ -314,7 +321,9 @@ pub fn run(e: *Engine) !Result {
     const g = &e.g;
     const s = &e.set;
     e.cancel = false;
-    // Use the scan's steps for the search. Drop a previous plane only when installing a fit.
+    // (the vote moves one pattern centre, the scan's steps saying how the beam went from it: a
+    // plane fitted before goes, but only once the search has a centre to put in its place; until
+    // then it works on a copy)
     var geo = e.geo;
     geo.plane_kind = 0;
     const n_ph = e.phases.items.len;
@@ -399,7 +408,8 @@ pub fn run(e: *Engine) !Result {
         for (axes[0..2]) |a| for (a) |v| {
             if (!std.math.isFinite(v)) return error.NoPcCandidates;
         };
-        // The legal depth slices form a contiguous range on the grid.
+        // (the slices it may score, at or beyond pc_z_min: a range of the grid, since the
+        // distances rise along it)
         var z0: usize = 0;
         while (z0 < axes[2].len and !validDepth(axes[2][z0], s.pc_z_min)) : (z0 += 1) {}
         if (z0 == axes[2].len) return error.NoPcCandidates;
@@ -407,6 +417,7 @@ pub fn run(e: *Engine) !Result {
         while (z1 < axes[2].len and validDepth(axes[2][z1], s.pc_z_min)) : (z1 += 1) {}
         const first_c: u32 = @intCast(z0 * xy);
         const end_c: u32 = @intCast(z1 * xy);
+        const scored: Scored = .{ .lo = first_c, .hi = end_c };
         var c0 = first_c;
         var since_wait: u32 = 0;
         while (c0 < end_c) : (c0 += cand_per_tile) {
@@ -455,7 +466,7 @@ pub fn run(e: *Engine) !Result {
         try g.wait();
         if (e.cancel) return error.Cancelled;
 
-        // The skipped depths stay at zero in the reported score volumes.
+        // (the slices not scored stay zero in the volumes kept)
         for (first_c..end_c) |c| {
             for (0..n_ph) |p| for (0..n_pat) |b| {
                 const v = &peaks_h[p * per_phase + (c * n_pat + b) * 8 + 4];
@@ -485,7 +496,7 @@ pub fn run(e: *Engine) !Result {
             }
             scores[c] = @floatCast(sum / @as(f64, @floatFromInt(n_pat)));
         }
-        best_c = @intCast(try supportedMaximum(scores, scores));
+        best_c = @intCast(try maxOf(scores, scored));
         res.n_candidates += end_c - first_c;
         {
             // this grid, for the record
@@ -535,7 +546,7 @@ pub fn run(e: *Engine) !Result {
             var counts: [2]u32 = .{ 0, 0 };
             var step: [3]f64 = undefined;
             for (0..3) |a| step[a] = if (steps[a] > 1) axes[a][1] - axes[a][0] else 0;
-            const winner = try consensus(gpa, s, lvl.pat_scores, n_pat, steps, step, scores, lvl.density, &counts);
+            const winner = try consensus(gpa, s, lvl.pat_scores, n_pat, steps, step, scored, lvl.density, &counts);
             lvl.ballots = counts[0];
             lvl.inliers = counts[1];
             best_c = @intCast(winner.candidate);
@@ -544,7 +555,7 @@ pub fn run(e: *Engine) !Result {
         }
         const bi = [3]u32{ best_c % steps[0], (best_c / steps[0]) % steps[1], best_c / xy };
         const peak = voted_peak orelse if (level + 1 == s.pc_levels)
-            peakAt(scores, scores, steps, best_c)
+            peakAt(scores, scored, steps, best_c)
         else
             [3]f64{ @floatFromInt(bi[0]), @floatFromInt(bi[1]), @floatFromInt(bi[2]) };
         lvl.peak = peak;
@@ -606,7 +617,8 @@ pub fn run(e: *Engine) !Result {
     }
     if (e.cancel) return error.Cancelled;
 
-    // Install the geometry and diagnostics together after all fallible work.
+    // what the search found, kept together now that nothing more can fail: the geometry (the
+    // plane gone), the record of its grids, its scores and the fit patterns' orientations
     geo.pc = pc;
     e.geo = geo;
     res.pc = pc;
