@@ -354,6 +354,10 @@ body[data-resize="row"] * { cursor: row-resize !important; }
 body[data-resize="col"] * { cursor: col-resize !important; }
 .pane-bar { min-height: var(--bar); flex: none; display: flex; align-items: center; gap: 4px 8px; padding: 0 8px; background: var(--panel); border-bottom: 1px solid var(--line); user-select: none; overflow: hidden; }
 .meta { color: var(--faint); font: 11px var(--mono); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+/* (the cell under the pointer, and its scores once indexed, in room kept for them: the map's
+   bar does not move as they come and go) */
+#map-hover { flex: 0 1 52ch; text-align: right; }
+.app[data-scan="0"] #map-hover { display: none; }
 .meta.cell { color: var(--muted); }
 .pat-pane .pane-bar { gap: 4px 12px; }
 .seg { display: inline-flex; flex: none; border: 1px solid var(--line); border-radius: var(--rad-s); overflow: hidden; background: var(--field); }

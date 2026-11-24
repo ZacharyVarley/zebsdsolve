@@ -76,7 +76,10 @@ notes.
   them), not under Raw stream; the conventions drawing's labels keep off each other and its
   lines; every choice draws the same caret, and a setting's value reads as text beside its
   muted label; the map's region and key tools and the fit-pattern toggle wait for a scan; the
-  plane fit's distance map keeps its edge squares inside the map; the page has an icon.
+  plane fit's distance map keeps its edge squares inside the map; the readout of the cell under
+  the pointer keeps its room, so the map's bar no longer shifts when the pointer moves onto an
+  indexed cell in a narrower window (after #20, by [Tijmenvermeij](https://github.com/Tijmenvermeij));
+  the page has an icon.
 - `.ctf` and `.ang` wrote a hexagonal phase with the masters' crystal axes (X ∥ a), 30° about c
   from Oxford's (X ∥ a\*), and in a sample frame rotated 90° from Oxford's and Bruker's: on an
   Oxford map of zirconium the `.ctf` lay a median 84° from AZtec's own orientations. A scan
