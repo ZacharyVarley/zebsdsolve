@@ -65,6 +65,11 @@ notes.
 
 ### Changed
 
+- **Auto's one centre** keeps the scan's steps as before, but its pattern centre is now where
+  the fit patterns stand on average, less where the steps put them, not the vote's. On the
+  benchmark's faint map, the only one that takes one centre, the pattern centre comes within
+  0.0008 of the answer, not 0.008, and indexing within 1° goes from 69 % to 97 % (median
+  0.91° → 0.34°). The app shows the plane after it, as after any other model.
 - **Full size for: everything** is gone (`full_resolution` `"all"`): it ran the search, the
   refinement and the scores on the patterns as stored while the reduced size was only looked
   at, which is what `binning` 1 does without reading every pattern twice. A project or a

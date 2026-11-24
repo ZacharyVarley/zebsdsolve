@@ -527,7 +527,7 @@ class Solver:
         `set_geometry`; what earlier fits left is not used, so the same scan and settings give
         the same fit): the vote for the pattern centre (`fit_pc`), then the fit patterns' own
         source points from there, and of the ways they may move over the scan the simplest the
-        map supports: one centre (the vote's geometry stays), a tilt line (PCx the same
+        map supports: one centre (with the scan's steps), a tilt line (PCx the same
         everywhere, PCy and PCz along the rows) or the plane (`plane_kind`). Each is asked where
         a block of the map stands from the others; `models` gives each one's error so (`cv`,
         and `cv_se`, the standard error of its difference from the best), `model` the one taken.

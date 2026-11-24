@@ -641,6 +641,23 @@ def main():
           blank_in < 0.15 and crystal_in > 0.9 and e_z < 0.003 and none_fitted,
           f"{100 * crystal_in:.0f} % of the crystals' fit patterns took part and {100 * blank_in:.0f} % of the blank cells'; pattern centre within {e_z:.5f}; on noise alone: {noise_said}")
     s.configure(toy_blank=0, toy_contrast=1, toy_background_sigma=0, toy_noise_seed=0, toy_counts=20, toy_height=60, toy_width=60, toy_grains=24)
+    # a map too faint to tell the source's path (the benchmark's "faint"): Auto takes one centre,
+    # the pattern centre where its fit patterns stand, not the vote's
+    f = ze.Solver()
+    try:
+        f.add_phase(NI)
+        truth = (0.46, 0.27, 0.55)
+        f.set_geometry(pc=truth, rot=(0, 0, 0), sample_tilt_deg=70, detector_tilt_deg=0, px_um=0, step_x_um=2, step_y_um=2)
+        f.synthesize(toy_seed=3, toy_rows=24, toy_cols=32, toy_grains=40, toy_blank=0, toy_spread_deg=0, toy_height=60, toy_width=60, toy_counts=3, toy_contrast=0.2, toy_background_sigma=0.4)
+        f.set_geometry(pc=(0.472, 0.26, 0.562), plane_kind="none")
+        a = f.fit_geometry()
+        e_auto = np.abs(np.array(a["pc"]) - truth).max()
+        e_vote = np.abs(np.array(a["start_pc"]) - truth).max()
+        on_steps = f.geometry["plane_kind"] == "none"
+    finally:
+        f.close()
+    check("one centre keeps the scan's steps and takes its fit patterns' pattern centre", a["model"] == "centre" and on_steps and e_auto < 0.002 and e_vote > 3 * e_auto,
+          f"{a['model']}: within {e_auto:.5f}, the vote {e_vote:.5f}")
     check("the masters' symmetries shape the search", ni["n_fold"] == 4 and ni["inversion"] and gan["n_fold"] in (2, 6) and not gan["inversion"], f"nickel: order {ni['n_fold']} about z, inversion; GaN: order {gan['n_fold']} at least, none")
     s.close()
 

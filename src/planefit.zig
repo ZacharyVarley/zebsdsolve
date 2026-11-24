@@ -932,7 +932,7 @@ pub fn plane(e: *Engine) !PlaneResult {
 }
 
 /// `plane`, or (`compare`) with the simpler models checked as well: the geometry takes the
-/// simplest the map supports (choose). One centre leaves the vote's geometry as it is.
+/// simplest the map supports (choose). One centre keeps the scan's steps (stepsKept).
 fn fitPlane(e: *Engine, compare: bool) !PlaneResult {
     const s = &e.set;
     const before = e.geo;
@@ -982,8 +982,23 @@ fn fitPlane(e: *Engine, compare: bool) !PlaneResult {
             P = plane_mod.toPlane(model, theta, fr) orelse return error.TooFewFitPatterns;
         } else P = plane_mod.fitModel(model, pts, fr) orelse return error.TooFewFitPatterns;
     }
-    const said = plane_mod.said(P, &before, info.rows, info.cols, aspect, h_px, e.scanSigns()[0], e.scanSigns()[1]);
+    var said = plane_mod.said(P, &before, info.rows, info.cols, aspect, h_px, e.scanSigns()[0], e.scanSigns()[1]);
+    if (model == .centre) said.pc = try stepsKept(fit, pts, fr, aspect, &before, said.pc, a);
     return finishPlane(e, fit, &res, &before, P, model, full, kind, pts, fr, aspect, said, info);
+}
+
+/// One centre: the map does not tell the source's path, so the scan's steps keep it, and the
+/// pattern centre at the map's middle is the model's (`pc`: where the fit patterns stand on
+/// average) less where the steps put them on average, each weighed as in the fit.
+fn stepsKept(fit: *const Fit, pts: []const plane_mod.Point, fr: plane_mod.Frame, aspect: f64, before: *const Geometry, pc: [3]f64, a: std.mem.Allocator) ![3]f64 {
+    const R = before.rotation();
+    const by_steps = try a.dupe(plane_mod.Point, pts);
+    for (by_steps, 0..) |*pt, b| {
+        const at = Geometry.pcOf(R, fit.base[b], fit.sz[0], fit.sz[1]);
+        pt.y = .{ (at[0] - before.pc[0]) * aspect, at[1] - before.pc[1], at[2] - before.pc[2] };
+    }
+    const off = plane_mod.fitTheta(.centre, by_steps, fr) orelse return error.TooFewFitPatterns;
+    return .{ pc[0] - off[2] / aspect, pc[1] - off[5], pc[2] - off[8] };
 }
 
 /// The way of Winkelmann et al. and kikuchipy: each pattern's own source point (after `settle`
@@ -1135,8 +1150,8 @@ fn finishPlane(e: *Engine, fit: *Fit, res_out: *PlaneResult, before_in: *const G
         }
     }
 
-    // the geometry takes the plane (a tilt line is an affine plane; one centre leaves the
-    // vote's geometry, its pattern centre and the scan's steps, as it is)
+    // the geometry takes the plane (a tilt line is an affine plane; one centre, its pattern
+    // centre with the scan's steps)
     res.kind = switch (model) {
         .centre => 0,
         .line, .affine => @intFromEnum(plane_mod.Kind.affine),
@@ -1144,15 +1159,15 @@ fn finishPlane(e: *Engine, fit: *Fit, res_out: *PlaneResult, before_in: *const G
     };
     res.frame = @intFromBool(s.plane_frame == .follow and model != .centre);
     res.plane = P;
-    res.pc = if (model == .centre) before.pc else said.pc;
+    res.pc = said.pc;
     res.said_rot = said.rot;
     res.step = said.step;
     res.skew = said.skew;
     e.geo = before;
+    e.geo.pc = said.pc;
     if (model != .centre) {
         e.geo.plane_kind = res.kind;
         e.geo.plane = P;
-        e.geo.pc = said.pc;
         if (s.plane_frame == .follow) e.geo.rot = said.rot;
     }
     res.rot = e.geo.rot;
@@ -1160,8 +1175,10 @@ fn finishPlane(e: *Engine, fit: *Fit, res_out: *PlaneResult, before_in: *const G
     e.plane_points.clearRetainingCapacity();
     var sq: [3]f64 = .{ 0, 0, 0 };
     var used: f64 = 0;
+    const R_before = before.rotation();
     for (pts, 0..) |pt, b| {
-        const pc = plane_mod.at(P, pt.row, pt.col);
+        // (one centre: where the geometry now puts the source, by the scan's steps)
+        const pc = if (model == .centre) rot.add(rot.sub(Geometry.pcOf(R_before, fit.base[b], fit.sz[0], fit.sz[1]), before.pc), said.pc) else plane_mod.at(P, pt.row, pt.col);
         const own: [3]f64 = .{ pt.y[0] / aspect, pt.y[1], pt.y[2] };
         try e.plane_points.append(gpa, .{ .cell = fit.cells[b], .pc = own, .fit = pc, .ncc = if (fit.use[b]) fit.keep[b].ncc else fit.seed_ncc[b], .used = @intFromBool(pt.used) });
         if (!pt.used) continue;
@@ -1197,7 +1214,7 @@ fn finishPlane(e: *Engine, fit: *Fit, res_out: *PlaneResult, before_in: *const G
 
     const deg = 180.0 / std.math.pi;
     if (compare) e.events.log("the source over the scan, each model asked where a block of the map stands from the others (mean misfit a point): one centre {d:.3}, a tilt line {d:.3}, the {s} plane {d:.3}; the map supports {s}", .{ res.cv[0], res.cv[1], @tagName(kind), res.cv[@intFromEnum(full)], switch (model) {
-        .centre => "one centre: the vote's geometry stays",
+        .centre => "one centre, with the scan's steps",
         .line => "a tilt line: PCx the same everywhere, PCy and PCz along the rows",
         else => "the plane",
     } });

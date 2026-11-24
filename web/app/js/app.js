@@ -1727,8 +1727,7 @@ function afterPlane(r, vote = []) {
   st.plane = { r, pts: st.ze.planePoints() };
   showKv($("fit-readout"), [...planeReadout(r, vote), ...againstTrueGeometry()]);
   done("geometry");
-  // (one centre leaves the vote's geometry: its search and the comparison are the view then)
-  selectDock(PLANE_MODELS[r.model] === "centre" ? "votes" : "plane");
+  selectDock("plane");
   planeView.show(r, st.plane.pts, st.scan);
   geometryChanged(true);
   drawMapOverlay();
