@@ -6,6 +6,8 @@ notes.
 
 ## Unreleased
 
+## 0.2.4 — 2026-11-24
+
 ### Changed
 
 - **Indexing is 2.5 to 2.8 times as fast.** Sustained, after a warm-up, with CLAHE on, on an
