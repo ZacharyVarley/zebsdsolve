@@ -6,7 +6,10 @@ notes.
 
 ## Unreleased
 
-## 0.2.5 — 2026-11-25
+## 0.2.6 — 2026-11-25
+
+0.2.5 once more: 0.2.5 reached PyPI, but GitHub failed its release (an upload answered HTTP 500)
+and its site's deployment, so it has neither. Nothing else changed.
 
 ### Fixed
 
