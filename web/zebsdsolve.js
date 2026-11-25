@@ -297,13 +297,13 @@ function gpuImports(state) {
       const op = () => { if (!state.deviceLoss) { endPass(); encoder().copyBufferToBuffer(a, soff, b, doff, size); } };
       if (backlog) defer(op); else op();
     },
-    readBuffer(src, offset, size, dst) {
+    readBuffer(src, offset, size, dst, seq) {
       if (state.deviceLoss) return;
       st.reads++;
       const a = bufs[src];
       const padded = Math.ceil(size / 4) * 4;
       const staging = device.createBuffer({ size: padded, usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST });
-      const r = { staging, size, dst, promise: null, issued: false };
+      const r = { staging, size, dst, seq, promise: null, issued: false };
       state.reads.push(r);
       const op = () => {
         if (state.deviceLoss) return;
@@ -325,14 +325,17 @@ function gpuImports(state) {
       return b.length;
     },
     // Suspending import (JS Promise Integration): the module's stack waits here while pipelines
-    // still compiling and the submitted reads resolve, then resumes as if the call had blocked.
-    wait: new WebAssembly.Suspending(async () => {
+    // still compiling and the submitted reads numbered up to `upto` (all of them: −1) resolve,
+    // then resumes as if the call had blocked. Later reads stay pending (the next batch, in
+    // flight while this one is taken).
+    wait: new WebAssembly.Suspending(async (upto) => {
       const t0 = performance.now();
       st.waits++;
       try {
         if (drained) { await drained.promise; st.compileWaitMs += performance.now() - t0; }
-        const reads = state.reads;
-        state.reads = [];
+        const k = upto < 0 ? state.reads.length : state.reads.findLastIndex((r) => r.seq <= upto) + 1;
+        const reads = state.reads.slice(0, k);
+        state.reads = state.reads.slice(k);
         // Keep wasm's destinations alive until every mapping settles, even if one fails.
         const settled = await Promise.allSettled(reads.map((r) => {
           if (!r.promise) r.staging.destroy();
@@ -1226,7 +1229,7 @@ export class Zebsdsolve {
     });
   }
 
-  /** Index the next batch of the sweep in progress: the status, with `left` cells still to visit (0: done). */
+  /** Index the next few batches of the sweep in progress: the status, with `left` cells still to visit (0: done). */
   indexStep() {
     return this._serial(async () => {
       const left = this._check(await this.x.ze_index_step(this.e), "index");
@@ -1234,7 +1237,7 @@ export class Zebsdsolve {
     });
   }
 
-  /** Index the region, calling progress(status) after each batch (return false to stop). */
+  /** Index the region, calling progress(status) after each step (a few batches; return false to stop). */
   async index(progress = null) {
     await this.indexBegin();
     for (;;) {

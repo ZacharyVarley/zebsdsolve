@@ -36,12 +36,61 @@ const FFT_MAX: u32 = 1024u;
 // puts before this text (shaders.zig): 64 unless tuning found this GPU faster with another.
 var<workgroup> fs: array<vec2<f32>, 1024>;
 
-// The butterfly stages over the lpw bit-reversed lines in fs.
+// Where point i of the lines lives in fs: its low four bits crossed with the four above them
+// (a bijection). Bit-reversed loads and the first stages touch points four or eight apart, which
+// without it would meet in a few of the memory's banks.
+fn fsw(i: u32) -> u32 {
+    return i ^ ((i >> 4u) & 15u);
+}
+
+// x · w, w a twiddle as the butterflies take it
+fn twiddled(x: vec2<f32>, t: vec2<f32>) -> vec2<f32> {
+    let w = vec2<f32>(t.x, -fp.sign * t.y);
+    return vec2<f32>(x.x * w.x - x.y * w.y, x.x * w.y + x.y * w.x);
+}
+
+// The butterfly stages over the lpw bit-reversed lines in fs, two at a time: an invocation takes
+// four points through both stages in its registers (stage st pairs i0 with i1 and i2 with i3,
+// stage st + 1 then i0 with i2 and i1 with i3), so the workgroup's memory is read and written,
+// and the workgroup waits, once for the two. The arithmetic is the radix-2 stages' own, in the
+// same order; an odd last stage runs alone.
 fn fft_core(tid: u32, lpw: u32) {
     let hn = fp.n >> 1u;
     let total = lpw * hn;
     let lh = fp.log2n - 1u;
-    for (var st = 0u; st < fp.log2n; st = st + 1u) {
+    let qn = fp.n >> 2u;
+    var st0 = 0u;
+    for (; st0 + 1u < fp.log2n; st0 = st0 + 2u) {
+        let half = 1u << st0;
+        let t1 = fp.tw_len >> (st0 + 1u);
+        let t2 = fp.tw_len >> (st0 + 2u);
+        let lq = fp.log2n - 2u;
+        for (var e = tid; e < lpw * qn; e = e + FFT_WG) {
+            let r = e & (qn - 1u);
+            let j = r & (half - 1u);
+            let i0 = ((e >> lq) << fp.log2n) + ((r >> st0) << (st0 + 2u)) + j;
+            let i1 = i0 + half;
+            let i2 = i1 + half;
+            let i3 = i2 + half;
+            let w1 = ftw[j * t1];
+            let x0 = fs[fsw(i0)];
+            let x2 = fs[fsw(i2)];
+            let b1 = twiddled(fs[fsw(i1)], w1);
+            let b3 = twiddled(fs[fsw(i3)], w1);
+            let a0 = x0 + b1;
+            let a1 = x0 - b1;
+            let a2 = x2 + b3;
+            let a3 = x2 - b3;
+            let c2 = twiddled(a2, ftw[j * t2]);
+            let c3 = twiddled(a3, ftw[(j + half) * t2]);
+            fs[fsw(i0)] = a0 + c2;
+            fs[fsw(i2)] = a0 - c2;
+            fs[fsw(i1)] = a1 + c3;
+            fs[fsw(i3)] = a1 - c3;
+        }
+        workgroupBarrier();
+    }
+    for (var st = st0; st < fp.log2n; st = st + 1u) {
         let half = 1u << st;
         let tstep = fp.tw_len >> (st + 1u);
         for (var e = tid; e < total; e = e + FFT_WG) {
@@ -51,11 +100,11 @@ fn fft_core(tid: u32, lpw: u32) {
             let i1 = i0 + half;
             let t = ftw[j * tstep];
             let w = vec2<f32>(t.x, -fp.sign * t.y);
-            let x = fs[i1];
+            let x = fs[fsw(i1)];
             let b = vec2<f32>(x.x * w.x - x.y * w.y, x.x * w.y + x.y * w.x);
-            let a = fs[i0];
-            fs[i0] = a + b;
-            fs[i1] = a - b;
+            let a = fs[fsw(i0)];
+            fs[fsw(i0)] = a + b;
+            fs[fsw(i1)] = a - b;
         }
         workgroupBarrier();
     }
@@ -72,13 +121,13 @@ fn fft_lines(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_in
         let line = line0 + (e >> fp.log2n);
         var v = vec2<f32>(0.0, 0.0);
         if (line < fp.n_lines && pnt < fp.stored) { v = fdata[line * fp.stored + pnt]; }
-        fs[(e - pnt) + (reverseBits(pnt) >> shift)] = v;
+        fs[fsw((e - pnt) + (reverseBits(pnt) >> shift))] = v;
     }
     workgroupBarrier();
     fft_core(tid, lpw);
     for (var e = tid; e < lpw * n; e = e + FFT_WG) {
         let pnt = e & (n - 1u);
         let line = line0 + (e >> fp.log2n);
-        if (line < fp.n_lines && pnt < fp.keep) { fdata[line * fp.stored + pnt] = fs[e] * fp.scale; }
+        if (line < fp.n_lines && pnt < fp.keep) { fdata[line * fp.stored + pnt] = fs[fsw(e)] * fp.scale; }
     }
 }

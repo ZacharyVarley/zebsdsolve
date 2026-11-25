@@ -541,7 +541,7 @@ const Fit = struct {
         };
         defer e.det.interp = 0;
         for (e.phases.items, 0..) |*p, pi| {
-            e.det.sumsOf(self.masterOf(p, pi), fr, e.pats[@intFromEnum(self.lv)], @intCast(n), false);
+            e.det.sumsOf(self.masterOf(p, pi), fr, e.pats[@intFromEnum(self.lv)], @intCast(n));
             g.read(e.det.sums, 0, std.mem.sliceAsBytes(self.sums[pi * n * NS ..][0 .. n * NS]));
         }
         try g.wait();

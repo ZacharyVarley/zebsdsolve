@@ -84,42 +84,83 @@ fn combine(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_inde
     if (pp.op == 0u) { img[tid] = src[tid] - other[tid]; } else { img[tid] = src[tid] / max(other[tid], 1e-6); }
 }
 
+// The blur's weights exp(−d² / 2σ²) for d ≤ radius, once per workgroup; the blur on this path
+// is under 12 pixels of deviation (prep.zig), so its radius under 37.
+const BLUR_TAPS: u32 = 64u;
+var<workgroup> btab: array<f32, BLUR_TAPS>;
+
+fn blur_weights(lid: u32) {
+    for (var d = lid; d <= min(pp.radius, BLUR_TAPS - 1u); d = d + 256u) {
+        btab[d] = exp(-f32(d * d) * pp.k.x);
+    }
+    workgroupBarrier();
+}
+
+// One step of the blur's sums for the output at offset d from pixel value v: a tap out of
+// reach adds zero (prep.zig keeps this path's radius under BLUR_TAPS)
+fn blur_tap(acc: vec2<f32>, d: i32, v: f32) -> vec2<f32> {
+    let a = u32(abs(d));
+    let g = select(0.0, btab[min(a, BLUR_TAPS - 1u)], a <= pp.radius);
+    return vec2<f32>(acc.x + g * v, acc.y + g);
+}
+
+// An invocation blurs four neighbouring pixels along the axis: each pixel it reads serves the
+// four sums (each still adds its taps in the order of d, as one pixel's loop would), and the
+// four run side by side.
 @compute @workgroup_size(256)
 fn blur_rows(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_index) lid: u32) {
+    blur_weights(lid);
     let tid = flat_id(wid, lid, pp.grid_x, 256u);
-    if (tid >= pp.n * pp.h * pp.w) { return; }
-    let col = i32(tid % pp.w);
-    let line = tid - u32(col);
-    var acc = 0.0;
-    var wsum = 0.0;
+    let wq = (pp.w + 3u) / 4u;
+    if (tid >= pp.n * pp.h * wq) { return; }
+    let line = (tid / wq) * pp.w;
+    let c0 = i32((tid % wq) * 4u);
     let r = i32(pp.radius);
-    for (var d = -r; d <= r; d = d + 1) {
-        let c = col + d;
-        if (c < 0 || c >= i32(pp.w)) { continue; }
-        let g = exp(-f32(d * d) * pp.k.x);
-        acc = acc + g * src[line + u32(c)];
-        wsum = wsum + g;
+    var s0 = vec2<f32>(0.0, 0.0);
+    var s1 = vec2<f32>(0.0, 0.0);
+    var s2 = vec2<f32>(0.0, 0.0);
+    var s3 = vec2<f32>(0.0, 0.0);
+    for (var x = max(c0 - r, 0); x <= min(c0 + 3 + r, i32(pp.w) - 1); x = x + 1) {
+        let v = src[line + u32(x)];
+        s0 = blur_tap(s0, x - c0, v);
+        s1 = blur_tap(s1, x - c0 - 1, v);
+        s2 = blur_tap(s2, x - c0 - 2, v);
+        s3 = blur_tap(s3, x - c0 - 3, v);
     }
-    img[tid] = acc / wsum;
+    let at = line + u32(c0);
+    img[at] = s0.x / s0.y;
+    if (c0 + 1 < i32(pp.w)) { img[at + 1u] = s1.x / s1.y; }
+    if (c0 + 2 < i32(pp.w)) { img[at + 2u] = s2.x / s2.y; }
+    if (c0 + 3 < i32(pp.w)) { img[at + 3u] = s3.x / s3.y; }
 }
 
 @compute @workgroup_size(256)
 fn blur_cols(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_index) lid: u32) {
+    blur_weights(lid);
     let tid = flat_id(wid, lid, pp.grid_x, 256u);
-    let hw = pp.h * pp.w;
-    if (tid >= pp.n * hw) { return; }
-    let row = i32((tid % hw) / pp.w);
-    var acc = 0.0;
-    var wsum = 0.0;
+    let hq = (pp.h + 3u) / 4u;
+    if (tid >= pp.n * hq * pp.w) { return; }
+    let col = tid % pp.w;
+    let rest = tid / pp.w;
+    let r0 = i32((rest % hq) * 4u);
+    let base = (rest / hq) * pp.h * pp.w + col;
     let r = i32(pp.radius);
-    for (var d = -r; d <= r; d = d + 1) {
-        let q = row + d;
-        if (q < 0 || q >= i32(pp.h)) { continue; }
-        let g = exp(-f32(d * d) * pp.k.x);
-        acc = acc + g * src[u32(i32(tid) + d * i32(pp.w))];
-        wsum = wsum + g;
+    var s0 = vec2<f32>(0.0, 0.0);
+    var s1 = vec2<f32>(0.0, 0.0);
+    var s2 = vec2<f32>(0.0, 0.0);
+    var s3 = vec2<f32>(0.0, 0.0);
+    for (var y = max(r0 - r, 0); y <= min(r0 + 3 + r, i32(pp.h) - 1); y = y + 1) {
+        let v = src[base + u32(y) * pp.w];
+        s0 = blur_tap(s0, y - r0, v);
+        s1 = blur_tap(s1, y - r0 - 1, v);
+        s2 = blur_tap(s2, y - r0 - 2, v);
+        s3 = blur_tap(s3, y - r0 - 3, v);
     }
-    img[tid] = acc / wsum;
+    let at = base + u32(r0) * pp.w;
+    img[at] = s0.x / s0.y;
+    if (r0 + 1 < i32(pp.h)) { img[at + pp.w] = s1.x / s1.y; }
+    if (r0 + 2 < i32(pp.h)) { img[at + 2u * pp.w] = s2.x / s2.y; }
+    if (r0 + 3 < i32(pp.h)) { img[at + 3u * pp.w] = s3.x / s3.y; }
 }
 
 // A wide Gaussian costs its width in taps at every pixel, twice, and a dynamic background's is

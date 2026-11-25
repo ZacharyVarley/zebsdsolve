@@ -12,9 +12,10 @@
 //! scores) works at the level settings.full_resolution gives it; everything a level needs (the
 //! filtered patterns, the static background, each phase's filtered master) is kept per level.
 //!
-//! Indexing keeps the file and the device busy at once: between submitting a batch and waiting
-//! for it, the host reads the next batch's patterns (into a cache by map cell) and reduces them
-//! if a level is reduced. With settings.nlpar every pattern is first averaged with its
+//! Indexing keeps the file and the device busy at once: two batches are in flight, each recorded
+//! and submitted while the device works on the one before (`indexBatches`), and meanwhile the
+//! host reads the batch after's patterns (into a cache by map cell) and reduces them if a level
+//! is reduced. With settings.nlpar every pattern is first averaged with its
 //! neighbours in the map, on the device, in `uploadCells`: a batch is then read with a margin
 //! of cells around it, batches are square blocks of the map, and the cache holds what
 //! neighbouring blocks share.
@@ -1145,8 +1146,10 @@ pub const Engine = struct {
             self.fetch(self.source.file, list, null, true) catch {};
             return;
         }
-        // (patterns in memory need no reading, only reducing)
-        if (self.source != .file and !reduced) return;
+        // (patterns in memory need no reading, but gathering the batch's out of the map is a copy
+        // as long as a read, so it is made here too, while the device works; averaged ones are
+        // gathered window by window)
+        if (self.source != .file and !reduced and self.set.nlpar) return;
         self.ahead_host.resize(gpa, std.mem.alignForward(usize, list.len * pb, 4)) catch return;
         @memset(self.ahead_host.items[list.len * pb ..], 0);
         const bytes = self.ahead_host.items[0 .. list.len * pb];
@@ -1262,7 +1265,7 @@ pub const Engine = struct {
         g.ensure(&self.nl.a, @as(u64, n_win) * px * 4);
         if (self.binOf(lv) == 1) {
             g.ensure(&self.raw[k], bytes.len);
-            g.write(self.raw[k], 0, bytes);
+            g.upload(self.raw[k], 0, bytes);
             self.prep.load(self.raw[k], n_win, hw[0], hw[1], @intFromEnum(i.pixel), self.nl.a);
         } else {
             try self.reduceLevel(lv, self.nl_cells.items, bytes);
@@ -1452,14 +1455,15 @@ pub const Engine = struct {
         const n: u32 = @intCast(cells.len);
         const o = opts orelse prep_mod.Options{ .normalize = false };
         g.ensure(&self.pats[k], @as(u64, n) * px * 4);
+        // (uploads, not writes: made while the device may still work on the batch before)
         if (self.binOf(lv) == 1) {
             g.ensure(&self.raw[k], bytes.len);
-            g.write(self.raw[k], 0, bytes);
+            g.upload(self.raw[k], 0, bytes);
             self.prep.run(self.raw[k], n, hw[0], hw[1], @intFromEnum(i.pixel), o, self.pats[k]);
         } else {
             try self.reduceLevel(lv, cells, bytes);
             g.ensure(&self.raw[k], self.red_host.items.len * 4);
-            g.writeSlice(self.raw[k], 0, f32, self.red_host.items);
+            g.upload(self.raw[k], 0, std.mem.sliceAsBytes(self.red_host.items));
             self.prep.run(self.raw[k], n, hw[0], hw[1], 2, o, self.pats[k]);
         }
     }
@@ -1981,6 +1985,18 @@ pub const Engine = struct {
     /// score it (NCC, NMI) at the scores', and measure there what NMI chance gives. `out` gets
     /// one record per phase per cell ([phase][cell]). One readback.
     pub fn indexCells(self: *Engine, cells: []const u64, prm: Search, out: []Record) !void {
+        const ticket = try self.recordCells(cells, prm, out);
+        // the device starts on this batch; the host reads the next one meanwhile
+        if (self.ahead.len != 0) {
+            self.g.submit();
+            self.readAhead(self.ahead);
+        }
+        try self.finishCells(ticket, cells.len, out);
+    }
+
+    /// indexCells up to its readback: the batch recorded, not yet submitted. Its records land in
+    /// `out`, which stays the caller's until `finishCells` has the ticket returned here.
+    fn recordCells(self: *Engine, cells: []const u64, prm: Search, out: []Record) !u64 {
         const g = &self.g;
         const gpa = self.gpa;
         const s = &self.set;
@@ -1988,7 +2004,7 @@ pub const Engine = struct {
         const n: u32 = @intCast(cells.len);
         if (n_ph == 0) return error.NoPhases;
         if (out.len != n_ph * cells.len) return error.BadLength;
-        if (n == 0) return;
+        if (n == 0) return g.readTicket();
         const ls = self.levelOf(.search);
         const lr = self.levelOf(.refine);
         const lc = self.levelOf(.score);
@@ -2091,18 +2107,68 @@ pub const Engine = struct {
             }
         }
         g.read(self.records, 0, std.mem.sliceAsBytes(out));
-        // the device starts on this batch; the host reads the next one meanwhile
-        if (self.ahead.len != 0) {
-            g.submit();
-            self.readAhead(self.ahead);
-        }
-        try g.wait();
+        return g.readTicket();
+    }
+
+    /// The batch recordCells gave `ticket` for, landed in `out` (its n cells): each match's NMI
+    /// on the scan's own scale.
+    fn finishCells(self: *Engine, ticket: u64, n: usize, out: []Record) !void {
+        try self.g.waitFor(ticket);
         self.reportNlpar();
-        // each match's NMI on the scan's own scale
-        for (0..n_ph) |pi| {
+        for (0..self.phases.items.len) |pi| {
             for (out[pi * n ..][0..n]) |*r| r.z = (r.nmi - self.chance_med[pi]) / self.chance_spread[pi];
         }
     }
+
+    /// A batch in flight (indexBatches): its cells, the records it lands in, its read's ticket.
+    const Flight = struct { cells: []const u64, recs: []Record, ticket: u64 };
+
+    /// Index `cells` a batch at a time, two batches in flight: each batch is recorded and
+    /// submitted while the device still works on the one before, which is waited on only then,
+    /// so the device does not stand idle between batches; the host reads the batch after (from
+    /// `cells`, and then `after`) meanwhile. `land(ctx, cells, records)` takes each batch's
+    /// records once they land, in order. Stops between batches when cancelled. Nothing is left
+    /// in flight when it returns, an error included (what is in flight lands first).
+    fn indexBatches(self: *Engine, cells: []const u64, after: []const u64, prm: Search, ctx: anytype, comptime land: fn (@TypeOf(ctx), []const u64, []Record) anyerror!void) !void {
+        const gpa = self.gpa;
+        const batch: usize = @max(self.set.batch, 1);
+        const per = self.phases.items.len * @min(batch, cells.len);
+        var recs: [2][]Record = .{ &.{}, &.{} };
+        defer for (recs) |r| gpa.free(r);
+        recs[0] = try gpa.alloc(Record, per);
+        recs[1] = try gpa.alloc(Record, per);
+        errdefer self.g.wait() catch {};
+        var cur: ?Flight = null;
+        var at: usize = 0;
+        var slot: usize = 0;
+        while (true) {
+            const more = at < cells.len and !self.cancel;
+            // (a batch whose averaging is still to be reported lands before the next is recorded:
+            // the report reads what its averaging left)
+            if (cur) |c| if (!more or self.nl_report == .queued) {
+                cur = null;
+                try self.finishCells(c.ticket, c.cells.len, c.recs);
+                try land(ctx, c.cells, c.recs);
+            };
+            if (!more) break;
+            const n = @min(batch, cells.len - at);
+            const mine = cells[at..][0..n];
+            const out = recs[slot][0 .. self.phases.items.len * n];
+            const ticket = try self.recordCells(mine, prm, out);
+            self.g.submit();
+            at += n;
+            slot = 1 - slot;
+            const next = if (at < cells.len) cells[at..][0..@min(batch, cells.len - at)] else after;
+            if (next.len != 0 and !self.cancel) self.readAhead(next);
+            if (cur) |c| {
+                try self.finishCells(c.ticket, c.cells.len, c.recs);
+                try land(ctx, c.cells, c.recs);
+            }
+            cur = .{ .cells = mine, .recs = out, .ticket = ticket };
+        }
+    }
+
+    fn landNowhere(_: void, _: []const u64, _: []Record) anyerror!void {}
 
     /// The key to a phase's inverse pole figure colours, as the settings have them.
     pub fn ipfKeyOf(self: *const Engine, phase: usize) sym.Key {
@@ -2224,7 +2290,7 @@ pub const Engine = struct {
         return best;
     }
 
-    // ── indexing a region, a batch per step, in sweeps ──
+    // ── indexing a region, a few batches per step, in sweeps ──
 
     /// The cells of the region of interest (the whole map when it is empty), row-major.
     pub fn regionCells(self: *Engine) ![]u64 {
@@ -2305,24 +2371,11 @@ pub const Engine = struct {
         };
     }
 
-    /// Index the next batch of the sweep in progress; when the sweep ends, the cells without an
-    /// accepted match become the next one's. Returns the cells left to visit (0: done). A match
-    /// is accepted when it stands far enough above chance (settings.accept_z) and its
-    /// refinement had settled (settings.accept_step_deg). Every cell keeps the best match any
-    /// sweep gave it, accepted or not.
-    pub fn indexStep(self: *Engine) !usize {
+    /// A batch of the sweep landed (indexBatches): each cell keeps the better match, the
+    /// accepted ones their sweep.
+    fn landIndexed(self: *Engine, cells: []const u64, recs: []Record) anyerror!void {
         const s = &self.set;
-        const left = self.index_cells.len - self.index_done;
-        if (left == 0 or self.cancel) return 0;
-        const n = @min(left, s.batch);
-        const cells = self.index_cells[self.index_done..][0..n];
-        const n_ph = self.phases.items.len;
-        const recs = try self.gpa.alloc(Record, n_ph * n);
-        defer self.gpa.free(recs);
-        const sw = s.sweep(self.index_sweep);
-        self.ahead = self.index_cells[self.index_done + n ..][0..@min(left - n, s.batch)];
-        defer self.ahead = &.{};
-        try self.indexCells(cells, .{ .method = sw.method, .bandwidth = sw.bandwidth, .dict_grid = sw.dict_grid }, recs);
+        const n = cells.len;
         const settle: f32 = @floatCast(std.math.degreesToRadians(s.accept_step_deg));
         for (cells, 0..) |c, b| {
             const p = self.choosePhase(recs, n, b);
@@ -2347,6 +2400,26 @@ pub const Engine = struct {
         }
         self.index_done += n;
         self.events.emit(.{ .kind = "progress", .stage = "index", .done = self.index_done, .total = self.index_cells.len, .sweep = self.index_sweep, .sweeps = s.sweeps });
+    }
+
+    /// Index the next few batches of the sweep in progress; when the sweep ends, the cells
+    /// without an accepted match become the next one's. Returns the cells left to visit (0:
+    /// done). A match is accepted when it stands far enough above chance (settings.accept_z) and
+    /// its refinement had settled (settings.accept_step_deg). Every cell keeps the best match
+    /// any sweep gave it, accepted or not.
+    pub fn indexStep(self: *Engine) !usize {
+        const s = &self.set;
+        const left = self.index_cells.len - self.index_done;
+        if (left == 0 or self.cancel) return 0;
+        // A few batches a call, about 4096 patterns, two at a time in flight (indexBatches); a
+        // call ends with nothing in flight, so whatever comes between calls finds the device
+        // idle.
+        const batch: usize = @max(s.batch, 1);
+        const n = @min(left, batch * std.math.clamp(4096 / batch, 2, 16));
+        const cells = self.index_cells[self.index_done..][0..n];
+        const after = self.index_cells[self.index_done + n ..][0..@min(left - n, batch)];
+        const sw = s.sweep(self.index_sweep);
+        try self.indexBatches(cells, after, .{ .method = sw.method, .bandwidth = sw.bandwidth, .dict_grid = sw.dict_grid }, self, landIndexed);
         if (self.index_done == self.index_cells.len and self.index_sweep + 1 < s.sweeps) {
             // the next sweep takes what this one left
             var keep: usize = 0;
@@ -2445,7 +2518,7 @@ pub const Engine = struct {
     }
 
     /// Run the trial in hand: index its sample with its settings as indexing would a sweep of
-    /// it (batches, reading ahead), keeping nothing. The front end times this call. A trial's
+    /// it (batches, two in flight, reading ahead), keeping nothing. The front end times this call. A trial's
     /// first call indexes one batch only, to settle what a new value needs built.
     pub fn tuneTrial(self: *Engine) !void {
         const t = &self.tune;
@@ -2458,19 +2531,10 @@ pub const Engine = struct {
         const cells = try gpa.dupe(u64, if (t.run == 0) sample[0..@min(batch, sample.len)] else sample);
         defer gpa.free(cells);
         if (self.set.nlpar and t.run != 0) try self.orderInBlocks(cells);
-        const n_ph = self.phases.items.len;
-        const recs = try gpa.alloc(Record, n_ph * @min(batch, cells.len));
-        defer gpa.free(recs);
         const sw = self.set.sweep(if (t.last) self.set.sweeps - 1 else 0);
-        defer self.ahead = &.{};
-        var at: usize = 0;
-        while (at < cells.len) {
-            if (self.cancel) return error.Cancelled;
-            const n = @min(batch, cells.len - at);
-            self.ahead = cells[at + n ..][0..@min(batch, cells.len - at - n)];
-            try self.indexCells(cells[at..][0..n], .{ .method = sw.method, .bandwidth = sw.bandwidth, .dict_grid = sw.dict_grid }, recs[0 .. n_ph * n]);
-            at += n;
-        }
+        if (self.cancel) return error.Cancelled;
+        try self.indexBatches(cells, &.{}, .{ .method = sw.method, .bandwidth = sw.bandwidth, .dict_grid = sw.dict_grid }, {}, landNowhere);
+        if (self.cancel) return error.Cancelled;
     }
 
     /// The next candidate worth a trial, into `cand`: the values held with the move in hand

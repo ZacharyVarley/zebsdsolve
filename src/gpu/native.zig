@@ -14,6 +14,7 @@ const Allocator = std.mem.Allocator;
 
 // ── the webgpu.h functions we call, resolved by name ─────────────────────────────────────────
 const DevicePollFn = *const fn (c.WGPUDevice, c.WGPUBool, ?*const c.WGPUSubmissionIndex) callconv(.c) c.WGPUBool;
+const QueueSubmitForIndexFn = *const fn (c.WGPUQueue, usize, [*]const c.WGPUCommandBuffer) callconv(.c) c.WGPUSubmissionIndex;
 
 const Procs = struct {
     CreateInstance: c.WGPUProcCreateInstance,
@@ -43,6 +44,7 @@ const Procs = struct {
     BufferRelease: c.WGPUProcBufferRelease,
     BufferMapAsync: c.WGPUProcBufferMapAsync,
     BufferGetConstMappedRange: c.WGPUProcBufferGetConstMappedRange,
+    BufferGetMappedRange: c.WGPUProcBufferGetMappedRange,
     BufferUnmap: c.WGPUProcBufferUnmap,
     QueueWriteBuffer: c.WGPUProcQueueWriteBuffer,
     QueueSubmit: c.WGPUProcQueueSubmit,
@@ -59,6 +61,7 @@ const Procs = struct {
     ComputePassEncoderEnd: c.WGPUProcComputePassEncoderEnd,
     ComputePassEncoderRelease: c.WGPUProcComputePassEncoderRelease,
     DevicePoll: DevicePollFn,
+    QueueSubmitForIndex: QueueSubmitForIndexFn,
     DeviceCreateQuerySet: c.WGPUProcDeviceCreateQuerySet,
     CommandEncoderResolveQuerySet: c.WGPUProcCommandEncoderResolveQuerySet,
     QuerySetRelease: c.WGPUProcQuerySetRelease,
@@ -97,7 +100,26 @@ const Pending = struct {
     size: usize,
     dst: [*]u8,
     state: enum { recorded, mapping, done, failed } = .recorded,
+    /// the caller's number for the read (`waitUpTo`); 0 for the profiler's own
+    seq: u64 = 0,
+    /// the submission that copies it
+    index: c.WGPUSubmissionIndex = 0,
 };
+
+/// A staging buffer of the uploads (`upload`), kept from one to the next: mapped for writing
+/// (`ready`), its copy recorded but not yet submitted (`written`), or waiting for the device to
+/// finish that copy (in submission `index`) before it maps again (`mapping`).
+const Staging = struct {
+    buf: c.WGPUBuffer = null,
+    size: u64 = 0,
+    state: enum { ready, written, mapping, failed } = .failed,
+    index: c.WGPUSubmissionIndex = 0,
+};
+
+/// Uploads go through staging buffers of at most this many bytes, a piece each...
+const STAGING_PIECE: u64 = 32 << 20;
+/// ...and no more of them than this: past it, an upload waits for the oldest copy to finish.
+const STAGINGS_MAX = 16;
 
 const ProfBatch = struct { ticks: []u64, pipes: []u32 };
 
@@ -126,6 +148,8 @@ pub const Device = struct {
     encoder: c.WGPUCommandEncoder = null,
     pass: c.WGPUComputePassEncoder = null,
     pending: std.ArrayList(*Pending) = .empty, // heap entries: map callbacks keep their address
+    /// the uploads' staging buffers (heap entries, as `pending`'s)
+    stagings: std.ArrayList(*Staging) = .empty,
 
     err_buf: [1024]u8 = undefined,
     err_len: usize = 0,
@@ -361,6 +385,14 @@ pub const Device = struct {
             self.gpa.destroy(r);
         }
         self.pending.deinit(self.gpa);
+        for (self.stagings.items) |st| {
+            if (st.buf != null) {
+                self.p.BufferDestroy.?(st.buf);
+                self.p.BufferRelease.?(st.buf);
+            }
+            self.gpa.destroy(st);
+        }
+        self.stagings.deinit(self.gpa);
         for (self.pipes.items) |pp| {
             if (pp.layout != null) self.p.BindGroupLayoutRelease.?(pp.layout);
             if (pp.pipeline != null) self.p.ComputePipelineRelease.?(pp.pipeline);
@@ -415,6 +447,105 @@ pub const Device = struct {
 
     pub fn writeBuffer(self: *Device, id: u32, offset: u64, data: []const u8) void {
         self.p.QueueWriteBuffer.?(self.queue, self.buffers.items[id], offset, data.ptr, data.len);
+    }
+
+    // ── uploads ──
+    // queue.writeBuffer stages every write in memory of its own; made while the device works,
+    // that allocation held the queue up (on Windows a batch of 240 × 320 patterns waited three
+    // times as long). Uploads instead go through staging buffers kept from one to the next,
+    // mapped again for writing as soon as the device has copied out of them: as many as two
+    // batches in flight need, pieces of at most STAGING_PIECE bytes.
+
+    /// Whether an upload can take a staging buffer without a submit first (else every buffer
+    /// there may be holds a copy not yet submitted).
+    pub fn uploadReady(self: *const Device) bool {
+        if (self.stagings.items.len < STAGINGS_MAX) return true;
+        for (self.stagings.items) |st| if (st.state != .written) return true;
+        return false;
+    }
+
+    /// The most bytes one `upload` takes.
+    pub const upload_piece = STAGING_PIECE;
+
+    /// Record a copy of `data` (at most upload_piece bytes) into buffer `id` at `offset` (both
+    /// multiples of 4), in order with the commands recorded around it; the caller has seen
+    /// `uploadReady`. (Through the queue's own staging when no buffer can be had.)
+    pub fn upload(self: *Device, id: u32, offset: u64, data: []const u8) void {
+        if (!self.uploadPiece(id, offset, data)) self.writeBuffer(id, offset, data);
+    }
+
+    /// A staging buffer for `size` bytes, mapped: one ready (made larger when it must), else a
+    /// new one, else the one whose copy was submitted first, once the device has made it.
+    fn stagingFor(self: *Device, size: u64) ?*Staging {
+        var pick: ?*Staging = null;
+        for (self.stagings.items) |st| {
+            if (st.state != .ready) continue;
+            if (st.size >= size) return st;
+            pick = st;
+        }
+        if (pick == null) {
+            for (self.stagings.items) |st| if (st.state == .failed) {
+                pick = st;
+                break;
+            };
+        }
+        if (pick == null and self.stagings.items.len < STAGINGS_MAX) {
+            const st = self.gpa.create(Staging) catch return null;
+            st.* = .{};
+            self.stagings.append(self.gpa, st) catch {
+                self.gpa.destroy(st);
+                return null;
+            };
+            pick = st;
+        }
+        if (pick == null) {
+            // the copy submitted first: wait for that submission alone
+            for (self.stagings.items) |st| {
+                if (st.state != .mapping) continue;
+                if (pick == null or st.index < pick.?.index) pick = st;
+            }
+            const st = pick orelse return null;
+            while (st.state == .mapping) {
+                _ = self.p.DevicePoll(self.device, 1, &st.index);
+                self.p.InstanceProcessEvents.?(self.instance);
+            }
+        }
+        const st = pick orelse return null;
+        if (st.state == .ready and st.size >= size) return st;
+        // made anew (larger, or after a failed mapping), mapped from the start
+        if (st.buf != null) {
+            self.p.BufferDestroy.?(st.buf);
+            self.p.BufferRelease.?(st.buf);
+        }
+        var d = std.mem.zeroes(c.WGPUBufferDescriptor);
+        d.size = @max(size, std.mem.alignForward(u64, size, 1 << 20));
+        d.usage = c.WGPUBufferUsage_MapWrite | c.WGPUBufferUsage_CopySrc;
+        d.mappedAtCreation = 1;
+        st.buf = self.p.DeviceCreateBuffer.?(self.device, &d);
+        st.size = d.size;
+        st.state = if (st.buf != null) .ready else .failed;
+        return if (st.state == .ready) st else null;
+    }
+
+    fn uploadPiece(self: *Device, id: u32, offset: u64, data: []const u8) bool {
+        const size = std.mem.alignForward(u64, data.len, 4);
+        const st = self.stagingFor(size) orelse return false;
+        const m = self.p.BufferGetMappedRange.?(st.buf, 0, size) orelse return false;
+        const dst: [*]u8 = @ptrCast(m);
+        @memcpy(dst[0..data.len], data);
+        if (size > data.len) @memset(dst[data.len..size], 0);
+        self.p.BufferUnmap.?(st.buf);
+        self.endPass();
+        self.p.CommandEncoderCopyBufferToBuffer.?(self.enc(), st.buf, 0, self.buffers.items[id], offset, size);
+        st.state = .written;
+        return true;
+    }
+
+    fn onStagingMapped(status: c.WGPUMapAsyncStatus, msg: c.WGPUStringView, ud1: ?*anyopaque, ud2: ?*anyopaque) callconv(.c) void {
+        _ = msg;
+        _ = ud2;
+        const st: *Staging = @ptrCast(@alignCast(ud1.?));
+        st.state = if (status == c.WGPUMapAsyncStatus_Success) .ready else .failed;
     }
 
     // ── pipelines ──
@@ -577,8 +708,9 @@ pub const Device = struct {
         self.p.CommandEncoderCopyBufferToBuffer.?(self.enc(), self.buffers.items[src], soff, self.buffers.items[dst], doff, size);
     }
 
-    /// Queue a copy of src[off..off+size] into host memory at `dst`; it lands during `wait`.
-    pub fn readBuffer(self: *Device, src: u32, off: u64, size: u64, dst: [*]u8) void {
+    /// Queue a copy of src[off..off+size] into host memory at `dst`; it lands during `wait`, or
+    /// `waitUpTo` its number `seq`.
+    pub fn readBuffer(self: *Device, src: u32, off: u64, size: u64, dst: [*]u8, seq: u64) void {
         self.endPass();
         var d = std.mem.zeroes(c.WGPUBufferDescriptor);
         d.size = (size + 3) & ~@as(u64, 3);
@@ -586,23 +718,37 @@ pub const Device = struct {
         const st = self.p.DeviceCreateBuffer.?(self.device, &d);
         self.p.CommandEncoderCopyBufferToBuffer.?(self.enc(), self.buffers.items[src], off, st, 0, d.size);
         const r = self.gpa.create(Pending) catch return;
-        r.* = .{ .staging = st, .size = @intCast(size), .dst = dst };
+        r.* = .{ .staging = st, .size = @intCast(size), .dst = dst, .seq = seq };
         self.pending.append(self.gpa, r) catch self.gpa.destroy(r);
     }
 
     pub fn submit(self: *Device) void {
         self.endPass();
         if (self.prof_pipes.items.len > 0) self.resolveProfile();
+        var index: c.WGPUSubmissionIndex = 0;
         if (self.encoder != null) {
             const cb = self.p.CommandEncoderFinish.?(self.encoder, null);
-            self.p.QueueSubmit.?(self.queue, 1, &cb);
+            const cbs = [_]c.WGPUCommandBuffer{cb};
+            index = self.p.QueueSubmitForIndex(self.queue, 1, &cbs);
             self.p.CommandBufferRelease.?(cb);
             self.p.CommandEncoderRelease.?(self.encoder);
             self.encoder = null;
         }
+        // the staging buffers just copied from, mapped again once the device has copied them
+        for (self.stagings.items) |st| {
+            if (st.state != .written) continue;
+            st.state = .mapping;
+            st.index = index;
+            var ci = std.mem.zeroes(c.WGPUBufferMapCallbackInfo);
+            ci.mode = c.WGPUCallbackMode_AllowProcessEvents;
+            ci.callback = onStagingMapped;
+            ci.userdata1 = st;
+            _ = self.p.BufferMapAsync.?(st.buf, c.WGPUMapMode_Write, 0, st.size, ci);
+        }
         for (self.pending.items) |r| {
             if (r.state != .recorded) continue;
             r.state = .mapping;
+            r.index = index;
             var ci = std.mem.zeroes(c.WGPUBufferMapCallbackInfo);
             ci.mode = c.WGPUCallbackMode_AllowProcessEvents;
             ci.callback = onMapped;
@@ -621,17 +767,44 @@ pub const Device = struct {
     /// Block until every submitted read has been copied to its destination.
     pub fn wait(self: *Device) !void {
         self.submit();
+        return self.settle(self.pending.items.len);
+    }
+
+    /// Block until the reads numbered up to `seq` (and every read queued before them) have been
+    /// copied to their destinations, waiting for their submissions alone: later ones may still
+    /// be in flight.
+    pub fn waitUpTo(self: *Device, seq: u64) !void {
+        self.submit();
+        // their submissions, and whatever else those copied (the profiler's timestamps)
+        var last: c.WGPUSubmissionIndex = 0;
+        for (self.pending.items) |r| {
+            if (r.seq != 0 and r.seq <= seq) last = @max(last, r.index);
+        }
+        var k: usize = 0;
+        for (self.pending.items, 0..) |r, i| {
+            if ((r.seq != 0 and r.seq <= seq) or (r.state != .recorded and r.index <= last)) k = i + 1;
+        }
+        return self.settle(k);
+    }
+
+    /// The first k pending reads, landed: polled until their submissions are done, copied out,
+    /// released.
+    fn settle(self: *Device, k: usize) !void {
+        const first = self.pending.items[0..k];
+        var last: c.WGPUSubmissionIndex = 0;
+        for (first) |r| last = @max(last, r.index);
         while (true) {
             var busy = false;
-            for (self.pending.items) |r| {
+            for (first) |r| {
                 if (r.state == .mapping) busy = true;
             }
+            // (a lost device fails its mappings: their callbacks still come, before the entries go)
             if (!busy) break;
-            _ = self.p.DevicePoll(self.device, 1, null);
+            _ = self.p.DevicePoll(self.device, 1, &last);
             self.p.InstanceProcessEvents.?(self.instance);
         }
         var failed = false;
-        for (self.pending.items) |r| {
+        for (first) |r| {
             if (r.state == .done) {
                 const m = self.p.BufferGetConstMappedRange.?(r.staging, 0, (r.size + 3) & ~@as(usize, 3));
                 if (m) |ptr| @memcpy(r.dst[0..r.size], @as([*]const u8, @ptrCast(ptr))[0..r.size]);
@@ -641,8 +814,11 @@ pub const Device = struct {
             self.p.BufferRelease.?(r.staging);
             self.gpa.destroy(r);
         }
-        self.pending.clearRetainingCapacity();
-        if (self.prof_batches.items.len > 0) self.foldProfile();
+        const rest = self.pending.items.len - k;
+        std.mem.copyForwards(*Pending, self.pending.items[0..rest], self.pending.items[k..]);
+        self.pending.shrinkRetainingCapacity(rest);
+        // (the profiler's timestamps land with the reads; folded once none is outstanding)
+        if (rest == 0 and self.prof_batches.items.len > 0) self.foldProfile();
         if (self.lost) return error.DeviceLost;
         if (failed) return error.ReadFailed;
     }

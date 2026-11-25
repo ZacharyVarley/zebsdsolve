@@ -78,6 +78,9 @@ pub const Gpu = struct {
     open: bool = false,
     /// GPU traffic since the last countsTake (the browser adapter's ze.stats, natively)
     counts: Counts = .{},
+    /// reads queued so far (numbered from 1), and the last of them known to have landed
+    read_seq: u64 = 0,
+    read_landed: u64 = 0,
 
     pub fn init(gpa: Allocator, dev: *Backend.Device) !Gpu {
         const lim = dev.limits();
@@ -146,6 +149,23 @@ pub const Gpu = struct {
         self.open = true;
     }
 
+    /// Write a large `data` (a batch of patterns) into `b` at `offset`, in order with the commands
+    /// recorded around it. Natively through staging buffers the device keeps (queue writes made
+    /// while it works on earlier batches would each take an allocation of their own); in the
+    /// browser through `write`, whose queue keeps its own.
+    pub fn upload(self: *Gpu, b: Buf, offset: u64, data: []const u8) void {
+        if (comptime is_web) return self.write(b, offset, data);
+        if (data.len % 4 != 0 or offset % 4 != 0) return self.write(b, offset, data);
+        var at: usize = 0;
+        while (at < data.len) {
+            const n = @min(Backend.Device.upload_piece, data.len - at);
+            if (!self.dev.uploadReady()) self.submit();
+            self.dev.upload(b.id, offset + at, data[at..][0..n]);
+            self.open = true;
+            at += n;
+        }
+    }
+
     pub fn writeSlice(self: *Gpu, b: Buf, offset: u64, comptime T: type, data: []const T) void {
         self.write(b, offset, std.mem.sliceAsBytes(data));
     }
@@ -164,11 +184,18 @@ pub const Gpu = struct {
         self.open = true;
     }
 
-    /// Queue a read of `src[offset..]` into `dst`; valid after the next submit completes.
+    /// Queue a read of `src[offset..]` into `dst`: landed after the next `wait`, or `waitFor`
+    /// a ticket taken after it.
     pub fn read(self: *Gpu, src: Buf, offset: u64, dst: []u8) void {
         self.counts.reads += 1;
-        self.dev.readBuffer(src.id, offset, dst.len, dst.ptr);
+        self.read_seq += 1;
+        self.dev.readBuffer(src.id, offset, dst.len, dst.ptr, self.read_seq);
         self.open = true;
+    }
+
+    /// A ticket for the reads queued so far (`waitFor`).
+    pub fn readTicket(self: *const Gpu) u64 {
+        return self.read_seq;
     }
 
     // ── pipelines ──
@@ -308,6 +335,22 @@ pub const Gpu = struct {
         self.retired.clearRetainingCapacity();
     }
 
+    /// Submit, then block until the reads up to `ticket` have landed; reads queued after it may
+    /// still be in flight (two batches at once: the next is submitted before the one before is
+    /// waited on). Returns at once when they have landed already.
+    pub fn waitFor(self: *Gpu, ticket: u64) !void {
+        if (ticket <= self.read_landed) return;
+        self.counts.waits += 1;
+        self.submit();
+        try self.dev.waitUpTo(ticket);
+        self.read_landed = ticket;
+        if (self.oversize != null) return error.DispatchTooLarge;
+        if (self.bad_pipe) {
+            self.bad_pipe = false;
+            return error.PipelineFailed;
+        }
+    }
+
     /// The counters since the last call, then zeroed.
     pub fn countsTake(self: *Gpu) Counts {
         const c = self.counts;
@@ -321,6 +364,7 @@ pub const Gpu = struct {
         self.counts.waits += 1;
         self.submit();
         try self.dev.wait();
+        self.read_landed = self.read_seq;
         if (self.oversize != null) return error.DispatchTooLarge;
         if (self.bad_pipe) {
             self.bad_pipe = false;

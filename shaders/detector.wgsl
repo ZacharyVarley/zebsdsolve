@@ -13,9 +13,9 @@
 //   sums          per item, the sums from which the host (plane fit) and refine_step build the
 //                 normalized cross-correlation with the item's pattern, its gradient and its
 //                 Gauss–Newton matrix over six directions: a shift of the detector (3) and a
-//                 rotation of the crystal (3), or over the rotation alone (flags bit 1), which
-//                 is all orientation refinement uses. Chunks of pixels in parallel;
-//                 sums_reduce adds the chunks.
+//                 rotation of the crystal (3). Chunks of pixels in parallel; sums_reduce adds
+//                 the chunks.
+//   sums_rot      the same over the rotation alone, which is all orientation refinement uses
 //   refine_init, refine_step   Gauss–Newton on each item's orientation, on the device: a step
 //                 from the best point so far, accepted when the next sums score higher, with
 //                 the model's curvature rescaled by how each gain compares with its promise
@@ -69,7 +69,6 @@ struct DetP {
 @group(0) @binding(5) var<storage, read_write> part: array<f32>;
 @group(0) @binding(6) var<storage, read> part_in: array<f32>;
 @group(0) @binding(7) var<storage, read_write> sums_out: array<f32>;
-@group(0) @binding(8) var<storage, read> sums_in: array<f32>;
 // refinement state per item (24 floats): current q (0–3), best q (4–7), best NCC (8), the
 // curvature scale (9), the best point's gradient (10–12) and matrix (13–18), the size of the
 // last step that improved (19), the gain the model promised for the step being tried (20) and
@@ -315,6 +314,121 @@ fn seed_dict(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_in
     poses_rw[b * 2u + 1u] = dict_q[dict_hit[b * 2u + 1u]];
 }
 
+// Orientation refinement's sums over one chunk of an item's pixels: the rotation's three
+// directions only, few enough to stay in registers (an indexed array of 43 lives in memory).
+struct RotSums {
+    s0: vec4<f32>,
+    sd: vec3<f32>,
+    sv: vec3<f32>,
+    se: vec3<f32>,
+    hd: vec3<f32>,
+    ho: vec3<f32>,
+}
+
+fn rot_sums(b: u32, chunk: u32) -> RotSums {
+    let hw = dp.pat_h * dp.pat_w;
+    let nc = dp.n_chunks;
+    let q = poses[b * 2u + 1u];
+    let pbase = u32(poses[b * 2u].w) * hw;
+    // chunk c takes pixels c, c + nc, c + 2 nc, …: neighbouring invocations hold neighbouring
+    // pixels, so their reads of the pattern and of the master lie together ((row, col) kept by
+    // counting: no division per pixel)
+    var row = chunk / dp.pat_w;
+    var col = chunk - row * dp.pat_w;
+    let step_r = nc / dp.pat_w;
+    let step_c = nc - step_r * dp.pat_w;
+    var t = RotSums(vec4<f32>(0.0), vec3<f32>(0.0), vec3<f32>(0.0), vec3<f32>(0.0), vec3<f32>(0.0), vec3<f32>(0.0));
+    for (var pix = chunk; pix < hw; pix = pix + nc) {
+        if (in_mask(f32(row), f32(col))) {
+            let c = qrot(q, normalize(ray_of(b, row, col)));
+            let m = grad_at(c);
+            let d = cross(c, m.xyz);
+            let e = pats[pbase + pix];
+            t.s0 = t.s0 + vec4<f32>(1.0, m.w, m.w * m.w, m.w * e);
+            t.sd = t.sd + d;
+            t.sv = t.sv + m.w * d;
+            t.se = t.se + e * d;
+            t.hd = t.hd + d * d;
+            t.ho = t.ho + d.xxy * d.yzz;
+        }
+        row = row + step_r;
+        col = col + step_c;
+        if (col >= dp.pat_w) {
+            col = col - dp.pat_w;
+            row = row + 1u;
+        }
+    }
+    return t;
+}
+
+// The 19 sums a step reads (of the 43 `sums` lays out), and where they lie among them.
+const ROT_SUMS: u32 = 19u;
+var<workgroup> rsum: array<f32, ROT_SUMS>;
+
+fn rot_index(j: u32) -> u32 {
+    if (j < 4u) { return j; }
+    if (j < 13u) { return 7u + 6u * ((j - 4u) / 3u) + (j - 4u) % 3u; }
+    return 37u + (j - 13u);
+}
+
+// The workgroup's partial sums of each of `count` sums (wpart[k · SUMS_WG + i], invocation i's
+// of sum k) added up into wpart[k · SUMS_WG], by halves.
+var<workgroup> wpart: array<f32, 10u * SUMS_WG>;
+
+fn wpart_total(lid: u32, count: u32) {
+    for (var off = SUMS_WG / 2u; off > 0u; off = off >> 1u) {
+        workgroupBarrier();
+        if (lid < off) {
+            for (var k = 0u; k < count; k = k + 1u) { wpart[k * SUMS_WG + lid] = wpart[k * SUMS_WG + lid] + wpart[k * SUMS_WG + lid + off]; }
+        }
+    }
+    workgroupBarrier();
+}
+
+// Orientation refinement's sums: each workgroup adds up its invocations' (an item's
+// SUMS_WG chunks: the engine makes an item's chunks a multiple of the workgroup) and writes
+// them as one partial sum, sum i of partial q of item b at [(b · NS + i) · nq + q] for nq =
+// n_chunks / SUMS_WG partials per item (refine_rot_step adds those). Only the 19 sums a step
+// reads are written. (An entry point of its own: compiled apart from `sums` and its array of
+// 43, it is not given the registers that array asks for.) The 19 are added up ten, then nine
+// at a time, so that a workgroup of 256 stays within 16 KiB of workgroup memory.
+@compute @workgroup_size(SUMS_WG)
+fn sums_rot(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_index) lid: u32) {
+    let tid0 = (wid.y * dp.grid_x + wid.x) * SUMS_WG;
+    let tid = tid0 + lid;
+    var t = RotSums(vec4<f32>(0.0), vec3<f32>(0.0), vec3<f32>(0.0), vec3<f32>(0.0), vec3<f32>(0.0), vec3<f32>(0.0));
+    if (tid < dp.n_items * dp.n_chunks) { t = rot_sums(tid / dp.n_chunks, tid % dp.n_chunks); }
+    // the workgroup's item and its partial
+    let live = tid0 < dp.n_items * dp.n_chunks;
+    let b = tid0 / dp.n_chunks;
+    let nq = dp.n_chunks / SUMS_WG;
+    let out = b * NS * nq + (tid0 % dp.n_chunks) / SUMS_WG;
+    wpart[lid] = t.s0.x;
+    wpart[SUMS_WG + lid] = t.s0.y;
+    wpart[2u * SUMS_WG + lid] = t.s0.z;
+    wpart[3u * SUMS_WG + lid] = t.s0.w;
+    wpart[4u * SUMS_WG + lid] = t.sd.x;
+    wpart[5u * SUMS_WG + lid] = t.sd.y;
+    wpart[6u * SUMS_WG + lid] = t.sd.z;
+    wpart[7u * SUMS_WG + lid] = t.sv.x;
+    wpart[8u * SUMS_WG + lid] = t.sv.y;
+    wpart[9u * SUMS_WG + lid] = t.sv.z;
+    wpart_total(lid, 10u);
+    if (live && lid < 10u) { part[out + rot_index(lid) * nq] = wpart[lid * SUMS_WG]; }
+    workgroupBarrier();
+    wpart[lid] = t.se.x;
+    wpart[SUMS_WG + lid] = t.se.y;
+    wpart[2u * SUMS_WG + lid] = t.se.z;
+    wpart[3u * SUMS_WG + lid] = t.hd.x;
+    wpart[4u * SUMS_WG + lid] = t.ho.x;
+    wpart[5u * SUMS_WG + lid] = t.ho.y;
+    wpart[6u * SUMS_WG + lid] = t.hd.y;
+    wpart[7u * SUMS_WG + lid] = t.ho.z;
+    wpart[8u * SUMS_WG + lid] = t.hd.z;
+    wpart_total(lid, 9u);
+    if (live && lid < 9u) { part[out + rot_index(10u + lid) * nq] = wpart[lid * SUMS_WG]; }
+}
+
 // (SUMS_WG, this kernel's invocations per workgroup, is set in a line the engine puts before
 // this text: 64 unless tuning found this GPU faster with another)
 @compute @workgroup_size(SUMS_WG)
@@ -324,72 +438,23 @@ fn sums(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_index) 
     let b = tid / dp.n_chunks;
     let chunk = tid % dp.n_chunks;
     let hw = dp.pat_h * dp.pat_w;
-    let per = (hw + dp.n_chunks - 1u) / dp.n_chunks;
     let q = poses[b * 2u + 1u];
     let qi = qconj(q);
     let pbase = u32(poses[b * 2u].w) * hw;
-    let start = chunk * per;
-    let stop = min(start + per, hw);
-    // (row, col) of the pixel, kept by counting: no division per pixel
-    var row = start / dp.pat_w;
-    var col = start - row * dp.pat_w;
+    // chunk c takes pixels c, c + n_chunks, …, as rot_sums does ((row, col) kept by counting:
+    // no division per pixel)
+    var row = chunk / dp.pat_w;
+    var col = chunk - row * dp.pat_w;
+    let step_r = dp.n_chunks / dp.pat_w;
+    let step_c = dp.n_chunks - step_r * dp.pat_w;
     // sum i of chunk c at [(b · NS + i) · n_chunks + c]: neighbouring invocations hold
     // neighbouring chunks and so write neighbouring words, and sums_reduce reads each sum's
     // chunks in a row
     let out = b * NS * dp.n_chunks + chunk;
     let nc = dp.n_chunks;
-    if ((dp.flags & 2u) != 0u) {
-        // Orientation refinement needs the rotation's three directions only: their sums are
-        // few enough to stay in registers (an indexed array of 43 lives in memory).
-        var s0 = vec4<f32>(0.0, 0.0, 0.0, 0.0);
-        var sd = vec3<f32>(0.0, 0.0, 0.0);
-        var sv = vec3<f32>(0.0, 0.0, 0.0);
-        var se = vec3<f32>(0.0, 0.0, 0.0);
-        var hd = vec3<f32>(0.0, 0.0, 0.0);
-        var ho = vec3<f32>(0.0, 0.0, 0.0);
-        for (var pix = start; pix < stop; pix = pix + 1u) {
-            if (in_mask(f32(row), f32(col))) {
-                let c = qrot(q, normalize(ray_of(b, row, col)));
-                let m = grad_at(c);
-                let d = cross(c, m.xyz);
-                let e = pats[pbase + pix];
-                s0 = s0 + vec4<f32>(1.0, m.w, m.w * m.w, m.w * e);
-                sd = sd + d;
-                sv = sv + m.w * d;
-                se = se + e * d;
-                hd = hd + d * d;
-                ho = ho + d.xxy * d.yzz;
-            }
-            col = col + 1u;
-            if (col == dp.pat_w) {
-                col = 0u;
-                row = row + 1u;
-            }
-        }
-        part[out] = s0.x;
-        part[out + 1u * nc] = s0.y;
-        part[out + 2u * nc] = s0.z;
-        part[out + 3u * nc] = s0.w;
-        part[out + 7u * nc] = sd.x;
-        part[out + 8u * nc] = sd.y;
-        part[out + 9u * nc] = sd.z;
-        part[out + 13u * nc] = sv.x;
-        part[out + 14u * nc] = sv.y;
-        part[out + 15u * nc] = sv.z;
-        part[out + 19u * nc] = se.x;
-        part[out + 20u * nc] = se.y;
-        part[out + 21u * nc] = se.z;
-        part[out + 37u * nc] = hd.x;
-        part[out + 38u * nc] = ho.x;
-        part[out + 39u * nc] = ho.y;
-        part[out + 40u * nc] = hd.y;
-        part[out + 41u * nc] = ho.z;
-        part[out + 42u * nc] = hd.z;
-        return;
-    }
     var s: array<f32, 43>;
     for (var i = 0u; i < NS; i = i + 1u) { s[i] = 0.0; }
-    for (var pix = start; pix < stop; pix = pix + 1u) {
+    for (var pix = chunk; pix < hw; pix = pix + dp.n_chunks) {
         if (in_mask(f32(row), f32(col))) {
             let u = ray_of(b, row, col);
             let dist = length(u);
@@ -422,9 +487,10 @@ fn sums(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_index) 
                 }
             }
         }
-        col = col + 1u;
-        if (col == dp.pat_w) {
-            col = 0u;
+        row = row + step_r;
+        col = col + step_c;
+        if (col >= dp.pat_w) {
+            col = col - dp.pat_w;
             row = row + 1u;
         }
     }
@@ -490,34 +556,30 @@ fn collect(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_inde
     records[o + 7u] = 0.0;
 }
 
-@compute @workgroup_size(64)
-fn refine_step(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_index) lid: u32) {
-    let b = flat_id(wid, lid, dp.grid_x, 64u);
-    if (b >= dp.n_items) { return; }
-    let sb = b * NS;
+// Orientation refinement's step for item b from its sums (laid out as rot_sums returns them).
+fn refine_item(b: u32, t: RotSums) {
     let st = b * 24u;
-    let n = max(sums_in[sb], 1.0);
-    let mean = sums_in[sb + 1u] / n;
-    let var_n = sums_in[sb + 2u] - n * mean * mean;
+    let n = max(t.s0.x, 1.0);
+    let mean = t.s0.y / n;
+    let var_n = t.s0.z - n * mean * mean;
     var ncc = -2.0;
     var grad = vec3<f32>(0.0, 0.0, 0.0);
     var hess: array<f32, 6>;
     if (var_n > 1e-12) {
         let inv = inverseSqrt(var_n);
-        ncc = sums_in[sb + 3u] * inv;
+        ncc = t.s0.w * inv;
         // crystal-rotation components (3, 4, 5) of the six directions
-        let sd = vec3<f32>(sums_in[sb + 7u], sums_in[sb + 8u], sums_in[sb + 9u]);
-        let au = (vec3<f32>(sums_in[sb + 13u], sums_in[sb + 14u], sums_in[sb + 15u]) - mean * sd) * inv;
-        let bd = vec3<f32>(sums_in[sb + 19u], sums_in[sb + 20u], sums_in[sb + 21u]);
-        grad = (bd - ncc * au) * inv;
-        // Σ d_i d_j for i, j in 3..5 sit at 37 (3,3) 38 (3,4) 39 (3,5) 40 (4,4) 41 (4,5) 42 (5,5)
+        let sd = t.sd;
+        let au = (t.sv - mean * sd) * inv;
+        grad = (t.se - ncc * au) * inv;
+        // Σ d_i d_j: the diagonal in t.hd, (x, y), (x, z), (y, z) in t.ho
         let iv = inv * inv;
-        hess[0] = (sums_in[sb + 37u] - sd.x * sd.x / n - au.x * au.x) * iv;
-        hess[1] = (sums_in[sb + 38u] - sd.x * sd.y / n - au.x * au.y) * iv;
-        hess[2] = (sums_in[sb + 39u] - sd.x * sd.z / n - au.x * au.z) * iv;
-        hess[3] = (sums_in[sb + 40u] - sd.y * sd.y / n - au.y * au.y) * iv;
-        hess[4] = (sums_in[sb + 41u] - sd.y * sd.z / n - au.y * au.z) * iv;
-        hess[5] = (sums_in[sb + 42u] - sd.z * sd.z / n - au.z * au.z) * iv;
+        hess[0] = (t.hd.x - sd.x * sd.x / n - au.x * au.x) * iv;
+        hess[1] = (t.ho.x - sd.x * sd.y / n - au.x * au.y) * iv;
+        hess[2] = (t.ho.y - sd.x * sd.z / n - au.x * au.z) * iv;
+        hess[3] = (t.hd.y - sd.y * sd.y / n - au.y * au.y) * iv;
+        hess[4] = (t.ho.z - sd.y * sd.z / n - au.y * au.z) * iv;
+        hess[5] = (t.hd.z - sd.z * sd.z / n - au.z * au.z) * iv;
     }
     // The Gauss–Newton matrix J'J is the curvature of the NCC only for a pattern that is its
     // simulation: for a real one the curvature is smaller (by the NCC itself, and again where
@@ -574,6 +636,25 @@ fn refine_step(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_
     state[st + 20u] = dot(g, step) - 0.5 * quad;
     state[st + 21u] = length(step);
     poses_rw[b * 2u + 1u] = qnormalize(qmul(qexp(step), qbest));
+}
+
+// A workgroup an item: its partial sums (sums_rot's) of each sum added up, then the step
+// (refine_item).
+@compute @workgroup_size(64)
+fn refine_rot_step(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_index) lid: u32) {
+    let b = wid.y * dp.grid_x + wid.x;
+    let live = b < dp.n_items;
+    if (live && lid < ROT_SUMS) {
+        let at = (b * NS + rot_index(lid)) * dp.n_chunks;
+        var acc = 0.0;
+        for (var c = 0u; c < dp.n_chunks; c = c + 1u) { acc = acc + part_in[at + c]; }
+        rsum[lid] = acc;
+    }
+    workgroupBarrier();
+    if (live && lid == 0u) {
+        let t = RotSums(vec4<f32>(rsum[0], rsum[1], rsum[2], rsum[3]), vec3<f32>(rsum[4], rsum[5], rsum[6]), vec3<f32>(rsum[7], rsum[8], rsum[9]), vec3<f32>(rsum[10], rsum[11], rsum[12]), vec3<f32>(rsum[13], rsum[16], rsum[18]), vec3<f32>(rsum[14], rsum[15], rsum[17]));
+        refine_item(b, t);
+    }
 }
 
 @compute @workgroup_size(256)

@@ -139,11 +139,9 @@ pub const Detector = struct {
     }
 
     /// Record: the NS sums of each item against its pattern in `pats`, into `sums`.
-    /// `rotation_only` leaves out the three detector-shift directions (orientation refinement
-    /// does not use them).
-    pub fn sumsOf(self: *Detector, m: MasterGpu, fr: Frame, pats: Buf, n: u32, rotation_only: bool) void {
+    pub fn sumsOf(self: *Detector, m: MasterGpu, fr: Frame, pats: Buf, n: u32) void {
         var p = self.params(m, fr, n);
-        if (rotation_only) p.flags = 2 else p.flags = self.interp;
+        p.flags = self.interp;
         self.g.ensure(&self.part, @as(u64, n) * p.n_chunks * NS * 4);
         self.g.ensure(&self.sums, @as(u64, n) * NS * 4);
         // (the master's values lie beside its gradient: one table)
@@ -155,6 +153,21 @@ pub const Detector = struct {
             self.g.dispatch(pipe_id, f[0], f[1], 1, &.{ self.g.uniform(0, std.mem.asBytes(&ps)), self.poses.at(2), pats.at(3), self.part.at(5), m.grad.at(21) });
         }
         self.run("sums_reduce", p, (n * NS + 63) / 64, &.{ self.part.at(6), self.sums.at(7) });
+    }
+
+    /// Orientation refinement's partial sums (detector.wgsl sums_rot) into `part`; returns how
+    /// many each item's are in (refine_rot_step adds them up). An item's chunks are made a
+    /// multiple of the workgroup, so that a workgroup holds one item's and adds them up itself.
+    fn rotSums(self: *Detector, m: MasterGpu, fr: Frame, pats: Buf, n: u32) u32 {
+        var p = self.params(m, fr, n);
+        p.n_chunks = @min(std.mem.alignForward(u32, p.n_chunks, self.wg), 1024);
+        const nq = p.n_chunks / self.wg;
+        self.g.ensure(&self.part, @as(u64, n) * nq * NS * 4);
+        const f = Gpu.flat((n * p.n_chunks + self.wg - 1) / self.wg);
+        p.grid_x = f[0];
+        const pipe_id = self.g.pipelineWith("detector/sums_rot", shaders.sums_wg, self.wg, shaders.detector_body, "sums_rot") catch gpu_mod.NO_PIPE;
+        self.g.dispatch(pipe_id, f[0], f[1], 1, &.{ self.g.uniform(0, std.mem.asBytes(&p)), self.poses.at(2), pats.at(3), self.part.at(5), m.grad.at(21) });
+        return nq;
     }
 
     /// Record: refine the n items' orientations against their patterns, score them (NCC and
@@ -173,10 +186,11 @@ pub const Detector = struct {
         self.run("refine_init", p, (n + 63) / 64, &.{ self.state.at(9), self.poses.at(10) });
         var it: u32 = 0;
         while (it <= o.iters) : (it += 1) {
-            self.sumsOf(m, fr, pats, n, true);
             var ps = p;
+            ps.n_chunks = self.rotSums(m, fr, pats, n);
             ps.flags = if (it == o.iters) 1 else 0;
-            self.run("refine_step", ps, (n + 63) / 64, &.{ self.sums.at(8), self.state.at(9), self.poses.at(10) });
+            // (a workgroup an item: its sums added up, then its step)
+            self.run("refine_rot_step", ps, n, &.{ self.part.at(6), self.state.at(9), self.poses.at(10) });
         }
         self.run("nmi", p, n, &.{ m.buf.at(1), self.poses.at(2), pats.at(3), self.score.at(11) });
         self.run("collect", p, (n + 63) / 64, &.{ self.state.at(14), self.score.at(15), records.at(16) });

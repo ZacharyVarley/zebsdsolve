@@ -728,7 +728,7 @@ def main():
     dis = np.degrees(s.disorientation(r["quaternions"].reshape(-1, 4), q_ref))
     check("the nickel scan indexes as kikuchipy refined it", np.median(dis) < 0.6 and (dis < 3).mean() > 0.97 and r["ncc"].mean() > 0.45,
           f"median {np.median(dis):.3f}° apart, within 3°: {100 * (dis < 3).mean():.1f} %, mean NCC {r['ncc'].mean():.3f}, {4125 / dt:.0f} patterns/s")
-    check("progress is reported per batch", len(seen) == int(np.ceil(4125 / 256)) and seen[-1] == (4125, 4125))
+    check("progress is reported as indexing goes", len(seen) >= 2 and all(a[0] < b[0] for a, b in zip(seen, seen[1:])) and seen[-1] == (4125, 4125), f"{seen}")
     # kikuchipy's orientations are in the frame this engine computes in: identified, they take
     # its axes with next to no misorientation left, and nothing else comes close
     kf = s.identify_frame(s.reduce(q_ref)[1], np.zeros(len(q_ref), np.int32))

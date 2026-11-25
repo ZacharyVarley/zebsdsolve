@@ -596,9 +596,10 @@ export fn ze_index_begin(e: *Engine) i32 {
     return 0;
 }
 
-/// Index the next batch of the sweep in progress. Returns the number of cells left to visit
-/// (0: done; a sweep that ends hands the cells it did not accept to the next), or a negative
-/// code. ze_index_status says where it stands.
+/// Index the next few batches of the sweep in progress (two at a time on the device, none left
+/// in flight when it returns). Returns the number of cells left to visit (0: done; a sweep that
+/// ends hands the cells it did not accept to the next), or a negative code. ze_index_status
+/// says where it stands.
 export fn ze_index_step(e: *Engine) i64 {
     const left = e.indexStep() catch |err| return failed(e, "index_step", err);
     return @intCast(left);

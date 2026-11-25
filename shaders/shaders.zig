@@ -17,8 +17,9 @@ pub const fft_body = fft_src;
 pub const fft = fft_line ++ fft_body;
 /// Pattern preprocessing: load, background, blur, CLAHE, normalize.
 pub const prep = common ++ "\n" ++ @embedFile("prep.wgsl");
-/// Patterns onto the sphere and into harmonics.
-pub const sphere = common ++ "\n" ++ @embedFile("sphere.wgsl");
+/// Patterns onto the sphere and into harmonics (with the FFT it runs along each ring).
+pub const sphere_body = common ++ "\n" ++ fft_src ++ "\n" ++ @embedFile("sphere.wgsl");
+pub const sphere = fft_line ++ sphere_body;
 /// Normalized cross-correlation over SO(3) (with the FFT it runs along its last axis).
 pub const so3_body = common ++ "\n" ++ fft_src ++ "\n" ++ @embedFile("so3.wgsl");
 pub const so3 = fft_line ++ so3_body;

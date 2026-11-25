@@ -111,8 +111,10 @@ pub const Prep = struct {
         if (s < 2) {
             p.radius = @intFromFloat(@max(1.0, @ceil(3 * sigma)));
             p.k[0] = @floatCast(1.0 / (2 * sigma * sigma));
-            self.perPixel("blur_rows", p, &.{ src.at(3), mid.at(2) });
-            self.perPixel("blur_cols", p, &.{ mid.at(3), dst.at(2) });
+            // (four pixels to an invocation: prep.wgsl blur_rows)
+            const n: u64 = p.n;
+            self.perCount("blur_rows", p, n * p.h * ((p.w + 3) / 4), &.{ src.at(3), mid.at(2) });
+            self.perCount("blur_cols", p, n * ((p.h + 3) / 4) * p.w, &.{ mid.at(3), dst.at(2) });
             return;
         }
         // the variances add: the box's, the coarse blur's and the spread's (deviation s)

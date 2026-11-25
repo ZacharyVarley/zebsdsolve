@@ -114,7 +114,7 @@ def index(scan, phases, fit=None, progress=None, **kwargs):
     fit: None indexes with the geometry as given (the file's, or the keywords'); "geometry" first
     fits it by itself (Solver.fit_geometry: the vote for the pattern centre, then the plane of
     source points from there); "pc" fits the pattern centre by voting alone.
-    progress(status) is called after each batch with where indexing stands (Solver.index_status:
+    progress(status) is called after each step (a few batches) with where indexing stands (Solver.index_status:
     sweep, sweeps, done, total, region, accepted); returning False stops early.
     """
     from . import Solver

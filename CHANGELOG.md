@@ -6,6 +6,38 @@ notes.
 
 ## Unreleased
 
+### Changed
+
+- **Indexing is 2.5 to 2.8 times as fast.** Sustained, after a warm-up, with CLAHE on, on an
+  RTX 5070: 65 200 patterns a second of 60 × 60 (from 23 000) and 18 300 of 240 × 320 (from
+  7 400). The orientations are those of 0.2.3 to within 0.024°, their medians from the answers
+  on `scripts/bench.py` within its noise, and the geometry fits are faster too. Nothing
+  is tuned to one GPU; every kernel stays within WebGPU's default limits and binds at most six
+  storage buffers. Where the time went:
+  - The correlation's spectrum transforms two orders m′ at once (one even in k, one odd: the
+    halves of one complex FFT), each workgroup sums for two patterns and four orders m that
+    share the tables' rows, and its accumulators are named variables rather than an array
+    (which the compiler had kept in memory): 62 ms to 23 ms on 4096 patterns of 60 × 60.
+  - The transforms along c and a and the search for the peak run on an (item, b) slab in a
+    workgroup's memory (`a_peak_m`), where the spectrum went to memory three times more: 67 ms
+    to 16 ms. The FFT runs its radix-2 stages in pairs and keeps its points apart in the memory's
+    banks.
+  - Patterns go onto the sphere without the grid being stored: the window's sums, then each
+    ring with its mirror in the equator as one complex FFT, of which only the orders below the
+    bandwidth are kept (`sphere.wgsl` rings): 12.5 ms to 5.8 ms.
+  - The dynamic background's blur takes four pixels an invocation, from a table of its weights:
+    3.9 ms to 1.7 ms, the same result.
+  - Orientation refinement's sums are a kernel of their own; an invocation takes every n-th
+    pixel, so that neighbouring invocations read neighbouring pixels and texels, and a
+    workgroup adds up its own before one fused step: 72 ms to 30 ms on 2048 patterns of
+    240 × 320.
+  - Two batches are in flight: each is recorded and submitted while the device works on the
+    one before, and an `index_step` call indexes a few batches (about 4096 patterns), so
+    `progress` comes after each step rather than each batch. Uploads made meanwhile go through
+    staging buffers the device keeps: a queue write of a whole batch takes an allocation of
+    its own, which held the queue up.
+- **`tests/check_shaders.py`** holds kernels to six storage buffers, as macOS runners have been.
+
 ## 0.2.3 — 2026-11-24
 
 ### Added

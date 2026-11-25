@@ -360,8 +360,9 @@ pub const Settings = struct {
     /// Memory the correlation's spectra may take per dispatch, MiB: how many patterns of a
     /// batch are correlated at once.
     tile_mb: u32 = 256,
-    /// Pixels of a pattern that one GPU invocation adds up in refinement. Fewer: more
-    /// invocations at once, and more partial sums to gather.
+    /// Pixels of a pattern that one GPU invocation adds up in refinement (at most: orientation
+    /// refinement rounds a pattern's share of invocations up to whole workgroups of
+    /// `wg_refine`). Fewer: more invocations at once, and more partial sums to gather.
     refine_pixels: u32 = 64,
     /// Invocations per workgroup of the kernels built on the line FFT (the correlation's
     /// spectrum and transforms) and of refinement's sums: powers of two from 16 to 256. Each

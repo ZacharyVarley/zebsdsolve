@@ -990,7 +990,7 @@ try {
     await ze._queue;
     ze.configure({ static_background: "none", dynamic_background: "none", binning: 1, nlpar: false,
       bandwidth: 16, fit_bandwidth: 8, master_smooth: 0, refine_iters: 1, method: "spherical",
-      sweeps: 2, sweep_method: "same", sweep_bandwidth: 8, roi_x: 0, roi_y: 0, roi_w: 4, roi_h: 2 });
+      sweeps: 2, sweep_method: "same", sweep_bandwidth: 8, roi_x: 0, roi_y: 0, roi_w: 12, roi_h: 8 });
     ${setField("batch", 2)}
     const step = ze.indexStep.bind(ze);
     const nativeStep = ze.x.ze_index_step;
@@ -999,7 +999,7 @@ try {
     ze.x.ze_index_step = (...args) => { nativeCalls++; return nativeStep(...args); };
     ze.indexStep = async () => {
       if (++attempts === 3) {
-        before = { ang: exportText("ang"), ctf: exportText("ctf") };
+        before = { ang: exportText("ang"), ctf: exportText("ctf"), indexed: ze.results().phase.filter((p) => p >= 0).length };
         ze.device.destroy();
         await ze.device.lost;
       }
@@ -1007,7 +1007,7 @@ try {
     };
     ${job("btn-index")}
     return { reason: ze.deviceLost?.reason, attempts, nativeCalls,
-      retained: ze.results().phase.filter((p) => p >= 0).length,
+      retained: ze.results().phase.filter((p) => p >= 0).length, indexed: before?.indexed,
       exportsMatch: !!before && exportText("ang") === before.ang && exportText("ctf") === before.ctf,
       exportsEnabled: !document.getElementById("btn-ang").disabled && !document.getElementById("btn-ctf").disabled,
       indexDisabled: index.disabled, done: document.getElementById("tab-index").dataset.done,
@@ -1015,9 +1015,9 @@ try {
       status: document.getElementById("status").textContent };
   `);
   check("device loss stops indexing and preserves partial ANG and CTF exports",
-    loss.reason === "destroyed" && loss.attempts === 3 && loss.nativeCalls === 2 && loss.retained === 4
+    loss.reason === "destroyed" && loss.attempts === 3 && loss.nativeCalls === 2 && loss.retained > 0 && loss.retained === loss.indexed
     && loss.exportsMatch && loss.exportsEnabled && loss.indexDisabled && loss.done === "0" && loss.loggedBandwidth
-    && /GPU device lost.*4 indexed results retained.*Export before reloading/.test(loss.status), JSON.stringify(loss));
+    && new RegExp(`GPU device lost.*${loss.retained.toLocaleString()} indexed results retained.*Export before reloading`).test(loss.status), JSON.stringify(loss));
 } catch (e) {
   check("the browser run", false, String(e.stack || e));
 } finally {

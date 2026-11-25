@@ -726,11 +726,12 @@ class Solver:
         return float(out[0]), float(out[1])
 
     def index_begin(self):
-        """Start indexing the region of interest; `index_step` then does a batch at a time."""
+        """Start indexing the region of interest; `index_step` then does a few batches at a time."""
         self._check(self._lib.ze_index_begin(self._e), "index")
 
     def index_step(self):
-        """Index the next batch; returns the number of cells left to visit (0: done)."""
+        """Index the next few batches (about 4096 patterns, two batches at a time on the GPU);
+        returns the number of cells left to visit (0: done)."""
         return self._check(self._lib.ze_index_step(self._e), "index")
 
     @property
@@ -754,9 +755,9 @@ class Solver:
         return plan
 
     def index(self, progress=None):
-        """Index the region of interest (settings roi_*, the whole map by default), a batch at a
-        time, in settings.sweeps sweeps. `progress(status)` is called after each batch with
-        `index_status`; return False from it to stop."""
+        """Index the region of interest (settings roi_*, the whole map by default), a few batches
+        at a time, in settings.sweeps sweeps. `progress(status)` is called after each step
+        (index_step) with `index_status`; return False from it to stop."""
         self.index_begin()
         while True:
             left = self.index_step()

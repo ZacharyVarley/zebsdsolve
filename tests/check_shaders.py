@@ -1,8 +1,9 @@
 """Build every compute pipeline of the engine's shader modules on this GPU and report the ones
 its compiler rejects, with the message. Each kernel builds in a process of its own: after one
 internal compiler error, some drivers (Metal on GitHub's M1 runners) fail every later build in
-the same process. Also counts the storage buffers each kernel binds: WebGPU guarantees only 8
-per shader stage. Exit status 1 if any kernel fails either check.
+the same process. Also counts the storage buffers each kernel binds: WebGPU guarantees 8 per
+shader stage, and the engine holds its kernels to 6 (macOS runners have been held to fewer).
+Exit status 1 if any kernel fails either check.
 
     python tests/check_shaders.py        (installed wheel, or a checkout after `zig build`)
 """
@@ -19,12 +20,19 @@ except ImportError:
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "python"))
 
 
+# storage buffers a kernel may bind (WebGPU guarantees 8 per stage; macOS runners have been held
+# to fewer)
+MAX_STORAGE = 6
+
+
 def entries(code):
     return re.findall(r"@compute\s+@workgroup_size\([^)]*\)\s*fn\s+(\w+)", code)
 
 
 def storage_buffers(code):
     """{entry point: the storage buffers it uses, itself or through the functions it calls}."""
+    # (a name in a comment is neither a call nor a use)
+    code = re.sub(r"//[^\n]*", "", code)
     storage = set(re.findall(r"var<storage[^>]*>\s*(\w+)\s*:", code))
     bodies = {}
     for m in re.finditer(r"\bfn\s+(\w+)\s*\(", code):
@@ -82,9 +90,9 @@ def main():
     for name, code in modules.items():
         for entry, bufs in storage_buffers(code).items():
             most = max(most, len(bufs))
-            if len(bufs) > 8:
+            if len(bufs) > MAX_STORAGE:
                 bad += 1
-                print(f"FAIL {name}/{entry}: binds {len(bufs)} storage buffers (WebGPU guarantees 8): {', '.join(sorted(bufs))}")
+                print(f"FAIL {name}/{entry}: binds {len(bufs)} storage buffers (at most {MAX_STORAGE}): {', '.join(sorted(bufs))}")
     for name in modules:
         n = sum(1 for (m, _), rc, _ in results if m == name)
         print(f"{name}: {n} kernels checked")
