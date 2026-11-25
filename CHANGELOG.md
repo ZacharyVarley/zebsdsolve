@@ -6,6 +6,8 @@ notes.
 
 ## Unreleased
 
+## 0.2.5 — 2026-11-25
+
 ### Fixed
 
 - In the app: indexing's rate read as little as a sixteenth of what it was. Since 0.2.4 a step

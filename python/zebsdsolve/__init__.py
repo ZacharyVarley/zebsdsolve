@@ -28,7 +28,7 @@ import numpy as np
 
 from . import _native as _n
 
-__version__ = "0.2.4"
+__version__ = "0.2.5"
 
 _lib = None
 _wgpu = None
