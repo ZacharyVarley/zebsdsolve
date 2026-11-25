@@ -1770,12 +1770,13 @@ async function runIndex() {
       st.resultsGeo = JSON.stringify(st.ze.geometry);
       if (st.mapKind === "overview") setMapKind("ipf");
       const t0 = performance.now();
-      let last = 0, visited = 0, sweepStart = t0, s = null;
+      let last = 0, drawMs = 0, visited = 0, sweepStart = t0, s = null;
       for (;;) {
         const before = st.ze.indexStatus;
         st.indexBandwidth = before.bandwidth;
         s = await st.ze.indexStep();
-        visited += Math.min(before.total - before.done, st.settings.batch);
+        // (a step indexes a few batches; one that ends a sweep took what the sweep had left)
+        visited += s.sweep !== before.sweep ? before.total - before.done : s.done - before.done;
         const now = performance.now();
         const dt = (now - t0) / 1000;
         if (s.sweep !== before.sweep) sweepStart = now;
@@ -1786,7 +1787,17 @@ async function runIndex() {
           ["indexed", `${s.done.toLocaleString()} / ${s.total.toLocaleString()}`], ["rate", `${Math.round(visited / Math.max(dt, 1e-6)).toLocaleString()}/s`],
           ...(eta ? [["left", `~${eta}${s.sweeps > 1 ? " this sweep" : ""}`, "wide"]] : []),
           ["accepted", `${s.accepted.toLocaleString()} / ${s.region.toLocaleString()} (${acceptText()})`, "wide"]]);
-        if (performance.now() - last > 250 || s.left === 0) { st.results = st.ze.results(); drawMap(); last = performance.now(); await sleep(0); }
+        // The map follows, at most every 250 ms and no more often than keeps its drawing to a
+        // twentieth of the time: the device waits while it is drawn (a map of half a million
+        // cells takes some 70 ms).
+        if (performance.now() - last > Math.max(250, 20 * drawMs) || s.left === 0) {
+          const t = performance.now();
+          st.results = st.ze.results();
+          drawMap();
+          last = performance.now();
+          drawMs = last - t;
+          await sleep(0);
+        }
         if (s.left === 0 || st.stop) break;
       }
       st.results = st.ze.results();

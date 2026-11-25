@@ -6,6 +6,15 @@ notes.
 
 ## Unreleased
 
+### Fixed
+
+- In the app: indexing's rate read as little as a sixteenth of what it was. Since 0.2.4 a step
+  indexes several batches, and the readout counted one; it now counts what each step indexed.
+- In the app: the map redrawn during indexing held the device up a quarter of the time on a
+  large scan (750 × 750 patterns of 80 × 80: 16.2 s, now 12.1 s, 46 000 patterns a second in
+  Chrome on an RTX 5070, where the native library takes 9.4 s). It still follows indexing,
+  every 250 ms, or less often where drawing it would take more than a twentieth of the time.
+
 ## 0.2.4 — 2026-11-24
 
 ### Changed
