@@ -6,10 +6,11 @@ notes.
 
 ## Unreleased
 
-## 0.2.6 — 2026-11-25
+## 0.2.7 — 2026-11-25
 
-0.2.5 once more: 0.2.5 reached PyPI, but GitHub failed its release (an upload answered HTTP 500)
-and its site's deployment, so it has neither. Nothing else changed.
+0.2.5 once more. 0.2.5 and 0.2.6 reached PyPI, but during an outage GitHub failed their releases
+(an upload answered HTTP 500) and their site's deployments, so neither has a GitHub Release and
+the site stayed on 0.2.4. Nothing else changed.
 
 ### Fixed
 
