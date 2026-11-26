@@ -6,22 +6,12 @@ notes.
 
 ## Unreleased
 
-### Fixed
+## 0.2.8 — 2026-11-26
 
-- Indexing could keep an earlier batch's results as a later batch's, with no error, where the
-  device read a batch back without having run it: once, on the macOS test runner, dictionary
-  indexing returned the orientations of the spherical search run before it. Each batch's
-  records now carry the batch's number, and a batch whose records come back without it fails
-  (`DeviceSkippedBatch`) instead of being stored.
-- Dictionary indexing gives the device its search a chunk at a time (about 64 MiB of simulated
-  patterns each), not a batch's whole dictionary in one submission, so no one submission keeps
-  a slow device busy for long. It is as fast as before.
-
-## 0.2.7 — 2026-11-25
-
-0.2.5 once more. 0.2.5 and 0.2.6 reached PyPI, but during an outage GitHub failed their releases
-(an upload answered HTTP 500) and their site's deployments, so neither has a GitHub Release and
-the site stayed on 0.2.4. Nothing else changed.
+0.2.5 and 0.2.6 reached PyPI, but during an outage GitHub failed their releases (an upload
+answered HTTP 500) and their site's deployments, so neither has a GitHub Release and the site
+stayed on 0.2.4. 0.2.7, the same again, failed its tests on the macOS runner and was not
+published. 0.2.8 has their fixes and two of its own.
 
 ### Fixed
 
@@ -31,6 +21,14 @@ the site stayed on 0.2.4. Nothing else changed.
   large scan (750 × 750 patterns of 80 × 80: 16.2 s, now 12.1 s, 46 000 patterns a second in
   Chrome on an RTX 5070, where the native library takes 9.4 s). It still follows indexing,
   every 250 ms, or less often where drawing it would take more than a twentieth of the time.
+- Indexing could keep an earlier batch's results as a later batch's, with no error, where the
+  device read a batch back without having run it: once, on the macOS test runner, dictionary
+  indexing returned the orientations of the spherical search run before it. Each batch's
+  records now carry the batch's number, and a batch whose records come back without it fails
+  (`DeviceSkippedBatch`) instead of being stored.
+- Dictionary indexing gives the device its search a chunk at a time (about 64 MiB of simulated
+  patterns each), not a batch's whole dictionary in one submission, so no one submission keeps
+  a slow device busy for long. It is as fast as before.
 
 ## 0.2.4 — 2026-11-24
 
