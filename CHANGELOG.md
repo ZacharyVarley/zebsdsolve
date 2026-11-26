@@ -6,6 +6,17 @@ notes.
 
 ## Unreleased
 
+### Fixed
+
+- Indexing could keep an earlier batch's results as a later batch's, with no error, where the
+  device read a batch back without having run it: once, on the macOS test runner, dictionary
+  indexing returned the orientations of the spherical search run before it. Each batch's
+  records now carry the batch's number, and a batch whose records come back without it fails
+  (`DeviceSkippedBatch`) instead of being stored.
+- Dictionary indexing gives the device its search a chunk at a time (about 64 MiB of simulated
+  patterns each), not a batch's whole dictionary in one submission, so no one submission keeps
+  a slow device busy for long. It is as fast as before.
+
 ## 0.2.7 — 2026-11-25
 
 0.2.5 once more. 0.2.5 and 0.2.6 reached PyPI, but during an outage GitHub failed their releases

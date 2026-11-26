@@ -20,7 +20,7 @@
 //                 from the best point so far, accepted when the next sums score higher, with
 //                 the model's curvature rescaled by how each gain compares with its promise
 //   collect       each item's refined orientation, NCC, NMI and last improving step as one
-//                 record
+//                 record, stamped with its batch's number
 //   nmi           normalized mutual information between each item's pattern and simulation
 //   sim_norm      zero mean and unit norm of simulated patterns under the mask
 //   dict_score    best dictionary entry per pattern, by inner product
@@ -38,7 +38,8 @@ struct DetP {
     grid_x: u32,
     // pixel chunks per item (sums)
     n_chunks: u32,
-    // refine_step: 1 = last call (keep the best, take no step)
+    // refine_step: 1 = last call (keep the best, take no step); collect: the batch's stamp,
+    // written into each record's last slot
     flags: u32,
     n_bins: u32,
     // dictionary: entries in this chunk, index of its first entry, patterns scored
@@ -81,7 +82,7 @@ struct DetP {
 @group(0) @binding(13) var<storage, read_write> dict_best: array<u32>;
 @group(0) @binding(14) var<storage, read> state_in: array<f32>;
 @group(0) @binding(15) var<storage, read> score_in: array<f32>;
-// per item: orientation (w, x, y, z), NCC, NMI, accepted iterations, 0
+// per item: orientation (w, x, y, z), NCC, NMI, the last improving step, the batch's stamp
 @group(0) @binding(16) var<storage, read_write> records: array<f32>;
 // seed: (t, pattern index) per item; spherical peaks (8 floats per item, the orientation first)
 @group(0) @binding(17) var<storage, read> seed_items: array<vec4<f32>>;
@@ -553,7 +554,7 @@ fn collect(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_inde
     records[o + 4u] = state_in[st + 8u];
     records[o + 5u] = score_in[b];
     records[o + 6u] = state_in[st + 19u];
-    records[o + 7u] = 0.0;
+    records[o + 7u] = f32(dp.flags);
 }
 
 // Orientation refinement's step for item b from its sums (laid out as rot_sums returns them).

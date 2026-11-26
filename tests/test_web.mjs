@@ -126,6 +126,13 @@ const job = (id) => `
   document.getElementById("${id}").click();
   for (let i = 0; i < 3000 && (document.getElementById("app").dataset.busy === "1" || i < 3); i++) await new Promise((r) => setTimeout(r, 100));`;
 
+// The engine's pictures land once the GPU has drawn them, on a slow one well after any fixed
+// wait: changedFrom(look, from) waits until look() differs from what it was (up to 8 s; false
+// if it never does), steadyOf(look) until it stops changing.
+const PICTURES = `
+  const changedFrom = async (look, from) => { for (let i = 0; i < 80; i++) { if (look() !== from) return true; await new Promise((r) => setTimeout(r, 100)); } return look() !== from; };
+  const steadyOf = async (look) => { let a = look(); for (let i = 0; i < 60; i++) { await new Promise((r) => setTimeout(r, 150)); const b = look(); if (b === a) return b; a = b; } return a; };`;
+
 try {
   const ready = await evaluate(`
     // the page may not have loaded yet
@@ -653,11 +660,16 @@ try {
     const inkOf = (c) => { const d = c.getContext("2d").getImageData(0, 0, c.width, c.height).data; let h = 0, n = 0; for (let i = 0; i < d.length; i += 4) { h = (h * 31 + d[i]) | 0; if (d[i] > 40) n++; } return [h, n]; };
     const shown = !mc.hidden && mc.width > 100 && document.getElementById("master-src").value === "-1";
     const dock = document.querySelector("#dock-kind [aria-pressed=true]").dataset.dock;
+    ${PICTURES}
     const views = {};
+    let prev = null;
     for (const p of ["globe", "lambert", "stereographic", "joint"]) {
       document.querySelector('#view-mode [data-view="' + p + '"]').click();
       await new Promise((r) => setTimeout(r, 500));
+      if (prev !== null) await changedFrom(() => inkOf(mc)[0], prev);
+      await steadyOf(() => inkOf(mc)[0]);
       views[p] = inkOf(mc);
+      prev = views[p][0];
     }
     document.querySelector('#view-mode [data-view="globe"]').click();
     const distinct = new Set(Object.values(views).map((v) => v[0])).size;
@@ -678,29 +690,29 @@ try {
     const mc = document.querySelector("#master-well canvas");
     const inkOf = (c) => { const d = c.getContext("2d").getImageData(0, 0, c.width, c.height).data; let h = 0; for (let i = 0; i < d.length; i += 4) h = (h * 31 + d[i]) | 0; return h; };
     const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+    ${PICTURES}
+    const look = () => inkOf(mc);
     document.querySelector('#view-mode [data-view="lambert"]').click();
     await wait(500);
     const r = mc.getBoundingClientRect();
     const drag = (el, x0, y0, x1, y1) => { const ev = (t, x, y) => el.dispatchEvent(new PointerEvent(t, { clientX: x, clientY: y, button: 0, pointerId: 1, bubbles: true })); ev("pointerdown", x0, y0); ev("pointermove", (x0 + x1) / 2, (y0 + y1) / 2); ev("pointermove", x1, y1); ev("pointerup", x1, y1); };
-    const before = inkOf(mc);
+    const before = await steadyOf(look);
     drag(mc, r.left + r.width * 0.3, r.top + r.height * 0.5, r.left + r.width * 0.35, r.top + r.height * 0.4);
-    await wait(500);
-    const panned = inkOf(mc) !== before;
+    const panned = await changedFrom(look, before);
     mc.dispatchEvent(new WheelEvent("wheel", { deltaY: -200, ctrlKey: true, bubbles: true, cancelable: true }));
-    await wait(500);
-    const spun = inkOf(mc) !== before;
+    const spun = await changedFrom(look, before);
+    const flat = await steadyOf(look);
     document.querySelector('#view-mode [data-view="globe"]').click();
-    await wait(400);
+    await changedFrom(look, flat);
     const link = document.getElementById("cell-link");
     link.checked = true;
     link.dispatchEvent(new Event("change"));
     await wait(400);
-    const g0 = inkOf(mc);
+    const g0 = await steadyOf(look);
     const cc = document.querySelector("#cell-well canvas");
     const cr = cc.getBoundingClientRect();
     drag(cc, cr.left + cr.width * 0.5, cr.top + cr.height * 0.5, cr.left + cr.width * 0.62, cr.top + cr.height * 0.45);
-    await wait(600);
-    const linked = inkOf(mc) !== g0;
+    const linked = await changedFrom(look, g0);
     link.checked = false;
     link.dispatchEvent(new Event("change"));
     document.body.focus();
@@ -727,15 +739,20 @@ try {
     document.querySelector('#master-src').value = "-1";
     document.querySelector('#master-src').dispatchEvent(new Event("change"));
     await new Promise((r) => setTimeout(r, 400));
-    const all = inkOf(mc);
+    ${PICTURES}
+    const look = () => inkOf(mc);
+    const all = await steadyOf(look);
     const bar = document.querySelector("#energy-e .bar.pickable");
     bar.dispatchEvent(new MouseEvent("click", { bubbles: true }));
     await new Promise((r) => setTimeout(r, 500));
-    const bin = { value: (document.querySelector("#energy-e .bar.picked") || { dataset: { bin: "" } }).dataset.bin, other: inkOf(mc) !== all, marked: !!document.querySelector("#energy-e .bar.picked") };
+    const binOther = await changedFrom(look, all);
+    const bin = { value: (document.querySelector("#energy-e .bar.picked") || { dataset: { bin: "" } }).dataset.bin, other: binOther, marked: !!document.querySelector("#energy-e .bar.picked") };
+    const binPicture = await steadyOf(look);
     document.querySelector("#energy-e .bar.picked").dispatchEvent(new MouseEvent("click", { bubbles: true }));
     document.querySelector('#crystal-sites .site[data-site="1"] .sym').click();
     await new Promise((r) => setTimeout(r, 500));
-    const site = { value: String([...document.getElementById("master-site").children].findIndex((b) => b.getAttribute("aria-pressed") === "true") - 1), binBack: !document.querySelector("#energy-e .bar.picked"), other: inkOf(mc) !== all };
+    await changedFrom(look, binPicture);
+    const site = { value: String([...document.getElementById("master-site").children].findIndex((b) => b.getAttribute("aria-pressed") === "true") - 1), binBack: !document.querySelector("#energy-e .bar.picked"), other: await changedFrom(look, all) };
     document.querySelector('#crystal-sites .site[data-site="1"] .sym').click();
     const b = document.querySelectorAll('#crystal-sites .site[data-site="0"] input')[1];
     b.value = "0.8";
@@ -803,18 +820,18 @@ try {
     gc.dispatchEvent(new WheelEvent("wheel", { deltaY: 300, bubbles: true, cancelable: true }));
     await wait(300);
     await settled();
+    ${PICTURES}
     const cell = document.querySelector("#cell-well canvas");
-    const c1 = inkOf(cell);
+    const c1 = await steadyOf(() => inkOf(cell));
     const sup = document.getElementById("cell-super");
     sup.checked = true;
     sup.dispatchEvent(new Event("change"));
-    await wait(700);
-    const c3 = inkOf(cell);
+    const cellChanged = await changedFrom(() => inkOf(cell), c1);
     const atoms3 = window.ze.cellInfo(3).atoms, atoms1 = window.ze.cellInfo(1).atoms;
     sup.checked = false;
     sup.dispatchEvent(new Event("change"));
     await wait(300);
-    return { n0, off, on, sameZoom: left === right, cellChanged: c3 !== c1, atoms1, atoms3 };`);
+    return { n0, off, on, sameZoom: left === right, cellChanged, atoms1, atoms3 };`);
   check("a master pattern can be switched off and on without removing it", more.off.engine === more.n0 - 1 && more.off.listed === more.n0 && more.off.dimmed && more.on.engine === more.n0 && more.on.back
     && more.on.raced.errors === 0 && more.on.raced.engine === more.n0, JSON.stringify(more));
   check("the globe zooms about its middle, wherever the pointer is", more.sameZoom, "");
@@ -827,17 +844,19 @@ try {
     await wait(400);
     const mc = document.querySelector("#master-well canvas");
     const inkOf = (c) => { const d = c.getContext("2d").getImageData(0, 0, c.width, c.height).data; let h = 0; for (let i = 0; i < d.length; i += 4) h = (h * 31 + d[i]) | 0; return h; };
-    const before = inkOf(mc);
+    ${PICTURES}
+    const look = () => inkOf(mc);
+    const before = await steadyOf(look);
     const st = document.getElementById("view-stereo");
     st.checked = true;
     st.dispatchEvent(new Event("input"));
     await wait(700);
-    const on = { changed: inkOf(mc) !== before, bar: !document.getElementById("stereo-bar").hidden, labels: document.getElementById("stereo-dist-out").textContent + "/" + document.getElementById("stereo-ipd-out").textContent, labelsOver: document.querySelectorAll("#master-well .axis-label").length };
+    const on = { changed: await changedFrom(look, before), bar: !document.getElementById("stereo-bar").hidden, labels: document.getElementById("stereo-dist-out").textContent + "/" + document.getElementById("stereo-ipd-out").textContent, labelsOver: document.querySelectorAll("#master-well .axis-label").length };
     const ipd = document.getElementById("stereo-ipd");
     ipd.value = "70";
     ipd.dispatchEvent(new Event("input"));
     await wait(600);
-    const wider = inkOf(mc) !== before;
+    const wider = await changedFrom(look, before);
     st.checked = false;
     st.dispatchEvent(new Event("input"));
     await wait(500);
@@ -865,21 +884,23 @@ try {
     src.value = "-1";
     src.dispatchEvent(new Event("change"));
     await wait(500);
+    ${PICTURES}
+    const look = () => inkOf(mc);
     const non = { pressed: pressed(), diffOn: !document.querySelector('#view-half [data-half="diff"]').disabled };
-    const both = inkOf(mc);
+    const both = await steadyOf(look);
     document.querySelector('#view-half [data-half="north"]').click();
-    await wait(400);
-    const north = inkOf(mc);
+    await changedFrom(look, both);
+    const north = await steadyOf(look);
     document.querySelector('#view-half [data-half="diff"]').click();
-    await wait(400);
-    const diff = inkOf(mc);
+    await changedFrom(look, north);
+    const diff = await steadyOf(look);
     document.querySelector('#view-half [data-half="both"]').click();
-    await wait(400);
+    await changedFrom(look, diff);
+    await steadyOf(look);
     const r = mc.getBoundingClientRect();
     mc.dispatchEvent(new WheelEvent("wheel", { deltaY: -500, clientX: r.left + r.width * 0.3, clientY: r.top + r.height * 0.5, bubbles: true, cancelable: true }));
-    await wait(500);
-    const zoomed = inkOf(mc);
-    return { centro, non, distinct: new Set([both, north, diff]).size, zoomed: zoomed !== both };`);
+    const zoomed = await changedFrom(look, both);
+    return { centro, non, distinct: new Set([both, north, diff]).size, zoomed };`);
   check("a crystal with a centre of symmetry shows one hemisphere, one without both and their difference; the projections zoom", halves.centro.pressed === "north" && halves.centro.diffOff && halves.non.pressed === "both" && halves.non.diffOn && halves.distinct === 3 && halves.zoomed, JSON.stringify(halves));
   check("a site's B and the free lattice parameters can be typed in, the tied ones following", Math.abs(parts.b - 0.8) < 1e-9 && parts.cell[0] === 3.2 && parts.cell[1] === 3.2 && parts.cell[5] === 120 && parts.free === "true,false,true,false,false,false" && parts.reading,
     `B ${parts.b} Å², cell ${parts.cell.map((v) => +v.toFixed(4)).join(" ")}`);
